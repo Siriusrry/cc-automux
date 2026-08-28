@@ -1,0 +1,5 @@
+* { box-sizing: border-box; }
+
+/* Safari can otherwise form a scroll-anchoring feedback loop with animated
+   content after a flick-scroll settles. */
+html, body { overflow-anchor: none; }

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>cc-auto-mode-shim · logs</title>
+<link rel="stylesheet" href="/admin/assets/shared.css" />
+<link rel="stylesheet" href="/admin/assets/logs.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="brand">
+        <img class="glyph" src="/admin/assets/product-mascot.png" alt="Product mascot" />
+        <div class="title">
+          <h1>cc-auto-mode-shim</h1>
+          <div class="sub">logs · <b>~/Library/Logs/cc-auto-mode-shim</b></div>
+        </div>
+      </div>
+      <a class="back" href="/admin">← Control desk</a>
+    </header>
+
+    <div class="toolbar">
+      <div class="tabs" role="group" aria-label="Log stream">
+        <button aria-pressed="true"  data-stream="all">All <span class="c" id="cAll">0</span></button>
+        <button aria-pressed="false" data-stream="stdout">stdout <span class="c" id="cOut">0</span></button>
+        <button aria-pressed="false" data-stream="stderr">stderr <span class="c" id="cErr">0</span></button>
+      </div>
+      <div class="search">
+        <svg viewBox="0 0 16 16" fill="none" stroke-width="1.6"><circle cx="7" cy="7" r="5"/><path d="M11 11l3 3"/></svg>
+        <input id="q" type="text" placeholder="filter lines…" aria-label="Filter log lines" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" />
+      </div>
+      <label class="follow"><span>Follow</span>
+        <span class="switch"><input id="follow" type="checkbox" checked /><span class="track"></span></span>
+      </label>
+    </div>
+
+    <div class="console">
+      <div class="console-head">
+        <span>log stream <span class="conn" id="conn">· live</span></span>
+        <span class="dots"><i style="background:var(--alert)"></i><i style="background:var(--signal)"></i><i style="background:var(--flow)"></i></span>
+      </div>
+      <div class="stream" id="stream">
+        <div id="rows"></div>
+        <div class="empty" id="empty">
+          <p class="empty-h" id="emptyH">Waiting for log lines</p>
+          <p class="empty-s" id="emptyS">Live lines appear here as the shim handles traffic.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script src="/admin/assets/logs.js"></script>
+</body>
+</html>

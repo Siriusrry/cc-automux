@@ -1,0 +1,25 @@
+# Build and test outputs
+/dist/
+*.test
+/coverage/
+/coverage.out
+/coverage.html
+*.coverprofile
+*.prof
+*.pprof
+
+# Product-generated local files
+.cc-auto.bak
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

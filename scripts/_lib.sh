@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+LABEL="com.Siriusrry.cc-auto-mode-shim"
+APP_NAME="cc-auto-mode-shim"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_DIR="$HOME/Library/Application Support/$APP_NAME"
+BIN_DIR="$APP_DIR/bin"
+BIN_PATH="$BIN_DIR/$APP_NAME"
+# Runtime config file. Mirrors the binary's path resolution
+# (internal/shim/config_store.go runtimeConfigPath): CC_AUTO_SHIM_CONFIG
+# overrides the location and must be an absolute path; otherwise it defaults to
+# APP_DIR/config.json. Leading/trailing whitespace is trimmed first, mirroring
+# the binary's strings.TrimSpace, so a padded env value resolves identically.
+CONFIG_PATH="$APP_DIR/config.json"
+_cfg="${CC_AUTO_SHIM_CONFIG:-}"
+_cfg="${_cfg#"${_cfg%%[![:space:]]*}"}"
+_cfg="${_cfg%"${_cfg##*[![:space:]]}"}"
+if [[ -n "$_cfg" ]]; then
+  if [[ "$_cfg" != /* ]]; then
+    echo "CC_AUTO_SHIM_CONFIG must be an absolute path, got: $_cfg" >&2
+    exit 1
+  fi
+  CONFIG_PATH="$_cfg"
+fi
+# Normalize the env var to the trimmed value so render_plist writes the same
+# path the binary would resolve. Empty when no override was set.
+CC_AUTO_SHIM_CONFIG="$_cfg"
+unset _cfg
+LOG_DIR="$HOME/Library/Logs/$APP_NAME"
+STDOUT_LOG="$LOG_DIR/stdout.log"
+STDERR_LOG="$LOG_DIR/stderr.log"
+PLIST_DIR="$HOME/Library/LaunchAgents"
+PLIST_PATH="$PLIST_DIR/$LABEL.plist"
+TEMPLATE_PATH="$REPO_ROOT/packaging/macos/launch-agent.plist.template"
+LAUNCH_DOMAIN="gui/$(id -u)"
+SERVICE_NAME="$LAUNCH_DOMAIN/$LABEL"
+DEFAULT_LOG_MAX_MB="100"
+DEFAULT_PORT="8765"
+DEFAULT_CLIPROXY_UPSTREAM="https://127.0.0.1:8317"
+
+validate_port() {
+  local port="$1"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "Port must be a number, got: $port" >&2
+    return 1
+  fi
+  if (( port < 1 || port > 65535 )); then
+    echo "Port must be between 1 and 65535, got: $port" >&2
+    return 1
+  fi
+}
+
+validate_upstream() {
+  local upstream="$1"
+  case "$upstream" in
+    http://*|https://*) ;;
+    *)
+      echo "CLIProxyAPI upstream must start with http:// or https://, got: $upstream" >&2
+      return 1
+      ;;
+  esac
+}
+
+validate_log_max_mb() {
+  local mb="$1"
+  if [[ ! "$mb" =~ ^[0-9]+$ ]]; then
+    echo "Log size must be a number of MB, got: $mb" >&2
+    return 1
+  fi
+  if (( mb < 1 )); then
+    echo "Log size must be at least 1 MB, got: $mb" >&2
+    return 1
+  fi
+}
+
+mb_to_bytes() {
+  local mb="$1"
+  printf '%s' $((mb * 1024 * 1024))
+}
+
+xml_escape() {
+  local value="$1"
+  value=${value//&/&amp;}
+  value=${value//</&lt;}
+  value=${value//>/&gt;}
+  value=${value//\"/&quot;}
+  value=${value//\'/&apos;}
+  printf '%s' "$value"
+}
+
+render_plist() {
+  local listen_addr="$1"
+  local cliproxy_upstream="$2"
+  local log_max_bytes="$3"
+  local rendered
+  local config_env=""
+
+  if [[ ! -f "$TEMPLATE_PATH" ]]; then
+    echo "Missing launchd template: $TEMPLATE_PATH" >&2
+    return 1
+  fi
+
+  # Only carry CC_AUTO_SHIM_CONFIG into the LaunchAgent env when an override was
+  # set at install time; otherwise the binary uses its own default path and the
+  # placeholder collapses to nothing.
+  if [[ -n "${CC_AUTO_SHIM_CONFIG:-}" ]]; then
+    config_env="
+    <key>CC_AUTO_SHIM_CONFIG</key>
+    <string>$(xml_escape "$CONFIG_PATH")</string>
+"
+  fi
+
+  rendered="$(<"$TEMPLATE_PATH")"
+  rendered=${rendered//__LABEL__/$(xml_escape "$LABEL")}
+  rendered=${rendered//__BINARY_PATH__/$(xml_escape "$BIN_PATH")}
+  rendered=${rendered//__WORKING_DIRECTORY__/$(xml_escape "$APP_DIR")}
+  rendered=${rendered//__STDOUT_LOG__/$(xml_escape "$STDOUT_LOG")}
+  rendered=${rendered//__STDERR_LOG__/$(xml_escape "$STDERR_LOG")}
+  rendered=${rendered//__LISTEN_ADDR__/$(xml_escape "$listen_addr")}
+  rendered=${rendered//__CLIPROXY_UPSTREAM__/$(xml_escape "$cliproxy_upstream")}
+  rendered=${rendered//__LOG_MAX_BYTES__/$(xml_escape "$log_max_bytes")}
+  rendered=${rendered//__CONFIG_ENV__/$config_env}
+
+  mkdir -p "$PLIST_DIR"
+  printf '%s\n' "$rendered" > "$PLIST_PATH"
+  chmod 600 "$PLIST_PATH"
+  plutil -lint "$PLIST_PATH" >/dev/null
+}
+
+start_launch_agent() {
+  if [[ ! -f "$PLIST_PATH" ]]; then
+    echo "LaunchAgent is not installed: $PLIST_PATH" >&2
+    echo "Run ./scripts/install.sh first." >&2
+    return 1
+  fi
+  launchctl bootstrap "$LAUNCH_DOMAIN" "$PLIST_PATH" 2>/dev/null || true
+  launchctl kickstart -k "$SERVICE_NAME"
+}
+
+stop_launch_agent() {
+  if [[ -f "$PLIST_PATH" ]]; then
+    launchctl bootout "$LAUNCH_DOMAIN" "$PLIST_PATH" 2>/dev/null || true
+  else
+    launchctl bootout "$SERVICE_NAME" 2>/dev/null || true
+  fi
+}
+
+# Move a file or directory to the macOS Trash via Finder, so removed items keep
+# "Put Back" support instead of being unrecoverably deleted. No-op when the
+# target is absent. Finder resolves Trash name collisions on its own. When
+# Finder/osascript is unavailable (headless/SSH/no GUI session) the delete is
+# detected as failed and we fall back to a permanent rm -rf with a warning, so
+# uninstall always completes instead of aborting mid-sequence under set -e.
+trash() {
+  local target="$1"
+  [[ -e "$target" ]] || return 0
+  # Escape backslash first, then double quote, before interpolating the path
+  # into the AppleScript string literal.
+  local escaped="$target"
+  escaped=${escaped//\\/\\\\}
+  escaped=${escaped//\"/\\\"}
+  if osascript -e "tell application \"Finder\" to delete (POSIX file \"$escaped\" as alias)" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "Warning: could not move to Trash via Finder (no GUI session?); removing permanently: $target" >&2
+  rm -rf "$target"
+}
+
+print_base_urls() {
+  local port="$1"
+  cat <<EOF
+
+Claude Code base URLs:
+
+AnyRouter:
+  http://127.0.0.1:$port/any
+
+CPA:
+  http://127.0.0.1:$port/cpa
+
+Config desk:
+  http://127.0.0.1:$port/admin
+EOF
+}
