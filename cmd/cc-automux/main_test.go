@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/Siriusrry/cc-automux/internal/config"
 )
 
 func TestHandleArgsVersion(t *testing.T) {
@@ -48,6 +51,46 @@ func TestHandleArgsRejectsOtherArguments(t *testing.T) {
 		}
 		if got, want := stderr.String(), "Usage: cc-automux [--version]\n"; got != want {
 			t.Fatalf("handleArgs(%q) stderr = %q, want %q", args, got, want)
+		}
+	}
+}
+
+func TestRunInitPromptsAndPreservesExistingConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	var stdout, stderr bytes.Buffer
+	if got := runInit([]string{"--config", path}, strings.NewReader("visible-management-key\n"), &stdout, &stderr); got != 0 {
+		t.Fatalf("runInit(prompt) exit = %d, stderr %q", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "input is visible") || !strings.Contains(stdout.String(), "Initialized configuration") {
+		t.Fatalf("prompt output = %q", stdout.String())
+	}
+	stdout.Reset()
+	if got := runInit([]string{"--config", path, "--generate-management-key"}, strings.NewReader(""), &stdout, &stderr); got != 0 {
+		t.Fatalf("runInit(existing) exit = %d", got)
+	}
+	if !strings.Contains(stdout.String(), "already exists") {
+		t.Fatalf("existing init output = %q", stdout.String())
+	}
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil || loaded.Auth.ManagementKey != "visible-management-key" {
+		t.Fatalf("existing config = %#v, err %v", loaded, err)
+	}
+}
+
+func TestRunInitRejectsInvalidServiceArguments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for _, args := range [][]string{
+		{"--config", path, "--listen-addr", ""},
+		{"--config", path, "--log-max-bytes", "0"},
+		{"--config", path, "--log-max-bytes", "-1"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if got := runInit(args, strings.NewReader("management-key\n"), &stdout, &stderr); got != 2 {
+			t.Fatalf("runInit(%q) exit = %d, stderr %q", args, got, stderr.String())
 		}
 	}
 }

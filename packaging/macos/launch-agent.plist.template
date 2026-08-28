@@ -22,20 +22,7 @@
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CC_AUTOMUX_LISTEN</key>
-    <string>__LISTEN_ADDR__</string>
-
-    <key>CC_AUTOMUX_CLIPROXY_UPSTREAM</key>
-    <string>__CLIPROXY_UPSTREAM__</string>
 __CONFIG_ENV__
-    <key>CC_AUTOMUX_STDOUT_LOG</key>
-    <string>__STDOUT_LOG__</string>
-
-    <key>CC_AUTOMUX_STDERR_LOG</key>
-    <string>__STDERR_LOG__</string>
-
-    <key>CC_AUTOMUX_LOG_MAX_BYTES</key>
-    <string>__LOG_MAX_BYTES__</string>
   </dict>
 
   <key>StandardOutPath</key>

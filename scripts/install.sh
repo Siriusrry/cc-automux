@@ -6,26 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
-# Non-interactive install. Each setting is taken from an env var, falling back
-# to its default; override any subset on (re)install, e.g.:
-#   PORT=9000 CLIPROXY_UPSTREAM=https://127.0.0.1:8317 LOG_MAX_MB=200 ./scripts/install.sh
-# These three feed the LaunchAgent bootstrap env that render_plist writes
-# (CC_AUTOMUX_LISTEN / CC_AUTOMUX_CLIPROXY_UPSTREAM / CC_AUTOMUX_LOG_MAX_BYTES)
-# and only seed config.json on its first launch; once config.json exists the
-# file wins and these are ignored.
-PORT="${PORT:-$DEFAULT_PORT}"
-validate_port "$PORT"
-
-CLIPROXY_UPSTREAM="${CLIPROXY_UPSTREAM:-$DEFAULT_CLIPROXY_UPSTREAM}"
-validate_upstream "$CLIPROXY_UPSTREAM"
-
-LOG_MAX_MB="${LOG_MAX_MB:-$DEFAULT_LOG_MAX_MB}"
-validate_log_max_mb "$LOG_MAX_MB"
-LOG_MAX_BYTES="$(mb_to_bytes "$LOG_MAX_MB")"
-
-LISTEN_ADDR="127.0.0.1:$PORT"
 DIST_BIN="$REPO_ROOT/dist/cc-automux"
-
 if [[ ! -x "$DIST_BIN" ]]; then
   cat >&2 <<EOF
 Missing built binary:
@@ -37,20 +18,41 @@ EOF
   exit 1
 fi
 
-mkdir -p "$BIN_DIR" "$LOG_DIR" "$PLIST_DIR"
-install -m 755 "$DIST_BIN" "$BIN_PATH"
-touch "$STDOUT_LOG" "$STDERR_LOG"
-chmod 644 "$STDOUT_LOG" "$STDERR_LOG"
-
-# The binary self-seeds config.json on first launch from the LaunchAgent env
-# rendered below (CC_AUTOMUX_LISTEN / CC_AUTOMUX_CLIPROXY_UPSTREAM); the script
-# does not write the config itself. Record whether a persisted config already
-# exists (before the service starts) so the messaging below is accurate.
 CONFIG_EXISTED=0
 [[ -f "$CONFIG_PATH" ]] && CONFIG_EXISTED=1
 
-render_plist "$LISTEN_ADDR" "$CLIPROXY_UPSTREAM" "$LOG_MAX_BYTES"
+# The installer does not construct JSON or copy credentials into an
+# environment. Initialization is delegated to the binary's shared config core,
+# which prompts visibly on first creation and leaves an existing config/key
+# untouched.
+if (( CONFIG_EXISTED )); then
+  "$DIST_BIN" init --config "$CONFIG_PATH"
+else
+  printf 'Generate a high-strength management key automatically? [y/N]: '
+  if ! IFS= read -r generate_key; then
+    echo "Could not read management key choice." >&2
+    exit 1
+  fi
+  case "$generate_key" in
+    y|Y|yes|YES|Yes)
+      "$DIST_BIN" init --generate-management-key --config "$CONFIG_PATH"
+      ;;
+    *)
+      "$DIST_BIN" init --config "$CONFIG_PATH"
+      ;;
+  esac
+fi
+
+# Only stop or replace the installed service after initialization has
+# succeeded. A rejected key or invalid existing configuration therefore leaves
+# the currently installed process untouched.
 stop_launch_agent
+mkdir -p "$BIN_DIR" "$LOG_DIR" "$PLIST_DIR"
+install -m 755 "$DIST_BIN" "$BIN_PATH"
+touch "$STDOUT_LOG" "$STDERR_LOG"
+chmod 600 "$STDOUT_LOG" "$STDERR_LOG"
+render_plist
+
 start_launch_agent
 
 cat <<EOF
@@ -69,44 +71,29 @@ Config:
 Logs:
   $STDOUT_LOG
   $STDERR_LOG
-  max size: ${LOG_MAX_MB} MB each
 EOF
-
 if (( CONFIG_EXISTED )); then
   cat <<EOF
 
-Existing config kept:
+Existing config kept unchanged:
   $CONFIG_PATH
-
-Install only refreshed the binary, the LaunchAgent, and its bootstrap env. The
-existing config file stays authoritative for listen_addr and upstreams; if its
-port differs from $PORT, use that port for the URLs below.
 EOF
 else
   cat <<EOF
 
-No config existed, so CC AutoMux seeds it from the values above on first launch:
-  $CONFIG_PATH
+A new v1 configuration was initialized through cc-automux init.
+Use the management API with the management key you just set.
 EOF
-  print_base_urls "$PORT"
 fi
 
 cat <<EOF
 
-Configure CC AutoMux in the web config desk:
-  http://127.0.0.1:$PORT/admin
+Management API:
+  http://127.0.0.1:<configured-port>/api/v1/status
 
-Most settings (accounts, keys, routing, classifier target, enable switch) apply
-live from /admin without a restart. Changing the listen port or the max log size
-from /admin now restarts CC AutoMux automatically (in place, same PID) to apply it.
-Re-running install.sh is only needed to change the LaunchAgent bootstrap env or
-to reinstall the binary.
-
-Reinstall non-interactively (override any subset; unset values keep defaults):
-  PORT=$PORT CLIPROXY_UPSTREAM=$CLIPROXY_UPSTREAM LOG_MAX_MB=$LOG_MAX_MB ./scripts/install.sh
-
-First time? Open http://127.0.0.1:$PORT/admin and add your AnyRouter account(s)
-and/or CPA key before pointing Claude Code at CC AutoMux.
+The service is loopback-only. Configure providers through:
+  GET/PUT  /api/v1/config
+  GET/POST /api/v1/providers
 EOF
 
 cat <<EOF

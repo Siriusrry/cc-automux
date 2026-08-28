@@ -8,11 +8,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$HOME/Library/Application Support/$APP_NAME"
 BIN_DIR="$APP_DIR/bin"
 BIN_PATH="$BIN_DIR/$APP_NAME"
-# Runtime config file. Mirrors the binary's path resolution
-# (internal/shim/config_store.go runtimeConfigPath): CC_AUTOMUX_CONFIG
-# overrides the location and must be an absolute path; otherwise it defaults to
-# APP_DIR/config.json. Leading/trailing whitespace is trimmed first, mirroring
-# the binary's strings.TrimSpace, so a padded env value resolves identically.
+# Runtime config file. Mirrors the binary's v1 path resolution:
+# CC_AUTOMUX_CONFIG must be an absolute path when set; otherwise the macOS
+# platform-standard location is APP_DIR/config.json. Leading/trailing
+# whitespace is trimmed first, mirroring the binary's strings.TrimSpace, so a
+# padded env value resolves identically.
 CONFIG_PATH="$APP_DIR/config.json"
 _cfg="${CC_AUTOMUX_CONFIG:-}"
 _cfg="${_cfg#"${_cfg%%[![:space:]]*}"}"
@@ -36,50 +36,6 @@ PLIST_PATH="$PLIST_DIR/$LABEL.plist"
 TEMPLATE_PATH="$REPO_ROOT/packaging/macos/launch-agent.plist.template"
 LAUNCH_DOMAIN="gui/$(id -u)"
 SERVICE_NAME="$LAUNCH_DOMAIN/$LABEL"
-DEFAULT_LOG_MAX_MB="100"
-DEFAULT_PORT="8765"
-DEFAULT_CLIPROXY_UPSTREAM="https://127.0.0.1:8317"
-
-validate_port() {
-  local port="$1"
-  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-    echo "Port must be a number, got: $port" >&2
-    return 1
-  fi
-  if (( port < 1 || port > 65535 )); then
-    echo "Port must be between 1 and 65535, got: $port" >&2
-    return 1
-  fi
-}
-
-validate_upstream() {
-  local upstream="$1"
-  case "$upstream" in
-    http://*|https://*) ;;
-    *)
-      echo "CLIProxyAPI upstream must start with http:// or https://, got: $upstream" >&2
-      return 1
-      ;;
-  esac
-}
-
-validate_log_max_mb() {
-  local mb="$1"
-  if [[ ! "$mb" =~ ^[0-9]+$ ]]; then
-    echo "Log size must be a number of MB, got: $mb" >&2
-    return 1
-  fi
-  if (( mb < 1 )); then
-    echo "Log size must be at least 1 MB, got: $mb" >&2
-    return 1
-  fi
-}
-
-mb_to_bytes() {
-  local mb="$1"
-  printf '%s' $((mb * 1024 * 1024))
-}
-
 xml_escape() {
   local value="$1"
   value=${value//&/&amp;}
@@ -91,9 +47,6 @@ xml_escape() {
 }
 
 render_plist() {
-  local listen_addr="$1"
-  local cliproxy_upstream="$2"
-  local log_max_bytes="$3"
   local rendered
   local config_env=""
 
@@ -118,9 +71,6 @@ render_plist() {
   rendered=${rendered//__WORKING_DIRECTORY__/$(xml_escape "$APP_DIR")}
   rendered=${rendered//__STDOUT_LOG__/$(xml_escape "$STDOUT_LOG")}
   rendered=${rendered//__STDERR_LOG__/$(xml_escape "$STDERR_LOG")}
-  rendered=${rendered//__LISTEN_ADDR__/$(xml_escape "$listen_addr")}
-  rendered=${rendered//__CLIPROXY_UPSTREAM__/$(xml_escape "$cliproxy_upstream")}
-  rendered=${rendered//__LOG_MAX_BYTES__/$(xml_escape "$log_max_bytes")}
   rendered=${rendered//__CONFIG_ENV__/$config_env}
 
   mkdir -p "$PLIST_DIR"
@@ -166,21 +116,4 @@ trash() {
   fi
   echo "Warning: could not move to Trash via Finder (no GUI session?); removing permanently: $target" >&2
   rm -rf "$target"
-}
-
-print_base_urls() {
-  local port="$1"
-  cat <<EOF
-
-Claude Code base URLs:
-
-AnyRouter:
-  http://127.0.0.1:$port/any
-
-CPA:
-  http://127.0.0.1:$port/cpa
-
-Config desk:
-  http://127.0.0.1:$port/admin
-EOF
 }
