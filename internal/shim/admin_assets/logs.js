@@ -17,6 +17,7 @@
   const conn = document.getElementById('conn');
   const qInput = document.getElementById('q');
   const followInput = document.getElementById('follow');
+  const versionSub = document.getElementById('versionSub');
   const tabs = Array.from(document.querySelectorAll('.tabs button'));
   const counters = { all: document.getElementById('cAll'), stdout: document.getElementById('cOut'), stderr: document.getElementById('cErr') };
 
@@ -72,11 +73,11 @@
       emptyH.textContent = 'No matching lines';
       emptyS.innerHTML = 'No buffered lines match this stream and filter. Clear the filter or switch tabs to see more.';
     } else if (connected === false){
-      emptyH.textContent = 'Can’t reach the shim';
+      emptyH.textContent = 'Can’t reach CC AutoMux';
       emptyS.innerHTML = 'The log endpoint is unreachable right now. Retrying automatically — buffered lines reappear once it is back.';
     } else {
       emptyH.textContent = 'Waiting for log lines';
-      emptyS.innerHTML = 'Live lines appear as the shim handles traffic. Only lines produced after start-up show here — full history is in <code>~/Library/Logs/cc-auto-mode-shim</code> or <code>./scripts/logs.sh</code>.';
+      emptyS.innerHTML = 'Live lines appear as CC AutoMux handles traffic. Only lines produced after start-up show here — full history is in <code>~/Library/Logs/cc-automux</code> or <code>./scripts/logs.sh</code>.';
     }
   }
 
@@ -215,8 +216,16 @@
       .finally(() => { inFlight = false; });
   }
 
+  function loadVersion(){
+    fetch('/admin/status')
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(status => { versionSub.textContent = typeof status.version === 'string' && status.version ? status.version : '—'; })
+      .catch(() => { versionSub.textContent = '—'; });
+  }
+
   updateCounts();
   updateEmpty();
+  loadVersion();
   pollLogs();
   setInterval(pollLogs, POLL_MS);
 })();

@@ -19,6 +19,7 @@
   const liveChip = document.getElementById('liveChip');
   const uptimeVal = document.getElementById('uptimeVal');
   const rewritesVal = document.getElementById('rewritesVal');
+  const versionSub = document.getElementById('versionSub');
   const clsNodeTitle = document.getElementById('clsNodeTitle');
   const clsNodeSub = document.getElementById('clsNodeSub');
   // Cached GET /admin/status so a form re-render (load/save/revert) can re-apply the
@@ -396,7 +397,7 @@
     n.textContent = '';
     const title = document.createElement('div');
     title.style.cssText = 'font-weight:700;margin-bottom:6px;';
-    title.textContent = 'Saved · port changed — the shim is restarting on a new port.';
+    title.textContent = 'Saved · port changed — CC AutoMux is restarting on a new port.';
     const lead = document.createElement('div');
     lead.append('Open ');
     const link = document.createElement('a');
@@ -505,6 +506,7 @@
 
   function applyStatus(st){
     lastStatus = st;
+    versionSub.textContent = typeof st.version === 'string' && st.version ? st.version : '—';
     uptimeBase = typeof st.uptime_seconds === 'number' ? st.uptime_seconds : null;
     uptimeAt = Date.now();
     tickUptime();

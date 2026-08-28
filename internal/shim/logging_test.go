@@ -2,6 +2,7 @@ package shim
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -211,7 +212,7 @@ func restoreLogWriters(t *testing.T) {
 
 // TestConfigureLoggingConfigCapOverridesBootstrapEnv reproduces the persisted-config authority startup
 // sequence at the log-writer level: Main configures the writers from
-// CC_AUTO_SHIM_LOG_MAX_BYTES for the bootstrap window, then Run calls
+// CC_AUTOMUX_LOG_MAX_BYTES for the bootstrap window, then Run calls
 // configureLogging again with the authoritative config cap. The second call must
 // retune the SAME open file in place (no reopen) to the config cap, so the config
 // value wins over the bootstrap env. This guards both the "config overrides env"
@@ -222,11 +223,11 @@ func TestConfigureLoggingConfigCapOverridesBootstrapEnv(t *testing.T) {
 	restoreLogWriters(t)
 
 	logPath := filepath.Join(t.TempDir(), "stdout.log")
-	t.Setenv("CC_AUTO_SHIM_STDOUT_LOG", logPath)
-	t.Setenv("CC_AUTO_SHIM_STDERR_LOG", "") // dev default: no stderr file writer
+	t.Setenv("CC_AUTOMUX_STDOUT_LOG", logPath)
+	t.Setenv("CC_AUTOMUX_STDERR_LOG", "") // dev default: no stderr file writer
 	const envCap int64 = 2 << 20
 	const configCap int64 = 9 << 20
-	t.Setenv("CC_AUTO_SHIM_LOG_MAX_BYTES", strconv.FormatInt(envCap, 10))
+	t.Setenv("CC_AUTOMUX_LOG_MAX_BYTES", strconv.FormatInt(envCap, 10))
 
 	// Bootstrap window (Main): open the writer at the env cap.
 	if err := configureLoggingFromEnv(); err != nil {
@@ -252,5 +253,35 @@ func TestConfigureLoggingConfigCapOverridesBootstrapEnv(t *testing.T) {
 	}
 	if got := stdoutCapped.keepBytes; got != logKeepBytes(configCap) {
 		t.Fatalf("keepBytes = %d, want %d (derived from the config cap)", got, logKeepBytes(configCap))
+	}
+}
+
+func TestLegacyLogEnvironmentIsIgnored(t *testing.T) {
+	restoreLogWriters(t)
+	legacyStdout := filepath.Join(t.TempDir(), "legacy-stdout.log")
+	legacyStderr := filepath.Join(t.TempDir(), "legacy-stderr.log")
+	t.Setenv("CC_AUTOMUX_STDOUT_LOG", "")
+	t.Setenv("CC_AUTOMUX_STDERR_LOG", "")
+	t.Setenv("CC_AUTOMUX_LOG_MAX_BYTES", "")
+	t.Setenv("CC_AUTO_SHIM_STDOUT_LOG", legacyStdout)
+	t.Setenv("CC_AUTO_SHIM_STDERR_LOG", legacyStderr)
+	t.Setenv("CC_AUTO_SHIM_LOG_MAX_BYTES", "1")
+	if err := configureLoggingFromEnv(); err != nil {
+		t.Fatalf("configureLoggingFromEnv returned error: %v", err)
+	}
+	if stdoutCapped != nil || stderrCapped != nil {
+		t.Fatal("legacy log path environment opened a file writer")
+	}
+	for _, path := range []string{legacyStdout, legacyStderr} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("legacy log path was used: %s: %v", path, err)
+		}
+	}
+	got, err := configuredMaxLogBytes()
+	if err != nil {
+		t.Fatalf("configuredMaxLogBytes returned error: %v", err)
+	}
+	if got != defaultMaxLogBytes {
+		t.Fatalf("configuredMaxLogBytes = %d, want default %d", got, defaultMaxLogBytes)
 	}
 }

@@ -2,31 +2,31 @@
 
 set -euo pipefail
 
-LABEL="com.Siriusrry.cc-auto-mode-shim"
-APP_NAME="cc-auto-mode-shim"
+LABEL="com.Siriusrry.cc-automux"
+APP_NAME="cc-automux"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$HOME/Library/Application Support/$APP_NAME"
 BIN_DIR="$APP_DIR/bin"
 BIN_PATH="$BIN_DIR/$APP_NAME"
 # Runtime config file. Mirrors the binary's path resolution
-# (internal/shim/config_store.go runtimeConfigPath): CC_AUTO_SHIM_CONFIG
+# (internal/shim/config_store.go runtimeConfigPath): CC_AUTOMUX_CONFIG
 # overrides the location and must be an absolute path; otherwise it defaults to
 # APP_DIR/config.json. Leading/trailing whitespace is trimmed first, mirroring
 # the binary's strings.TrimSpace, so a padded env value resolves identically.
 CONFIG_PATH="$APP_DIR/config.json"
-_cfg="${CC_AUTO_SHIM_CONFIG:-}"
+_cfg="${CC_AUTOMUX_CONFIG:-}"
 _cfg="${_cfg#"${_cfg%%[![:space:]]*}"}"
 _cfg="${_cfg%"${_cfg##*[![:space:]]}"}"
 if [[ -n "$_cfg" ]]; then
   if [[ "$_cfg" != /* ]]; then
-    echo "CC_AUTO_SHIM_CONFIG must be an absolute path, got: $_cfg" >&2
+    echo "CC_AUTOMUX_CONFIG must be an absolute path, got: $_cfg" >&2
     exit 1
   fi
   CONFIG_PATH="$_cfg"
 fi
 # Normalize the env var to the trimmed value so render_plist writes the same
 # path the binary would resolve. Empty when no override was set.
-CC_AUTO_SHIM_CONFIG="$_cfg"
+CC_AUTOMUX_CONFIG="$_cfg"
 unset _cfg
 LOG_DIR="$HOME/Library/Logs/$APP_NAME"
 STDOUT_LOG="$LOG_DIR/stdout.log"
@@ -102,12 +102,12 @@ render_plist() {
     return 1
   fi
 
-  # Only carry CC_AUTO_SHIM_CONFIG into the LaunchAgent env when an override was
+  # Only carry CC_AUTOMUX_CONFIG into the LaunchAgent env when an override was
   # set at install time; otherwise the binary uses its own default path and the
   # placeholder collapses to nothing.
-  if [[ -n "${CC_AUTO_SHIM_CONFIG:-}" ]]; then
+  if [[ -n "${CC_AUTOMUX_CONFIG:-}" ]]; then
     config_env="
-    <key>CC_AUTO_SHIM_CONFIG</key>
+    <key>CC_AUTOMUX_CONFIG</key>
     <string>$(xml_escape "$CONFIG_PATH")</string>
 "
   fi

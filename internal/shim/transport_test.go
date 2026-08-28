@@ -28,7 +28,7 @@ func writeTestCACert(t *testing.T) string {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "cc-auto-mode-shim test CA"},
+		Subject:               pkix.Name{CommonName: "cc-automux test CA"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		IsCA:                  true,

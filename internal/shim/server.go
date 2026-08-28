@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	productversion "github.com/Siriusrry/cc-automux/internal/version"
 )
 
 type proxyServer struct {
@@ -292,6 +294,8 @@ func (p *proxyServer) currentRoutingTable() *routingTable {
 // schematic's entrance cards and account pills.
 func (p *proxyServer) statusSnapshot() adminStatus {
 	status := adminStatus{
+		Product:       productversion.ProductName,
+		Version:       productversion.Current(),
 		UptimeSeconds: int64(time.Since(p.startTime) / time.Second),
 		StartTime:     p.startTime.UTC().Format(time.RFC3339),
 		Rewrites:      p.rewriteCount.Load(),

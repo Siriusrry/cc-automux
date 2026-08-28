@@ -17,7 +17,7 @@ var restartDelay = 300 * time.Millisecond
 // restartProcess re-execs the current binary in place so a restart-required config
 // change (listen_addr / log_max_bytes — both bound only at startup, in Run) takes
 // effect with no manual stop/start. syscall.Exec replaces the process image but
-// keeps the SAME pid and inherits os.Environ() (which carries the CC_AUTO_SHIM_*
+// keeps the SAME pid and inherits os.Environ() (which carries the CC_AUTOMUX_*
 // vars), so it is transparent to launchd: no child exit, KeepAlive is not
 // triggered. The replacement re-runs Run -> loadConfig, which reads the
 // just-persisted config and binds the new listen/log values. syscall.Exec returns

@@ -19,8 +19,40 @@ func TestAdminServesConfiguredPage(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Fatalf("GET /admin content-type = %q, want text/html", ct)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "cc-auto-mode-shim") || !strings.Contains(body, "/admin/assets/admin.js") {
+	if body := rec.Body.String(); !strings.Contains(body, "CC AutoMux") || !strings.Contains(body, "id=\"versionSub\"") || !strings.Contains(body, "/admin/assets/admin.js") {
 		t.Fatalf("GET /admin body missing expected markers (len %d)", len(body))
+	}
+}
+
+func TestAdminLogsPageUsesProductIdentityAndVersion(t *testing.T) {
+	server := newTestAdminServer(t, baseAdminConfig(), "")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/logs", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/logs status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, marker := range []string{"CC AutoMux", "id=\"versionSub\"", "~/Library/Logs/cc-automux"} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("GET /admin/logs body missing %q", marker)
+		}
+	}
+}
+
+func TestAdminScriptsReadVersionFromStatusAPI(t *testing.T) {
+	server := newTestAdminServer(t, baseAdminConfig(), "")
+	for _, path := range []string{"/admin/assets/admin.js", "/admin/assets/logs.js"} {
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", path, rec.Code)
+		}
+		body := rec.Body.String()
+		for _, marker := range []string{"/admin/status", "versionSub", ".version"} {
+			if !strings.Contains(body, marker) {
+				t.Fatalf("GET %s body missing %q", path, marker)
+			}
+		}
 	}
 }
 

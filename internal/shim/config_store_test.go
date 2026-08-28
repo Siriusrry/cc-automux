@@ -13,10 +13,10 @@ import (
 func TestLoadConfigSeedsAndPersistsRuntimeConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv(configPathEnv, configPath)
-	t.Setenv("CC_AUTO_SHIM_LISTEN", "127.0.0.1:9876")
-	t.Setenv("CC_ANYROUTER_SHIM_UPSTREAM", "https://a.example,https://b.example")
-	t.Setenv("CC_CLIPROXY_SHIM_UPSTREAM", "http://127.0.0.1:9000")
-	t.Setenv("CC_CLIPROXY_SHIM_CA", "")
+	t.Setenv("CC_AUTOMUX_LISTEN", "127.0.0.1:9876")
+	t.Setenv("CC_AUTOMUX_ANYROUTER_UPSTREAMS", "https://a.example,https://b.example")
+	t.Setenv("CC_AUTOMUX_CLIPROXY_UPSTREAM", "http://127.0.0.1:9000")
+	t.Setenv("CC_AUTOMUX_CLIPROXY_CA", "")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -54,6 +54,43 @@ func TestLoadConfigSeedsAndPersistsRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestLegacyBootstrapEnvironmentIsIgnored(t *testing.T) {
+	home := t.TempDir()
+	legacyConfig := filepath.Join(t.TempDir(), "legacy.json")
+	t.Setenv("HOME", home)
+	t.Setenv("CC_AUTOMUX_CONFIG", "")
+	t.Setenv("CC_AUTOMUX_LISTEN", "")
+	t.Setenv("CC_AUTOMUX_ANYROUTER_UPSTREAMS", "")
+	t.Setenv("CC_AUTOMUX_CLIPROXY_UPSTREAM", "")
+	t.Setenv("CC_AUTOMUX_CLIPROXY_CA", "")
+	t.Setenv("CC_AUTO_SHIM_CONFIG", legacyConfig)
+	t.Setenv("CC_AUTO_SHIM_LISTEN", "127.0.0.1:9999")
+	t.Setenv("CC_ANYROUTER_SHIM_UPSTREAM", "https://legacy.example")
+	t.Setenv("CC_CLIPROXY_SHIM_UPSTREAM", "http://127.0.0.1:9998")
+	t.Setenv("CC_CLIPROXY_SHIM_CA", "/legacy/ca.pem")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	wantPath := filepath.Join(home, "Library", "Application Support", "cc-automux", "config.json")
+	if cfg.configPath != wantPath {
+		t.Fatalf("configPath = %q, want %q", cfg.configPath, wantPath)
+	}
+	if cfg.runtime.ListenAddr != defaultListenAddr {
+		t.Fatalf("listen_addr = %q, want default %q", cfg.runtime.ListenAddr, defaultListenAddr)
+	}
+	if got := cfg.runtime.AnyRouter.Entrances; len(got) != 2 || got[0] != "https://anyrouter.top" {
+		t.Fatalf("legacy AnyRouter env affected entrances: %#v", got)
+	}
+	if cfg.runtime.CPA.Upstream != defaultCliproxyUpstreamURL || cfg.runtime.CPA.CAPath != "" {
+		t.Fatalf("legacy CLIProxy env affected CPA config: %+v", cfg.runtime.CPA)
+	}
+	if _, err := os.Stat(legacyConfig); !os.IsNotExist(err) {
+		t.Fatalf("legacy config path was used: %v", err)
+	}
+}
+
 func TestLoadConfigExistingFileOverridesBootstrapEnv(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	fileConfig := &runtimeConfig{
@@ -66,9 +103,9 @@ func TestLoadConfigExistingFileOverridesBootstrapEnv(t *testing.T) {
 	}
 
 	t.Setenv(configPathEnv, configPath)
-	t.Setenv("CC_AUTO_SHIM_LISTEN", "127.0.0.1:9999")
-	t.Setenv("CC_ANYROUTER_SHIM_UPSTREAM", "https://from-env.example")
-	t.Setenv("CC_CLIPROXY_SHIM_UPSTREAM", "http://127.0.0.1:9998")
+	t.Setenv("CC_AUTOMUX_LISTEN", "127.0.0.1:9999")
+	t.Setenv("CC_AUTOMUX_ANYROUTER_UPSTREAMS", "https://from-env.example")
+	t.Setenv("CC_AUTOMUX_CLIPROXY_UPSTREAM", "http://127.0.0.1:9998")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -286,12 +323,12 @@ func TestLoadConfigLogCapFileWinsOverEnv(t *testing.T) {
 	const fileCap int64 = 3 << 20
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv(configPathEnv, configPath)
-	t.Setenv("CC_AUTO_SHIM_LISTEN", "")
+	t.Setenv("CC_AUTOMUX_LISTEN", "")
 	// Persist a config file carrying fileCap, then point the env at a DIFFERENT cap.
 	if err := saveRuntimeConfig(configPath, logCapConfig(fileCap)); err != nil {
 		t.Fatalf("seed config file: %v", err)
 	}
-	t.Setenv("CC_AUTO_SHIM_LOG_MAX_BYTES", strconv.FormatInt(fileCap*4, 10))
+	t.Setenv("CC_AUTOMUX_LOG_MAX_BYTES", strconv.FormatInt(fileCap*4, 10))
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -303,8 +340,8 @@ func TestLoadConfigLogCapFileWinsOverEnv(t *testing.T) {
 }
 
 // TestSeedRuntimeConfigFromEnvSeedsLogCap pins the first-run seed direction of the
-// persisted-config authority demotion: with NO config file, CC_AUTO_SHIM_LOG_MAX_BYTES seeds the freshly
-// created config's log_max_bytes (mirroring CC_AUTO_SHIM_LISTEN → listen_addr) and
+// persisted-config authority demotion: with NO config file, CC_AUTOMUX_LOG_MAX_BYTES seeds the freshly
+// created config's log_max_bytes (mirroring CC_AUTOMUX_LISTEN → listen_addr) and
 // is persisted. Combined with TestLoadConfigLogCapFileWinsOverEnv (the env is
 // ignored once the file exists), this is the full "env is a first-run seed only"
 // contract.
@@ -312,8 +349,8 @@ func TestSeedRuntimeConfigFromEnvSeedsLogCap(t *testing.T) {
 	const envCap int64 = 11 << 20
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv(configPathEnv, configPath)
-	t.Setenv("CC_AUTO_SHIM_LISTEN", "")
-	t.Setenv("CC_AUTO_SHIM_LOG_MAX_BYTES", strconv.FormatInt(envCap, 10))
+	t.Setenv("CC_AUTOMUX_LISTEN", "")
+	t.Setenv("CC_AUTOMUX_LOG_MAX_BYTES", strconv.FormatInt(envCap, 10))
 
 	cfg, err := loadConfig()
 	if err != nil {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>cc-auto-mode-shim · control desk</title>
+<title>CC AutoMux · control desk</title>
 <link rel="stylesheet" href="/admin/assets/shared.css" />
 <link rel="stylesheet" href="/admin/assets/admin.css" />
 </head>
@@ -12,7 +12,7 @@
     <header class="topbar">
       <div class="brand">
         <img class="glyph" src="/admin/assets/product-mascot.png" alt="Product mascot" />
-        <div class="title"><h1>cc-auto-mode-shim</h1><div class="sub">interception desk · <b id="listenSub">—</b> · serving Claude Code auto-mode</div></div>
+        <div class="title"><h1>CC AutoMux</h1><div class="sub"><b id="versionSub">—</b> · interception desk · <b id="listenSub">—</b> · serving Claude Code auto-mode</div></div>
       </div>
       <div class="status">
         <span class="chip live" id="liveChip"><span class="dot"></span>Live</span>
@@ -30,7 +30,7 @@
       </div>
     </div>
     <div class="hero">
-      <svg viewBox="0 0 1000 300" role="img" aria-label="Routing: Claude Code into the shim, out to AnyRouter entrances, CPA, and the classifier tap.">
+      <svg viewBox="0 0 1000 300" role="img" aria-label="Routing: Claude Code into CC AutoMux, out to AnyRouter entrances, CPA, and the classifier tap.">
         <path d="M196 150 H300" fill="none" stroke="var(--emerald)" stroke-width="3" class="flow"/>
         <path id="ar1Flow" d="M496 132 C 590 132, 610 80, 700 80" fill="none" stroke="var(--line-2)" stroke-width="2.5" stroke-dasharray="3 8" stroke-linecap="round"/>
         <path id="ar2Flow" d="M496 146 C 590 146, 610 144, 700 144" fill="none" stroke="var(--line-2)" stroke-width="2.5" stroke-dasharray="3 8" stroke-linecap="round"/>
@@ -41,7 +41,7 @@
         <text class="nl" x="66" y="149">Claude Code</text><text class="nm" x="66" y="167">auto-mode</text>
 
         <rect class="nr iris" x="300" y="104" width="196" height="92" rx="20"/>
-        <text class="nt" x="322" y="128" fill="var(--iris)">SHIM CORE</text>
+        <text class="nt" x="322" y="128" fill="var(--iris)">AUTOMUX CORE</text>
         <text class="nl" x="322" y="151">rewrite + route</text><text class="nm" id="coreListen" x="322" y="170">classifier detect</text>
         <circle cx="400" cy="230" r="6" fill="var(--iris)" class="clsfx"/><text class="nt clsfx" x="414" y="234" fill="var(--iris)">CLASSIFIER TAP</text>
 
@@ -69,7 +69,7 @@
         <section class="card">
           <h2><span class="d em"></span>AnyRouter</h2>
           <p class="lede">Two entrances front the same backend — traffic sticks to the live one and fails over only on error.</p>
-          <div class="note"><b>The shim owns upstream auth.</b> Whatever key you set in Claude Code's <span class="mono">settings.json</span> is ignored.</div>
+          <div class="note"><b>CC AutoMux owns upstream auth.</b> Whatever key you set in Claude Code's <span class="mono">settings.json</span> is ignored.</div>
           <label class="lab">Entrances <span class="opt">· ordered, sticky failover</span></label>
           <div id="entranceList"></div>
           <button class="ghost" id="addEntrance">+ Add entrance</button>
@@ -84,7 +84,7 @@
       <div id="colRight">
         <section class="card">
           <h2><span class="d iris"></span>CPA</h2>
-          <p class="lede">CLIProxyAPI upstream. One key, no rotation — the shim still signs the request, so Claude Code's settings key is ignored here too.</p>
+          <p class="lede">CLIProxyAPI upstream. One key, no rotation — CC AutoMux still signs the request, so Claude Code's settings key is ignored here too.</p>
           <label class="lab">Upstream URL</label><input id="cpaUpstream" type="text" placeholder="https://127.0.0.1:8317" />
           <label class="lab">Key</label><input id="cpaKey" type="text" placeholder="sk-…" />
           <label class="lab">CA file <span class="opt">· optional</span></label><input id="cpaCa" type="text" placeholder="trust self-signed cert if empty" />
@@ -124,14 +124,14 @@
             <div><label class="lab" style="margin-top:0">Port</label><input id="port" type="number" min="1" max="65535" /></div>
             <div><label class="lab" style="margin-top:0">Max log size (MB)</label><input id="logMaxMb" type="number" min="1" step="1" /></div>
           </div>
-          <p class="lede mono" style="color:var(--iris); margin:10px 0 0; font-size:11.5px">↻ changing the port or log size restarts the shim automatically</p>
+          <p class="lede mono" style="color:var(--iris); margin:10px 0 0; font-size:11.5px">↻ changing the port or log size restarts CC AutoMux automatically</p>
         </section>
       </div>
     </div>
   </div>
 
   <div class="savebar" id="savebar" hidden><div class="in">
-    <span class="p">config · <b>~/Library/Application Support/cc-auto-mode-shim/config.json</b></span>
+    <span class="p">config · <b>~/Library/Application Support/cc-automux/config.json</b></span>
     <div><button class="btn" id="revert">Revert</button> <button class="btn primary" id="save">Save changes</button></div>
   </div></div>
 

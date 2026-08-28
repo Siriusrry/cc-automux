@@ -2,7 +2,7 @@
 
 [English](README.md) · [使用说明](../docs/usage.zh-CN.md)
 
-这些脚本用于管理当前用户的 macOS LaunchAgent。可以从任意目录运行，路径会按仓库位置解析。
+这些脚本用于管理 CC AutoMux 的当前用户 macOS LaunchAgent。可以从任意目录运行，路径会按仓库位置解析。
 
 ## 脚本列表
 
@@ -24,7 +24,7 @@
 
 ```bash
 go build -trimpath -buildvcs=false -ldflags="-s -w" \
-  -o dist/cc-auto-mode-shim ./cmd/cc-auto-mode-shim
+  -o dist/cc-automux ./cmd/cc-automux
 ```
 
 非交互安装：
@@ -47,18 +47,18 @@ LOG_MAX_MB=200 \
 | `PORT` | `8765` | 回环监听端口，主机始终为 `127.0.0.1`。 |
 | `CLIPROXY_UPSTREAM` | `https://127.0.0.1:8317` | `/cpa` 上游 URL。 |
 | `LOG_MAX_MB` | `100` | 每个日志文件的大小上限，单位 MB。 |
-| `CC_AUTO_SHIM_CONFIG` | 未设置 | 可选的 `config.json` 绝对路径。 |
+| `CC_AUTOMUX_CONFIG` | 未设置 | 可选的 `config.json` 绝对路径。 |
 
-安装器要求 `dist/cc-auto-mode-shim` 已存在且可执行；它不会构建、格式化或测试源码。首次启动时，二进制会使用这些初始值生成不存在的配置文件。再次安装时，已有配置仍然优先。
+安装器要求 `dist/cc-automux` 已存在且可执行；它不会构建、格式化或测试源码。首次启动时，二进制会使用这些初始值生成不存在的配置文件。再次安装时，已有配置仍然优先。
 
 安装路径：
 
 ```text
-~/Library/Application Support/cc-auto-mode-shim/bin/cc-auto-mode-shim
-~/Library/Application Support/cc-auto-mode-shim/config.json
-~/Library/LaunchAgents/com.Siriusrry.cc-auto-mode-shim.plist
-~/Library/Logs/cc-auto-mode-shim/stdout.log
-~/Library/Logs/cc-auto-mode-shim/stderr.log
+~/Library/Application Support/cc-automux/bin/cc-automux
+~/Library/Application Support/cc-automux/config.json
+~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist
+~/Library/Logs/cc-automux/stdout.log
+~/Library/Logs/cc-automux/stderr.log
 ```
 
 安装完成后，打开 `http://127.0.0.1:<port>/admin` 配置账号、密钥和路由。如果已有配置使用了其它端口，请使用配置中的端口。
@@ -71,7 +71,7 @@ LOG_MAX_MB=200 \
 ./scripts/status.sh
 ```
 
-LaunchAgent 标识为 `com.Siriusrry.cc-auto-mode-shim`。服务由 launchd 保持运行，因此应使用 `stop.sh`，不要直接杀进程。
+LaunchAgent 标识为 `com.Siriusrry.cc-automux`。服务由 launchd 保持运行，因此应使用 `stop.sh`，不要直接杀进程。
 
 ## 日志
 
@@ -105,14 +105,14 @@ LaunchAgent 标识为 `com.Siriusrry.cc-auto-mode-shim`。服务由 launchd 保�
 ./scripts/uninstall.sh --keep-logs
 ```
 
-脚本会停止服务，只处理本应用的 plist、应用目录和日志目录。Finder 可用时会将它们移入废纸篓；无图形界面时会警告并永久删除相同目标。通过 `CC_AUTO_SHIM_CONFIG` 指向应用目录之外的配置文件不会被删除。
+脚本会停止服务，只处理本应用的 plist、应用目录和日志目录。Finder 可用时会将它们移入废纸篓；无图形界面时会警告并永久删除相同目标。通过 `CC_AUTOMUX_CONFIG` 指向应用目录之外的配置文件不会被删除。
 
 ## Smoke test
 
 在仓库根目录运行隔离的本地端到端测试：
 
 ```bash
-GOCACHE=/tmp/cc-auto-mode-go-cache ./tests/smoke/run.sh
+GOCACHE=/tmp/cc-automux-go-cache ./tests/smoke/run.sh
 ```
 
 测试会把二进制构建到临时目录，使用临时端口和配置，不访问网络，也不触碰已安装的服务。

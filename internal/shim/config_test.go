@@ -371,8 +371,8 @@ func TestSwapStateRestartRequiredTracksLogCap(t *testing.T) {
 }
 
 // TestLoadConfigLogCapFileWinsOverEnv pins persisted-config authority startup authority: once the config
-// file exists its log_max_bytes is authoritative and CC_AUTO_SHIM_LOG_MAX_BYTES is
-// ignored (demoted to a first-run seed, exactly like CC_AUTO_SHIM_LISTEN →
+// file exists its log_max_bytes is authoritative and CC_AUTOMUX_LOG_MAX_BYTES is
+// ignored (demoted to a first-run seed, exactly like CC_AUTOMUX_LISTEN →
 // listen_addr). Run applies cfg.runtime.LogMaxBytes to the writers and
 // newProxyServer records it as boundLogMaxBytes, so the value loadConfig returns
 // here is the cap the process actually binds.

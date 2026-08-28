@@ -503,10 +503,10 @@ func TestParseUpstreamEntries(t *testing.T) {
 
 func TestLoadConfigDefaultsAnyRouterUpstreams(t *testing.T) {
 	t.Setenv(configPathEnv, filepath.Join(t.TempDir(), "config.json"))
-	t.Setenv("CC_AUTO_SHIM_LISTEN", "")
-	t.Setenv("CC_ANYROUTER_SHIM_UPSTREAM", "")
-	t.Setenv("CC_CLIPROXY_SHIM_UPSTREAM", "")
-	t.Setenv("CC_CLIPROXY_SHIM_CA", "")
+	t.Setenv("CC_AUTOMUX_LISTEN", "")
+	t.Setenv("CC_AUTOMUX_ANYROUTER_UPSTREAMS", "")
+	t.Setenv("CC_AUTOMUX_CLIPROXY_UPSTREAM", "")
+	t.Setenv("CC_AUTOMUX_CLIPROXY_CA", "")
 
 	cfg, err := loadConfig()
 	if err != nil {

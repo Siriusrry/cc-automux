@@ -157,6 +157,10 @@ type adminConfigPostResponse struct {
 // adminStatus is the read-only runtime contract consumed by the dynamic admin UI.
 // Field names are stable; runtime configuration remains on GET /admin/config.
 type adminStatus struct {
+	// Product and Version identify the running CC AutoMux build. They come from
+	// the same embedded source used by the CLI and all current UI surfaces.
+	Product string `json:"product"`
+	Version string `json:"version"`
 	// UptimeSeconds is whole seconds since this process built its proxyServer.
 	UptimeSeconds int64 `json:"uptime_seconds"`
 	// StartTime is the proxyServer construction time as RFC3339 UTC, for an

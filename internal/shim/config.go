@@ -111,7 +111,7 @@ type runtimeConfig struct {
 	Enabled *bool `json:"enabled"`
 	// LogMaxBytes is the per-file cap (in bytes) for the stdout/stderr logs;
 	// oldest complete lines are dropped past it (cappedLogWriter). It stores
-	// bytes to match CC_AUTO_SHIM_LOG_MAX_BYTES and cappedLogWriter (the admin UI
+	// bytes to match CC_AUTOMUX_LOG_MAX_BYTES and cappedLogWriter (the admin UI
 	// shows MB). Unlike Enabled — a *bool because false is a legal value — this is
 	// a plain int64 with 0 as the "unset" sentinel: 0 is never a valid cap, so it
 	// cannot collide with a meaningful setting the way a bare bool false would. An

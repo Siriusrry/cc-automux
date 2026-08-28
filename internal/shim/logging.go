@@ -77,7 +77,7 @@ func configureLogging(maxBytes int64) error {
 	logWritersMu.Lock()
 	defer logWritersMu.Unlock()
 
-	if path := strings.TrimSpace(os.Getenv("CC_AUTO_SHIM_STDOUT_LOG")); path != "" {
+	if path := strings.TrimSpace(os.Getenv("CC_AUTOMUX_STDOUT_LOG")); path != "" {
 		if stdoutCapped != nil {
 			stdoutCapped.setMaxBytes(maxBytes)
 		} else {
@@ -89,7 +89,7 @@ func configureLogging(maxBytes int64) error {
 			stdoutLogger.SetOutput(io.MultiWriter(logBuffer.streamWriter(logStreamStdout), writer))
 		}
 	}
-	if path := strings.TrimSpace(os.Getenv("CC_AUTO_SHIM_STDERR_LOG")); path != "" {
+	if path := strings.TrimSpace(os.Getenv("CC_AUTOMUX_STDERR_LOG")); path != "" {
 		if stderrCapped != nil {
 			stderrCapped.setMaxBytes(maxBytes)
 		} else {
@@ -105,10 +105,10 @@ func configureLogging(maxBytes int64) error {
 }
 
 // configureLoggingFromEnv configures the log writers for the bootstrap window —
-// before the runtime config has been read — using CC_AUTO_SHIM_LOG_MAX_BYTES (or
+// before the runtime config has been read — using CC_AUTOMUX_LOG_MAX_BYTES (or
 // the default). Run later calls configureLogging again with the authoritative
 // config cap, demoting this env value to a bootstrap + first-run seed: it
-// seeds the config only on first file creation, mirroring CC_AUTO_SHIM_LISTEN →
+// seeds the config only on first file creation, mirroring CC_AUTOMUX_LISTEN →
 // listen_addr (see seedRuntimeConfigFromEnv).
 func configureLoggingFromEnv() error {
 	maxBytes, err := configuredMaxLogBytes()
@@ -119,13 +119,13 @@ func configureLoggingFromEnv() error {
 }
 
 func configuredMaxLogBytes() (int64, error) {
-	raw := strings.TrimSpace(os.Getenv("CC_AUTO_SHIM_LOG_MAX_BYTES"))
+	raw := strings.TrimSpace(os.Getenv("CC_AUTOMUX_LOG_MAX_BYTES"))
 	if raw == "" {
 		return defaultMaxLogBytes, nil
 	}
 	maxBytes, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || maxBytes <= 0 {
-		return 0, fmt.Errorf("CC_AUTO_SHIM_LOG_MAX_BYTES must be a positive integer, got %q", raw)
+		return 0, fmt.Errorf("CC_AUTOMUX_LOG_MAX_BYTES must be a positive integer, got %q", raw)
 	}
 	return maxBytes, nil
 }
@@ -290,7 +290,7 @@ func (w *cappedLogWriter) Write(p []byte) (int, error) {
 		return n, err
 	}
 	if err := w.trimIfNeededLocked(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "cc-auto-mode-shim log trim failed for %s: %v\n", w.path, err)
+		_, _ = fmt.Fprintf(os.Stderr, "CC AutoMux log trim failed for %s: %v\n", w.path, err)
 	}
 	return n, nil
 }

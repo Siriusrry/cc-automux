@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	configPathEnv     = "CC_AUTO_SHIM_CONFIG"
-	appSupportDirName = "cc-auto-mode-shim"
+	configPathEnv     = "CC_AUTOMUX_CONFIG"
+	appSupportDirName = "cc-automux"
 	configFileName    = "config.json"
 )
 
@@ -73,22 +73,22 @@ func runtimeConfigPath() (string, error) {
 }
 
 func seedRuntimeConfigFromEnv() *runtimeConfig {
-	// CC_AUTO_SHIM_LOG_MAX_BYTES seeds the cap only on first config creation, after
-	// which the on-disk file is authoritative (mirrors CC_AUTO_SHIM_LISTEN →
+	// CC_AUTOMUX_LOG_MAX_BYTES seeds the cap only on first config creation, after
+	// which the on-disk file is authoritative (mirrors CC_AUTOMUX_LISTEN →
 	// listen_addr). An invalid value has already failed startup in
 	// configureLoggingFromEnv (Main) before seeding runs, so the discarded error path
 	// here returns 0 — which normalizeRuntimeConfig maps to defaultMaxLogBytes.
 	logMaxBytes, _ := configuredMaxLogBytes()
 	return &runtimeConfig{
-		ListenAddr:  getenvDefault("CC_AUTO_SHIM_LISTEN", defaultListenAddr),
+		ListenAddr:  getenvDefault("CC_AUTOMUX_LISTEN", defaultListenAddr),
 		LogMaxBytes: logMaxBytes,
 		AnyRouter: anyRouterRuntimeConfig{
-			Entrances: trimStringSlice(strings.Split(getenvDefault("CC_ANYROUTER_SHIM_UPSTREAM", defaultAnyRouterUpstreamURLs), ",")),
+			Entrances: trimStringSlice(strings.Split(getenvDefault("CC_AUTOMUX_ANYROUTER_UPSTREAMS", defaultAnyRouterUpstreamURLs), ",")),
 			Accounts:  []accountEntry{},
 		},
 		CPA: cpaRuntimeConfig{
-			Upstream: getenvDefault("CC_CLIPROXY_SHIM_UPSTREAM", defaultCliproxyUpstreamURL),
-			CAPath:   strings.TrimSpace(os.Getenv("CC_CLIPROXY_SHIM_CA")),
+			Upstream: getenvDefault("CC_AUTOMUX_CLIPROXY_UPSTREAM", defaultCliproxyUpstreamURL),
+			CAPath:   strings.TrimSpace(os.Getenv("CC_AUTOMUX_CLIPROXY_CA")),
 		},
 	}
 }

@@ -52,7 +52,7 @@ func TestAdminStatusReturnsRuntimeSnapshot(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("decode raw status: %v", err)
 	}
-	for _, k := range []string{"uptime_seconds", "start_time", "rewrites", "entrances", "accounts"} {
+	for _, k := range []string{"product", "version", "uptime_seconds", "start_time", "rewrites", "entrances", "accounts"} {
 		if _, ok := raw[k]; !ok {
 			t.Fatalf("status JSON missing top-level key %q", k)
 		}
@@ -84,6 +84,9 @@ func TestAdminStatusReturnsRuntimeSnapshot(t *testing.T) {
 	}
 
 	// Typed values.
+	if got.Product != "CC AutoMux" || got.Version != "v1.0.0-dev" {
+		t.Fatalf("product/version = %q/%q, want CC AutoMux/v1.0.0-dev", got.Product, got.Version)
+	}
 	if got.UptimeSeconds < 0 {
 		t.Fatalf("uptime_seconds = %d, want >= 0", got.UptimeSeconds)
 	}

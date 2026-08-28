@@ -11,7 +11,7 @@ import (
 
 func Main() {
 	if err := configureLoggingFromEnv(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "cc-auto-mode-shim logging setup failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "CC AutoMux logging setup failed: %v\n", err)
 		os.Exit(1)
 	}
 	if err := Run(); err != nil {
@@ -27,8 +27,8 @@ func Run() error {
 	}
 
 	// The persisted log_max_bytes is authoritative once the config file exists, so
-	// rebind the log writers to it now — demoting CC_AUTO_SHIM_LOG_MAX_BYTES to a
-	// first-run seed only, exactly as CC_AUTO_SHIM_LISTEN seeds listen_addr
+	// rebind the log writers to it now — demoting CC_AUTOMUX_LOG_MAX_BYTES to a
+	// first-run seed only, exactly as CC_AUTOMUX_LISTEN seeds listen_addr
 	// (seedRuntimeConfigFromEnv). Main already configured the writers from the env
 	// (or the default) for the bootstrap window, so the loadConfig error above was
 	// still logged; this only retunes the cap (same fd, no reopen). cfg.runtime is
@@ -45,7 +45,7 @@ func Run() error {
 		IdleTimeout:       2 * time.Minute,
 	}
 
-	infof("cc-auto-mode-shim listening on http://%s (%s -> %s, %s -> %s)",
+	infof("CC AutoMux listening on http://%s (%s -> %s, %s -> %s)",
 		cfg.runtime.ListenAddr,
 		anyRouterPrefix,
 		strings.Join(cfg.runtime.AnyRouter.Entrances, ","),
