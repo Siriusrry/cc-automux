@@ -154,6 +154,11 @@ type AttemptLease struct {
 	FromSticky       bool
 	HalfOpenProbe    bool
 	HealthLease      HealthLease
+
+	stickyKey              StickyKey
+	cursorKey              roundRobinKey
+	cursorVersion          uint64
+	advanceCursorOnSuccess bool
 }
 
 type Assignment struct {
