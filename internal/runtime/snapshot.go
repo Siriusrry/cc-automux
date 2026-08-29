@@ -45,11 +45,37 @@ func (s *Snapshot) ManagementKey() string {
 	return s.config.Auth.ManagementKey
 }
 
+// GatewayKey returns the credential used by the Messages data plane. A
+// snapshot owns the value for the lifetime of requests that captured it.
+func (s *Snapshot) GatewayKey() string {
+	if s == nil {
+		return ""
+	}
+	return s.config.Auth.GatewayKey
+}
+
 func (s *Snapshot) Catalog() *provider.Catalog {
 	if s == nil {
 		return &provider.Catalog{}
 	}
 	return s.catalog.Clone()
+}
+
+// Candidates returns the compiled providers that declare the exact model.
+// The catalog supplies defensive copies so callers cannot mutate a snapshot.
+func (s *Snapshot) Candidates(model string) []*provider.CompiledProvider {
+	if s == nil || s.catalog == nil {
+		return []*provider.CompiledProvider{}
+	}
+	return s.catalog.Match(model)
+}
+
+// Providers returns all compiled providers as defensive copies.
+func (s *Snapshot) Providers() []*provider.CompiledProvider {
+	if s == nil || s.catalog == nil {
+		return []*provider.CompiledProvider{}
+	}
+	return s.catalog.Providers()
 }
 
 func (s *Snapshot) CreatedAt() time.Time {

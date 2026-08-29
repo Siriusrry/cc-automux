@@ -48,12 +48,12 @@ type Snapshot struct {
 }
 
 type StateCounts struct {
-	Unknown  int
-	Healthy  int
-	Degraded int
-	Cooldown int
-	HalfOpen int
-	Disabled int
+	Unknown  int `json:"unknown"`
+	Healthy  int `json:"healthy"`
+	Degraded int `json:"degraded"`
+	Cooldown int `json:"cooldown"`
+	HalfOpen int `json:"half_open"`
+	Disabled int `json:"disabled"`
 }
 
 type Aggregate struct {

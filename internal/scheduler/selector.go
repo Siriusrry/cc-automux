@@ -274,7 +274,8 @@ func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) HealthUpdate {
 		}
 	}
 
-	if lease.Provider.DisableHealth && outcome.ShouldFailover() && lease.stickyKey.SessionID != "" {
+	unbindDisabled := outcome.ShouldFailover() || outcome.Class == FailureChannelStream
+	if lease.Provider.DisableHealth && unbindDisabled && lease.stickyKey.SessionID != "" {
 		if entry := s.assignments[lease.stickyKey]; entry != nil &&
 			entry.assignment.ProviderID == lease.Provider.ID &&
 			entry.assignment.Generation == lease.Generation {

@@ -69,6 +69,25 @@ func TestNeutralUpstreamErrorIsObservedWithoutBreakerMutation(t *testing.T) {
 	}
 }
 
+func TestLocalNeutralErrorDoesNotPolluteProviderDiagnostics(t *testing.T) {
+	clock := newFakeClock()
+	store := newTestStore(t, clock)
+	p := testProvider("provider", "generation", false, "model")
+	store.Reconcile([]*provider.CompiledProvider{p})
+	key := testHealthKey(p, "model")
+	decision := mustAcquire(t, store, key, false)
+	store.Report(decision.Lease, scheduler.Outcome{
+		Class:     scheduler.FailureNeutral,
+		RawError:  "local replay failure",
+		SessionID: "session-local",
+	})
+	got := mustProviderSnapshot(t, store, p)
+	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	if channel.ObservedFailures != 0 || channel.LastError != "" || channel.LastSessionID != "" || channel.LastFailureAt != nil {
+		t.Fatalf("local error polluted provider diagnostics: %#v", channel)
+	}
+}
+
 func TestFailureWindowThresholdAndLayerIsolation(t *testing.T) {
 	clock := newFakeClock()
 	store := newTestStore(t, clock)

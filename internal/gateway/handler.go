@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
@@ -24,12 +26,15 @@ type Options struct {
 }
 
 type Handler struct {
-	snapshot        SnapshotFunc
-	selector        scheduler.Selector
-	clients         *ClientPool
-	recorder        EventRecorder
-	replayDirectory string
-	now             func() time.Time
+	snapshot         SnapshotFunc
+	selector         scheduler.Selector
+	clients          *ClientPool
+	recorder         EventRecorder
+	replayDirectory  string
+	now              func() time.Time
+	active           atomic.Int64
+	clientRevisionMu sync.Mutex
+	clientRevision   uint64
 }
 
 func New(snapshot SnapshotFunc, selector scheduler.Selector) *Handler {
@@ -95,6 +100,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	h.active.Add(1)
+	defer h.active.Add(-1)
 	if r.Body == nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "request body is required")
 		return
@@ -151,7 +158,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeAfterReplayClose(w, replay, http.StatusNotFound, "model_not_configured", "model is not configured")
 		return
 	}
-	h.clients.Reconcile(snapshot.Providers())
+	h.reconcileClients(snapshot)
 	h.forward(w, r, snapshot, replay, scheduler.StickyKey{
 		SessionID:    sessionID,
 		Model:        fields.model,
@@ -159,9 +166,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) reconcileClients(snapshot scheduler.Snapshot) {
+	if h == nil || snapshot == nil {
+		return
+	}
+	h.clientRevisionMu.Lock()
+	defer h.clientRevisionMu.Unlock()
+	if snapshot.Revision() <= h.clientRevision {
+		return
+	}
+	h.clients.Reconcile(snapshot.Providers())
+	h.clientRevision = snapshot.Revision()
+}
+
+// ActiveRequests reports data-plane requests currently being processed.
+func (h *Handler) ActiveRequests() int64 {
+	if h == nil {
+		return 0
+	}
+	return h.active.Load()
+}
+
 type capturedFailure struct {
 	lease     scheduler.AttemptLease
 	outcome   scheduler.Outcome
+	update    scheduler.HealthUpdate
 	headers   http.Header
 	body      []byte
 	transport bool
@@ -303,8 +332,8 @@ func (h *Handler) attempt(w http.ResponseWriter, incoming *http.Request, replay 
 		outcome.Class = scheduler.FailureClientCanceled
 		outcome.ClientCanceled = true
 		outcome.RawError = contextError(incoming.Context(), readErr).Error()
-		h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt)
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		_ = replay.Close()
 		return nil, true
 	}
@@ -314,17 +343,18 @@ func (h *Handler) attempt(w http.ResponseWriter, incoming *http.Request, replay 
 		}
 		outcome.Class = scheduler.FailureChannelStream
 		outcome.RawError = readErr.Error()
-		h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt)
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider response ended unexpectedly")
 		return nil, true
 	}
 	outcome.RawError = string(bodyBytes)
-	h.selector.Report(lease, outcome)
-	h.recordOutcome(EventFailure, lease, outcome, attempt)
+	update := h.selector.Report(lease, outcome)
+	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 	return &capturedFailure{
 		lease:   lease,
 		outcome: outcome,
+		update:  update,
 		headers: response.Header.Clone(),
 		body:    bodyBytes,
 	}, false
@@ -340,21 +370,21 @@ func (h *Handler) handleTransportError(w http.ResponseWriter, ctx context.Contex
 	if requestCanceled(ctx) {
 		outcome.Class = scheduler.FailureClientCanceled
 		outcome.ClientCanceled = true
-		h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt)
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		_ = replay.Close()
 		return nil, true
 	}
 	if requestBodyReadFailed(err) {
 		outcome.Class = scheduler.FailureNeutral
-		h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt)
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusInternalServerError, "replay_unavailable", "request could not be replayed")
 		return nil, true
 	}
-	h.selector.Report(lease, outcome)
-	h.recordOutcome(EventFailure, lease, outcome, attempt)
-	return &capturedFailure{lease: lease, outcome: outcome, transport: true}, false
+	update := h.selector.Report(lease, outcome)
+	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+	return &capturedFailure{lease: lease, outcome: outcome, update: update, transport: true}, false
 }
 
 func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, response *http.Response, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int) {
@@ -385,8 +415,8 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 					outcome.Class = scheduler.FailureClientCanceled
 					outcome.ClientCanceled = true
 				}
-				h.selector.Report(lease, outcome)
-				h.recordOutcome(EventFailure, lease, outcome, attempt)
+				update := h.selector.Report(lease, outcome)
+				h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 				return
 			}
 			if flusher, ok := w.(http.Flusher); ok {
@@ -397,11 +427,11 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 			if errors.Is(readErr, io.EOF) {
 				if captureError {
 					outcome.RawError = raw.String()
-					h.selector.Report(lease, outcome)
-					h.recordOutcome(EventFailure, lease, outcome, attempt)
+					update := h.selector.Report(lease, outcome)
+					h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 				} else {
-					h.selector.Report(lease, outcome)
-					h.recordOutcome(EventSuccess, lease, outcome, attempt)
+					update := h.selector.Report(lease, outcome)
+					h.recordOutcome(EventSuccess, lease, outcome, attempt, update)
 				}
 				return
 			}
@@ -409,14 +439,14 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 				outcome.Class = scheduler.FailureClientCanceled
 				outcome.ClientCanceled = true
 				outcome.RawError = contextError(ctx, readErr).Error()
-				h.selector.Report(lease, outcome)
-				h.recordOutcome(EventFailure, lease, outcome, attempt)
+				update := h.selector.Report(lease, outcome)
+				h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 				return
 			}
 			outcome.Class = scheduler.FailureChannelStream
 			outcome.RawError = readErr.Error()
-			h.selector.Report(lease, outcome)
-			h.recordOutcome(EventFailure, lease, outcome, attempt)
+			update := h.selector.Report(lease, outcome)
+			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 			// Headers and a prefix of the body may already be visible to the
 			// caller. Returning leaves that partial stream intact and prevents a
 			// retry that could duplicate side effects.
@@ -470,18 +500,23 @@ func (h *Handler) record(event Event) {
 	}
 }
 
-func (h *Handler) recordOutcome(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int) {
+func (h *Handler) recordOutcome(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) {
 	item := lease.Provider
 	event := Event{
-		Kind:         kind,
-		Time:         h.now().UTC(),
-		SessionID:    outcome.SessionID,
-		Model:        lease.Model,
-		TrafficClass: lease.TrafficClass,
-		Attempt:      attempt,
-		UpstreamURL:  outcome.UpstreamURL,
-		HTTPStatus:   outcome.HTTPStatus,
-		RawError:     outcome.RawError,
+		Kind:                   kind,
+		Time:                   h.now().UTC(),
+		SessionID:              outcome.SessionID,
+		Model:                  lease.Model,
+		TrafficClass:           lease.TrafficClass,
+		Attempt:                attempt,
+		UpstreamURL:            outcome.UpstreamURL,
+		HTTPStatus:             outcome.HTTPStatus,
+		RawError:               outcome.RawError,
+		GlobalHealth:           update.GlobalState,
+		ChannelHealth:          update.ChannelState,
+		GlobalEnteredCooldown:  update.GlobalEnteredCooldown,
+		ChannelEnteredCooldown: update.ChannelEnteredCooldown,
+		CooldownUntil:          update.CooldownUntil,
 	}
 	if item != nil {
 		event.ProviderID = item.ID
@@ -494,7 +529,7 @@ func (h *Handler) recordFromFailure(kind EventKind, failure *capturedFailure, at
 	if failure == nil {
 		return
 	}
-	h.recordOutcome(kind, failure.lease, failure.outcome, attempt)
+	h.recordOutcome(kind, failure.lease, failure.outcome, attempt, failure.update)
 }
 
 func singleSessionHeader(headers http.Header) string {

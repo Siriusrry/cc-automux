@@ -19,19 +19,24 @@ const (
 // Event contains the complete diagnostic values observed by the data plane.
 // Recorders decide how those values are rendered or persisted.
 type Event struct {
-	Kind            EventKind
-	Time            time.Time
-	ProviderID      string
-	ProviderName    string
-	SessionID       string
-	HeaderSessionID string
-	BodySessionID   string
-	Model           string
-	TrafficClass    scheduler.TrafficClass
-	Attempt         int
-	UpstreamURL     string
-	HTTPStatus      int
-	RawError        string
+	Kind                   EventKind
+	Time                   time.Time
+	ProviderID             string
+	ProviderName           string
+	SessionID              string
+	HeaderSessionID        string
+	BodySessionID          string
+	Model                  string
+	TrafficClass           scheduler.TrafficClass
+	Attempt                int
+	UpstreamURL            string
+	HTTPStatus             int
+	RawError               string
+	GlobalHealth           scheduler.GlobalHealthState
+	ChannelHealth          scheduler.ChannelHealthState
+	GlobalEnteredCooldown  bool
+	ChannelEnteredCooldown bool
+	CooldownUntil          *time.Time
 }
 
 type EventRecorder interface {

@@ -625,6 +625,27 @@ func TestDisableHealthFailureUnbindsOnlyCurrentSession(t *testing.T) {
 	}
 }
 
+func TestDisableHealthStreamFailureUnbindsAfterResponseStarts(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	item := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	item.DisableHealth = true
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{item}}
+	selector.Reconcile(snapshot)
+	lease, err := selector.Acquire(snapshot, normalKey("stream-session", "m"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.Report(lease, Outcome{
+		Class:           FailureChannelStream,
+		SessionID:       "stream-session",
+		ResponseStarted: true,
+	})
+	if assignments := selector.Assignments(providerA); len(assignments) != 0 {
+		t.Fatalf("stream failure kept disabled-health assignment: %#v", assignments)
+	}
+}
+
 func TestReconcilePrunesAssignmentsAndInvalidCursors(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, Policy{}, nil)

@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/gateway"
+	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/management"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 type Options struct {
@@ -32,13 +35,19 @@ type Options struct {
 }
 
 type App struct {
-	manager    *runtime.Manager
-	configPath string
-	server     *http.Server
-	listener   net.Listener
-	logs       *logger
-	logOpener  LogOpener
-	exec       func() error
+	manager        *runtime.Manager
+	configPath     string
+	server         *http.Server
+	listener       net.Listener
+	logs           *logger
+	logOpener      LogOpener
+	exec           func() error
+	health         *health.Store
+	selector       *scheduler.Scheduler
+	gateway        *gateway.Handler
+	management     *management.Handler
+	runtimeMu      sync.Mutex
+	syncedRevision uint64
 
 	lifecycleMu sync.Mutex
 	resume      chan struct{}
@@ -171,7 +180,34 @@ func New(options Options) (*App, error) {
 		logs.error.Printf("pending configuration was not activated: %v", startup.Warning())
 	}
 	app.manager = manager
-	app.server = newHTTPServer(manager)
+	clock := options.Now
+	if clock == nil {
+		clock = time.Now
+	}
+	policy := scheduler.DefaultPolicy()
+	healthStore, healthErr := health.New(policy, health.ClockFunc(clock))
+	if healthErr != nil {
+		closeResources(app.logs, app.listener)
+		return nil, fmt.Errorf("initialize health store: %w", healthErr)
+	}
+	selector, selectorErr := scheduler.NewSelector(healthStore, scheduler.Options{Policy: policy, Now: clock})
+	if selectorErr != nil {
+		closeResources(app.logs, app.listener)
+		return nil, fmt.Errorf("initialize scheduler: %w", selectorErr)
+	}
+	app.health = healthStore
+	app.selector = selector
+	app.gateway = gateway.NewWithOptions(app.snapshotForGateway, selector, gateway.Options{
+		Recorder: gateway.EventRecorderFunc(app.recordGatewayEvent),
+	})
+	app.management = management.NewWithOptions(manager, management.Options{
+		Health:         healthStore,
+		Selector:       selector,
+		Sync:           app.syncRuntime,
+		ActiveRequests: app.activeDataRequests,
+	})
+	app.syncRuntime()
+	app.server = newHTTPServer(app.rootHandler())
 	app.logs.info.Printf("listening on %s", cfg.Service.ListenAddr)
 	return app, nil
 }
@@ -295,16 +331,70 @@ func (a *App) Close() error {
 			result = err
 		}
 	}
+	if appGateway := a.gateway; appGateway != nil {
+		if err := appGateway.Close(); result == nil {
+			result = err
+		}
+	}
 	a.signalResume()
 	return result
 }
 
-func newHTTPServer(manager *runtime.Manager) *http.Server {
+func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
-		Handler:           management.New(manager),
+		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+}
+
+func (a *App) rootHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a == nil || r == nil || r.URL == nil {
+			http.NotFound(w, r)
+			return
+		}
+		switch {
+		case r.URL.Path == gateway.MessagesPath:
+			a.gateway.ServeHTTP(w, r)
+		case r.URL.Path == "/api/v1" || strings.HasPrefix(r.URL.Path, "/api/v1/"):
+			a.management.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+func (a *App) snapshotForGateway() scheduler.Snapshot {
+	if a == nil || a.manager == nil {
+		return nil
+	}
+	a.syncRuntime()
+	return a.manager.Snapshot()
+}
+
+func (a *App) syncRuntime() {
+	if a == nil || a.manager == nil || a.selector == nil {
+		return
+	}
+	snapshot := a.manager.Snapshot()
+	if snapshot == nil {
+		return
+	}
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	if snapshot.Revision() <= a.syncedRevision {
+		return
+	}
+	a.selector.Reconcile(snapshot)
+	a.syncedRevision = snapshot.Revision()
+}
+
+func (a *App) activeDataRequests() int64 {
+	if a == nil || a.gateway == nil {
+		return 0
+	}
+	return a.gateway.ActiveRequests()
 }
 
 func (a *App) signalResume() {
@@ -351,11 +441,9 @@ func (a *App) beginRestart() error {
 	a.restarting = true
 	a.lifecycleMu.Unlock()
 	if server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := server.Shutdown(ctx); err != nil {
-			_ = server.Close()
-		}
-		cancel()
+		// Restart-required changes take effect immediately. Close interrupts
+		// in-flight data requests instead of waiting for a graceful drain.
+		_ = server.Close()
 	}
 	if listener != nil {
 		_ = listener.Close()
@@ -387,7 +475,7 @@ func (a *App) recoverRestartFailure(cause error) error {
 		return fmt.Errorf("self-restart failed after app closed: %w", cause)
 	}
 	a.listener = newListener
-	a.server = newHTTPServer(a.manager)
+	a.server = newHTTPServer(a.rootHandler())
 	a.restarting = false
 	logs := a.logs
 	a.lifecycleMu.Unlock()

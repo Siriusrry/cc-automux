@@ -7,6 +7,9 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
+
+	"github.com/Siriusrry/cc-automux/internal/gateway"
 )
 
 // LogOpener abstracts startup log-resource acquisition so restart transactions
@@ -30,12 +33,11 @@ func logOpenerFor(stdout, stderr io.Writer) LogOpener {
 	}
 }
 
-// cappedWriter keeps each regular-file log stream at or below maxBytes. When a
-// write would cross the limit, the target is rolled over in place and the new
-// write continues in the fresh window. This is a size limit, not a permanent
-// logging stop. Opaque writers that cannot be reset still get the same logical
-// window accounting, but their already-emitted bytes cannot be removed by an
-// io.Writer-only interface.
+// cappedWriter rolls each regular-file log stream before a write would cross
+// maxBytes. One indivisible record may exceed the threshold so diagnostic text
+// is never truncated; the following write starts a fresh window. Opaque writers
+// that cannot be reset still get the same logical window accounting, but their
+// already-emitted bytes cannot be removed by an io.Writer-only interface.
 type cappedWriter struct {
 	mu        sync.Mutex
 	maxBytes  int64
@@ -125,12 +127,6 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 		}
 	}
 
-	if int64(len(p)) > w.maxBytes {
-		// A single record cannot fit in the configured window. Retain its
-		// bounded prefix and report the original write as consumed, matching
-		// normal bounded-log behavior while still allowing later records.
-		p = p[:int(w.maxBytes)]
-	}
 	if w.bytesSeen > w.maxBytes || int64(len(p)) > w.maxBytes-w.bytesSeen {
 		if err := w.rolloverLocked(); err != nil {
 			return 0, err
@@ -205,4 +201,38 @@ func (l *logger) Close() error {
 		return nil
 	}
 	return l.close()
+}
+
+func (a *App) recordGatewayEvent(event gateway.Event) {
+	if a == nil || a.logs == nil {
+		return
+	}
+	target := a.logs.info
+	if event.Kind == gateway.EventFailure {
+		target = a.logs.error
+	}
+	cooldownUntil := ""
+	if event.CooldownUntil != nil {
+		cooldownUntil = event.CooldownUntil.UTC().Format(time.RFC3339Nano)
+	}
+	target.Printf(
+		"gateway kind=%s provider_id=%q provider_name=%q session_id=%q model=%q traffic_class=%q attempt=%d upstream_url=%q http_status=%d raw_error=%q global_health=%q channel_health=%q global_entered_cooldown=%t channel_entered_cooldown=%t cooldown_until=%q header_session_id=%q body_session_id=%q",
+		event.Kind,
+		event.ProviderID,
+		event.ProviderName,
+		event.SessionID,
+		event.Model,
+		event.TrafficClass,
+		event.Attempt,
+		event.UpstreamURL,
+		event.HTTPStatus,
+		event.RawError,
+		event.GlobalHealth,
+		event.ChannelHealth,
+		event.GlobalEnteredCooldown,
+		event.ChannelEnteredCooldown,
+		cooldownUntil,
+		event.HeaderSessionID,
+		event.BodySessionID,
+	)
 }

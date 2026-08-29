@@ -434,9 +434,12 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 		update.ChannelEnteredCooldown = s.applyFailureLocked(channel, lease.Token, now, outcome, false)
 		releaseProbe(&scope.global, lease.Token)
 	default:
-		observeLatest(&scope.global, outcome)
-		observeLatest(channel, outcome)
-		if outcome.Class == scheduler.FailureNeutral {
+		// A neutral HTTP response is still an observed upstream failure for
+		// diagnostics, but local preparation errors, client cancellation, and
+		// downstream write failures do not describe Provider health.
+		if outcome.Class == scheduler.FailureNeutral && outcome.HTTPStatus > 0 {
+			observeLatest(&scope.global, outcome)
+			observeLatest(channel, outcome)
 			recordNeutralFailure(channel, now)
 		}
 		releaseProbe(&scope.global, lease.Token)

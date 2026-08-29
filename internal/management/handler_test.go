@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 func testManager(t *testing.T, restart func() error) *runtime.Manager {
@@ -191,6 +193,89 @@ func TestManagementErrorsAndMethodContracts(t *testing.T) {
 	patches := request(handler, http.MethodGet, "/api/v1/provider-patches", auth, "")
 	if patches.Code != http.StatusOK || !strings.Contains(patches.Body.String(), `"implemented":false`) {
 		t.Fatalf("provider patches = %d %s", patches.Code, patches.Body.String())
+	}
+}
+
+func TestProviderHealthReturnsCompleteDiagnosticsAndStatusAggregates(t *testing.T) {
+	manager := testManager(t, nil)
+	next := manager.Snapshot().Config()
+	next.Auth.GatewayKey = "gateway-key"
+	next.Providers = []config.ProviderConfig{{
+		ID:            "11111111-1111-4111-8111-111111111111",
+		Name:          "provider-a",
+		BaseURL:       "https://provider.example/prefix",
+		APIKey:        "complete-provider-key",
+		Models:        []string{"model-a"},
+		Priority:      -7,
+		Enabled:       true,
+		DisableHealth: true,
+	}}
+	if _, err := manager.Apply(next); err != nil {
+		t.Fatal(err)
+	}
+	healthStore := health.NewDefault()
+	selector, err := scheduler.NewSelector(healthStore, scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := manager.Snapshot()
+	selector.Reconcile(snapshot)
+	lease, err := selector.Acquire(snapshot, scheduler.StickyKey{
+		SessionID:    "raw-session-id",
+		Model:        "model-a",
+		TrafficClass: scheduler.TrafficClassNormal,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.Report(lease, scheduler.Outcome{
+		Class:       scheduler.FailureNeutral,
+		HTTPStatus:  http.StatusBadRequest,
+		UpstreamURL: "https://provider.example/prefix/v1/messages?beta=1",
+		RawError:    "complete upstream error text",
+		SessionID:   "raw-session-id",
+	})
+
+	handler := NewWithOptions(manager, Options{
+		Health:         healthStore,
+		Selector:       selector,
+		Sync:           func() { selector.Reconcile(manager.Snapshot()) },
+		ActiveRequests: func() int64 { return 3 },
+	})
+	rec := request(handler, http.MethodGet, "/api/v1/provider-health", "Bearer management-key", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("provider health = %d %s", rec.Code, rec.Body.String())
+	}
+	var healthResponse providerHealthListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &healthResponse); err != nil {
+		t.Fatal(err)
+	}
+	if healthResponse.Revision != snapshot.Revision() || len(healthResponse.Providers) != 1 {
+		t.Fatalf("health response = %#v", healthResponse)
+	}
+	item := healthResponse.Providers[0]
+	if item.APIKey != "complete-provider-key" || item.BaseURL != "https://provider.example/prefix" ||
+		item.StaticAvailability != scheduler.StaticActive || len(item.Channels) != 1 || len(item.Sessions) != 1 {
+		t.Fatalf("provider diagnostic = %#v", item)
+	}
+	if item.Channels[0].LastUpstreamURL != "https://provider.example/prefix/v1/messages?beta=1" ||
+		item.Channels[0].LastError != "complete upstream error text" || item.Channels[0].LastSessionID != "raw-session-id" ||
+		item.Sessions[0].SessionID != "raw-session-id" {
+		t.Fatalf("complete diagnostic fields = %#v", item)
+	}
+
+	status := request(handler, http.MethodGet, "/api/v1/status", "Bearer management-key", "")
+	if status.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", status.Code, status.Body.String())
+	}
+	var got statusResponse
+	if err := json.Unmarshal(status.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.GatewayConfigured || got.ActiveProviderCount != 1 || got.InactiveProviderCount != 0 ||
+		got.HealthDisabledProviderCount != 1 || got.ActiveDataRequests != 3 || got.StickyAssignmentCount != 1 ||
+		got.GlobalHealth.Disabled != 1 || got.ChannelHealth.Disabled != 1 {
+		t.Fatalf("status aggregates = %#v", got)
 	}
 }
 

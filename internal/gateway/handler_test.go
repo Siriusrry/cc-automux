@@ -47,6 +47,7 @@ func (s *fakeSnapshot) Providers() []*provider.CompiledProvider {
 type fakeSelector struct {
 	mu       sync.Mutex
 	leases   []scheduler.AttemptLease
+	updates  []scheduler.HealthUpdate
 	next     int
 	reports  []scheduler.Outcome
 	acquires int
@@ -71,6 +72,9 @@ func (s *fakeSelector) Report(_ scheduler.AttemptLease, outcome scheduler.Outcom
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reports = append(s.reports, outcome)
+	if index := len(s.reports) - 1; index < len(s.updates) {
+		return s.updates[index]
+	}
 	return scheduler.HealthUpdate{}
 }
 func (*fakeSelector) Reconcile(scheduler.Snapshot) {}
@@ -321,7 +325,16 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 	for index, item := range providers {
 		leasing[index] = leaseFor(item, "m")
 	}
-	selector := &fakeSelector{leases: leasing}
+	cooldownUntil := time.Unix(2_000, 0).UTC()
+	selector := &fakeSelector{
+		leases: leasing,
+		updates: []scheduler.HealthUpdate{{
+			GlobalState:           scheduler.GlobalCooldown,
+			ChannelState:          scheduler.ChannelUnknown,
+			GlobalEnteredCooldown: true,
+			CooldownUntil:         &cooldownUntil,
+		}},
+	}
 	events := &eventCollector{}
 	handler := NewWithOptions(func() scheduler.Snapshot {
 		return &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: providers}
@@ -341,6 +354,8 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 	}
 	gotEvents := events.snapshot()
 	failovers := 0
+	healthFailure := false
+	healthFailover := false
 	for _, event := range gotEvents {
 		if event.Kind == EventFailover {
 			failovers++
@@ -351,9 +366,20 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 		if event.SessionID != "session-exact" {
 			t.Fatalf("event session = %q", event.SessionID)
 		}
+		if event.Attempt == 1 && event.GlobalEnteredCooldown {
+			if event.GlobalHealth != scheduler.GlobalCooldown || event.ChannelHealth != scheduler.ChannelUnknown ||
+				event.CooldownUntil == nil || !event.CooldownUntil.Equal(cooldownUntil) {
+				t.Fatalf("cooldown diagnostic event = %#v", event)
+			}
+			healthFailure = healthFailure || event.Kind == EventFailure
+			healthFailover = healthFailover || event.Kind == EventFailover
+		}
 	}
 	if failovers != 2 {
 		t.Fatalf("failovers = %d, events=%#v", failovers, gotEvents)
+	}
+	if !healthFailure || !healthFailover {
+		t.Fatalf("health transition missing from failure/failover events: %#v", gotEvents)
 	}
 }
 

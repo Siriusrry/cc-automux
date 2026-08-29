@@ -12,8 +12,10 @@ import (
 	"unicode"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	productversion "github.com/Siriusrry/cc-automux/internal/version"
 )
 
@@ -25,16 +27,24 @@ const (
 var errProviderNotFound = errors.New("provider not found")
 
 type Options struct {
-	MaxBodyBytes int64
-	Version      string
-	Registry     *provider.Registry
+	MaxBodyBytes   int64
+	Version        string
+	Registry       *provider.Registry
+	Health         *health.Store
+	Selector       scheduler.Selector
+	Sync           func()
+	ActiveRequests func() int64
 }
 
 type Handler struct {
-	manager      *runtime.Manager
-	maxBodyBytes int64
-	version      string
-	registry     provider.Registry
+	manager        *runtime.Manager
+	maxBodyBytes   int64
+	version        string
+	registry       provider.Registry
+	health         *health.Store
+	selector       scheduler.Selector
+	syncRuntime    func()
+	activeRequests func() int64
 }
 
 func New(manager *runtime.Manager) *Handler {
@@ -58,10 +68,14 @@ func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
 		version = productversion.Current()
 	}
 	return &Handler{
-		manager:      manager,
-		maxBodyBytes: maxBodyBytes,
-		version:      version,
-		registry:     registry,
+		manager:        manager,
+		maxBodyBytes:   maxBodyBytes,
+		version:        version,
+		registry:       registry,
+		health:         options.Health,
+		selector:       options.Selector,
+		syncRuntime:    options.Sync,
+		activeRequests: options.ActiveRequests,
 	}
 }
 
@@ -84,6 +98,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handlePatches(w, r)
 	case apiPrefix + "/status":
 		h.handleStatus(w, r)
+	case apiPrefix + "/provider-health":
+		h.handleProviderHealth(w, r)
 	default:
 		const providerPrefix = apiPrefix + "/providers/"
 		if strings.HasPrefix(r.URL.Path, providerPrefix) && strings.Count(strings.TrimPrefix(r.URL.Path, providerPrefix), "/") == 0 && strings.TrimPrefix(r.URL.Path, providerPrefix) != "" {
@@ -298,18 +314,26 @@ func (h *Handler) handlePatches(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	Product              string                `json:"product"`
-	Version              string                `json:"version"`
-	Revision             uint64                `json:"revision"`
-	ListenAddr           string                `json:"listen_addr"`
-	LogMaxBytes          int64                 `json:"log_max_bytes"`
-	ProviderCount        int                   `json:"provider_count"`
-	EnabledProviderCount int                   `json:"enabled_provider_count"`
-	UptimeSeconds        int64                 `json:"uptime_seconds"`
-	StartTime            string                `json:"start_time"`
-	Restart              runtime.RestartStatus `json:"restart"`
-	RestartInProgress    bool                  `json:"restart_in_progress"`
-	Pending              bool                  `json:"pending"`
+	Product                     string                `json:"product"`
+	Version                     string                `json:"version"`
+	Revision                    uint64                `json:"revision"`
+	ListenAddr                  string                `json:"listen_addr"`
+	LogMaxBytes                 int64                 `json:"log_max_bytes"`
+	GatewayConfigured           bool                  `json:"gateway_configured"`
+	ProviderCount               int                   `json:"provider_count"`
+	EnabledProviderCount        int                   `json:"enabled_provider_count"`
+	ActiveProviderCount         int                   `json:"active_provider_count"`
+	InactiveProviderCount       int                   `json:"inactive_provider_count"`
+	GlobalHealth                health.StateCounts    `json:"global_health"`
+	ChannelHealth               health.StateCounts    `json:"channel_health"`
+	HealthDisabledProviderCount int                   `json:"health_disabled_provider_count"`
+	ActiveDataRequests          int64                 `json:"active_data_requests"`
+	StickyAssignmentCount       int                   `json:"sticky_assignment_count"`
+	UptimeSeconds               int64                 `json:"uptime_seconds"`
+	StartTime                   string                `json:"start_time"`
+	Restart                     runtime.RestartStatus `json:"restart"`
+	RestartInProgress           bool                  `json:"restart_in_progress"`
+	Pending                     bool                  `json:"pending"`
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -318,12 +342,34 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshot := h.manager.Snapshot()
+	if h.syncRuntime != nil {
+		h.syncRuntime()
+		snapshot = h.manager.Snapshot()
+	}
 	cfg := snapshot.Config()
 	enabled := 0
+	active := 0
 	for _, item := range cfg.Providers {
 		if item.Enabled && len(item.Models) > 0 {
 			enabled++
 		}
+	}
+	for _, item := range snapshot.Providers() {
+		if scheduler.StaticAvailabilityOf(item) == scheduler.StaticActive {
+			active++
+		}
+	}
+	var aggregate health.Aggregate
+	if h.health != nil {
+		aggregate = h.health.Aggregate()
+	}
+	activeRequests := int64(0)
+	if h.activeRequests != nil {
+		activeRequests = h.activeRequests()
+	}
+	stickyCount := 0
+	if h.selector != nil {
+		stickyCount = h.selector.ActiveAssignmentCount()
 	}
 	started := h.manager.StartedAt()
 	uptime := int64(0)
@@ -335,19 +381,201 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	restart := h.manager.RestartStatus()
 	writeJSON(w, http.StatusOK, statusResponse{
-		Product:              productversion.ProductName,
-		Version:              h.version,
-		Revision:             snapshot.Revision(),
-		ListenAddr:           cfg.Service.ListenAddr,
-		LogMaxBytes:          cfg.Service.LogMaxBytes,
-		ProviderCount:        len(cfg.Providers),
-		EnabledProviderCount: enabled,
-		UptimeSeconds:        uptime,
-		StartTime:            started.UTC().Format(time.RFC3339),
-		Restart:              restart,
-		RestartInProgress:    restart.InProgress,
-		Pending:              restart.Pending,
+		Product:                     productversion.ProductName,
+		Version:                     h.version,
+		Revision:                    snapshot.Revision(),
+		ListenAddr:                  cfg.Service.ListenAddr,
+		LogMaxBytes:                 cfg.Service.LogMaxBytes,
+		GatewayConfigured:           cfg.Auth.GatewayKey != "",
+		ProviderCount:               len(cfg.Providers),
+		EnabledProviderCount:        enabled,
+		ActiveProviderCount:         active,
+		InactiveProviderCount:       len(cfg.Providers) - active,
+		GlobalHealth:                aggregate.Global,
+		ChannelHealth:               aggregate.Channels,
+		HealthDisabledProviderCount: aggregate.HealthDisabledProviderCount,
+		ActiveDataRequests:          activeRequests,
+		StickyAssignmentCount:       stickyCount,
+		UptimeSeconds:               uptime,
+		StartTime:                   started.UTC().Format(time.RFC3339),
+		Restart:                     restart,
+		RestartInProgress:           restart.InProgress,
+		Pending:                     restart.Pending,
 	})
+}
+
+type healthDiagnosticResponse struct {
+	State               string     `json:"state"`
+	BackoffLevel        int        `json:"backoff_level"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	ObservedFailures    uint64     `json:"observed_failures"`
+	CooldownUntil       *time.Time `json:"cooldown_until"`
+	LastSuccessAt       *time.Time `json:"last_success_at"`
+	LastFailureAt       *time.Time `json:"last_failure_at"`
+	ProbeInFlight       bool       `json:"probe_in_flight"`
+	LastUpstreamURL     string     `json:"last_upstream_url"`
+	LastError           string     `json:"last_error"`
+	LastSessionID       string     `json:"last_session_id"`
+}
+
+type channelHealthResponse struct {
+	Model               string     `json:"model"`
+	TrafficClass        string     `json:"traffic_class"`
+	State               string     `json:"state"`
+	BackoffLevel        int        `json:"backoff_level"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	ObservedFailures    uint64     `json:"observed_failures"`
+	CooldownUntil       *time.Time `json:"cooldown_until"`
+	LastSuccessAt       *time.Time `json:"last_success_at"`
+	LastFailureAt       *time.Time `json:"last_failure_at"`
+	ProbeInFlight       bool       `json:"probe_in_flight"`
+	LastUpstreamURL     string     `json:"last_upstream_url"`
+	LastError           string     `json:"last_error"`
+	LastSessionID       string     `json:"last_session_id"`
+}
+
+type sessionHealthResponse struct {
+	SessionID    string    `json:"session_id"`
+	Model        string    `json:"model"`
+	TrafficClass string    `json:"traffic_class"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastUsedAt   time.Time `json:"last_used_at"`
+}
+
+type providerHealthResponse struct {
+	ID                 string                       `json:"id"`
+	Name               string                       `json:"name"`
+	BaseURL            string                       `json:"base_url"`
+	APIKey             string                       `json:"api_key"`
+	Priority           int64                        `json:"priority"`
+	Enabled            bool                         `json:"enabled"`
+	Models             []string                     `json:"models"`
+	UseXAPIKey         bool                         `json:"use_x_api_key"`
+	TLS                config.TLSConfig             `json:"tls"`
+	Patches            []string                     `json:"patches"`
+	DisableHealth      bool                         `json:"disable_health"`
+	StaticAvailability scheduler.StaticAvailability `json:"static_availability"`
+	GlobalHealth       healthDiagnosticResponse     `json:"global_health"`
+	Channels           []channelHealthResponse      `json:"channels"`
+	Sessions           []sessionHealthResponse      `json:"sessions"`
+	ActiveSessionCount int                          `json:"active_session_count"`
+}
+
+type providerHealthListResponse struct {
+	Revision    uint64                   `json:"revision"`
+	GeneratedAt time.Time                `json:"generated_at"`
+	Providers   []providerHealthResponse `json:"providers"`
+}
+
+func (h *Handler) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if h.syncRuntime != nil {
+		h.syncRuntime()
+	}
+	snapshot := h.manager.Snapshot()
+	providers := snapshot.Providers()
+	generatedAt := time.Now().UTC()
+	healthByProvider := make(map[string]health.ProviderSnapshot, len(providers))
+	if h.health != nil {
+		healthSnapshot := h.health.Snapshot()
+		generatedAt = healthSnapshot.GeneratedAt.UTC()
+		for _, item := range healthSnapshot.Providers {
+			healthByProvider[item.ProviderID] = item
+		}
+	}
+	result := providerHealthListResponse{
+		Revision:    snapshot.Revision(),
+		GeneratedAt: generatedAt,
+		Providers:   make([]providerHealthResponse, 0, len(providers)),
+	}
+	for _, item := range providers {
+		cfg := item.Config()
+		providerHealth := providerHealthResponse{
+			ID:                 cfg.ID,
+			Name:               cfg.Name,
+			BaseURL:            cfg.BaseURL,
+			APIKey:             cfg.APIKey,
+			Priority:           cfg.Priority,
+			Enabled:            cfg.Enabled,
+			Models:             append([]string(nil), cfg.Models...),
+			UseXAPIKey:         cfg.UseXAPIKey,
+			TLS:                cfg.TLS,
+			Patches:            append([]string(nil), cfg.Patches...),
+			DisableHealth:      cfg.DisableHealth,
+			StaticAvailability: scheduler.StaticAvailabilityOf(item),
+			Channels:           []channelHealthResponse{},
+			Sessions:           []sessionHealthResponse{},
+		}
+		healthSnapshot, ok := healthByProvider[item.ID]
+		if ok {
+			providerHealth.GlobalHealth = globalHealthResponse(healthSnapshot.Global)
+			providerHealth.Channels = make([]channelHealthResponse, 0, len(healthSnapshot.Channels))
+			for _, channel := range healthSnapshot.Channels {
+				diagnostic := channelHealthDiagnosticResponse(channel)
+				providerHealth.Channels = append(providerHealth.Channels, channelHealthResponse{
+					Model:               channel.Model,
+					TrafficClass:        string(channel.TrafficClass),
+					State:               diagnostic.State,
+					BackoffLevel:        diagnostic.BackoffLevel,
+					ConsecutiveFailures: diagnostic.ConsecutiveFailures,
+					ObservedFailures:    diagnostic.ObservedFailures,
+					CooldownUntil:       diagnostic.CooldownUntil,
+					LastSuccessAt:       diagnostic.LastSuccessAt,
+					LastFailureAt:       diagnostic.LastFailureAt,
+					ProbeInFlight:       diagnostic.ProbeInFlight,
+					LastUpstreamURL:     diagnostic.LastUpstreamURL,
+					LastError:           diagnostic.LastError,
+					LastSessionID:       diagnostic.LastSessionID,
+				})
+			}
+		}
+		if h.selector != nil {
+			assignments := h.selector.Assignments(item.ID)
+			providerHealth.Sessions = make([]sessionHealthResponse, 0, len(assignments))
+			for _, assignment := range assignments {
+				providerHealth.Sessions = append(providerHealth.Sessions, sessionHealthResponse{
+					SessionID:    assignment.Key.SessionID,
+					Model:        assignment.Key.Model,
+					TrafficClass: string(assignment.Key.TrafficClass),
+					CreatedAt:    assignment.CreatedAt.UTC(),
+					LastUsedAt:   assignment.LastUsedAt.UTC(),
+				})
+			}
+		}
+		providerHealth.ActiveSessionCount = len(providerHealth.Sessions)
+		result.Providers = append(result.Providers, providerHealth)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func globalHealthResponse(item health.GlobalSnapshot) healthDiagnosticResponse {
+	result := diagnosticResponse(item.Diagnostic)
+	result.State = string(item.State)
+	return result
+}
+
+func channelHealthDiagnosticResponse(item health.ChannelSnapshot) healthDiagnosticResponse {
+	result := diagnosticResponse(item.Diagnostic)
+	result.State = string(item.State)
+	return result
+}
+
+func diagnosticResponse(item health.Diagnostic) healthDiagnosticResponse {
+	return healthDiagnosticResponse{
+		BackoffLevel:        item.BackoffLevel,
+		ConsecutiveFailures: item.ConsecutiveFailures,
+		ObservedFailures:    item.ObservedFailures,
+		CooldownUntil:       item.CooldownUntil,
+		LastSuccessAt:       item.LastSuccessAt,
+		LastFailureAt:       item.LastFailureAt,
+		ProbeInFlight:       item.ProbeInFlight,
+		LastUpstreamURL:     item.LastUpstreamURL,
+		LastError:           item.LastError,
+		LastSessionID:       item.LastSessionID,
+	}
 }
 
 func (h *Handler) decodeConfig(w http.ResponseWriter, r *http.Request) (config.Config, error) {
