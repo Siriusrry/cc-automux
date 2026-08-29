@@ -127,6 +127,8 @@ type HealthLease struct {
 	GlobalProbe  bool
 	ChannelProbe bool
 	Disabled     bool
+	// Token is an opaque single-use value issued and consumed by the health controller.
+	Token uint64
 }
 
 type HealthDecision struct {
