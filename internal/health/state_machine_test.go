@@ -51,6 +51,23 @@ func TestNeutralUpstreamErrorIsObservedWithoutBreakerMutation(t *testing.T) {
 	p := testProvider("provider", "generation", false, "model")
 	store.Reconcile([]*provider.CompiledProvider{p})
 	key := testHealthKey(p, "model")
+	// Establish non-default state in both layers so the neutral observation can
+	// be checked for complete global immutability and unchanged breaker counts.
+	globalLease := mustAcquire(t, store, key, false)
+	store.Report(globalLease.Lease, scheduler.Outcome{
+		Class:       scheduler.FailureGlobalTransient,
+		UpstreamURL: "https://provider.example/global",
+		RawError:    "global transient",
+		SessionID:   "global-session",
+	})
+	channelLease := mustAcquire(t, store, key, false)
+	store.Report(channelLease.Lease, scheduler.Outcome{
+		Class:       scheduler.FailureChannelTransient,
+		UpstreamURL: "https://provider.example/channel",
+		RawError:    "channel transient",
+		SessionID:   "channel-session",
+	})
+	before := mustProviderSnapshot(t, store, p)
 	decision := mustAcquire(t, store, key, false)
 	store.Report(decision.Lease, scheduler.Outcome{
 		Class:       scheduler.FailureNeutral,
@@ -60,12 +77,36 @@ func TestNeutralUpstreamErrorIsObservedWithoutBreakerMutation(t *testing.T) {
 		SessionID:   "session-neutral",
 	})
 	got := mustProviderSnapshot(t, store, p)
+	if !reflect.DeepEqual(got.Global, before.Global) {
+		t.Fatalf("neutral response changed global diagnostics: before=%#v after=%#v", before.Global, got.Global)
+	}
 	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
-	if channel.State != scheduler.ChannelUnknown || channel.ConsecutiveFailures != 0 || channel.ObservedFailures != 1 || channel.LastFailureAt == nil {
+	beforeChannel := findChannel(t, before, "model", scheduler.TrafficClassNormal)
+	if channel.State != beforeChannel.State || channel.ConsecutiveFailures != beforeChannel.ConsecutiveFailures ||
+		channel.ObservedFailures != beforeChannel.ObservedFailures+1 || channel.LastFailureAt == nil ||
+		!channel.LastFailureAt.Equal(clock.Now()) {
 		t.Fatalf("neutral channel = %#v", channel)
 	}
 	if channel.LastUpstreamURL != "https://provider.example/v1/messages" || channel.LastError != "invalid request" || channel.LastSessionID != "session-neutral" {
 		t.Fatalf("neutral diagnostics = %#v", channel)
+	}
+	// A subsequent empty 400 body is also a real latest observation and clears
+	// stale error text without affecting either layer's breaker counters.
+	before = got
+	decision = mustAcquire(t, store, key, false)
+	store.Report(decision.Lease, scheduler.Outcome{
+		Class:       scheduler.FailureNeutral,
+		HTTPStatus:  400,
+		UpstreamURL: "https://provider.example/empty",
+		SessionID:   "session-empty",
+	})
+	got = mustProviderSnapshot(t, store, p)
+	if !reflect.DeepEqual(got.Global, before.Global) {
+		t.Fatalf("empty neutral response changed global diagnostics: before=%#v after=%#v", before.Global, got.Global)
+	}
+	channel = findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	if channel.LastError != "" || channel.ObservedFailures != beforeChannel.ObservedFailures+2 || channel.ConsecutiveFailures != beforeChannel.ConsecutiveFailures {
+		t.Fatalf("empty neutral diagnostics = %#v", channel)
 	}
 }
 

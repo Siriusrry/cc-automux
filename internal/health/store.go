@@ -433,15 +433,17 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 		observeLatest(channel, outcome)
 		update.ChannelEnteredCooldown = s.applyFailureLocked(channel, lease.Token, now, outcome, false)
 		releaseProbe(&scope.global, lease.Token)
-	default:
-		// A neutral HTTP response is still an observed upstream failure for
-		// diagnostics, but local preparation errors, client cancellation, and
-		// downstream write failures do not describe Provider health.
-		if outcome.Class == scheduler.FailureNeutral && outcome.HTTPStatus > 0 {
-			observeLatest(&scope.global, outcome)
-			observeLatest(channel, outcome)
-			recordNeutralFailure(channel, now)
+	case scheduler.FailureNeutral:
+		// A neutral upstream HTTP response is a model/request observation only.
+		// It must not change any Provider-global diagnostic or breaker field.
+		if outcome.HTTPStatus > 0 {
+			observeNeutralFailure(channel, outcome, now)
 		}
+		releaseProbe(&scope.global, lease.Token)
+		releaseProbe(channel, lease.Token)
+	default:
+		// Local preparation errors, client cancellation, and downstream write
+		// failures do not describe Provider health.
 		releaseProbe(&scope.global, lease.Token)
 		releaseProbe(channel, lease.Token)
 	}
@@ -466,6 +468,18 @@ func observeLatest(entry *stateEntry, outcome scheduler.Outcome) {
 	if outcome.RawError != "" {
 		entry.lastError = outcome.RawError
 	}
+}
+
+func observeNeutralFailure(entry *stateEntry, outcome scheduler.Outcome, now time.Time) {
+	if entry == nil {
+		return
+	}
+	entry.lastUpstreamURL = outcome.UpstreamURL
+	entry.lastSessionID = outcome.SessionID
+	// An empty response body is still the latest observed error text and must
+	// replace an older diagnostic rather than leaving stale text behind.
+	entry.lastError = outcome.RawError
+	recordNeutralFailure(entry, now)
 }
 
 func recordNeutralFailure(entry *stateEntry, now time.Time) {
