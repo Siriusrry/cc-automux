@@ -253,7 +253,10 @@ func validateBaseURL(raw string) error {
 	if u.User != nil {
 		return errors.New("userinfo is not allowed")
 	}
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+	// net/url represents a bare trailing fragment marker (for example,
+	// "https://host/path#") with an empty Fragment. Inspect the original URI
+	// as well so every literal fragment delimiter is rejected consistently.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.IndexByte(raw, '#') >= 0 {
 		return errors.New("query and fragment are not allowed")
 	}
 	if u.Opaque != "" {

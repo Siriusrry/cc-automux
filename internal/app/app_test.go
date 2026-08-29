@@ -329,10 +329,16 @@ func TestCappedWriterConsumesCrossBoundaryWrite(t *testing.T) {
 		t.Fatalf("destination = %q, want capped content", got)
 	}
 	if n, err := writer.Write([]byte("more")); err != nil || n != 4 {
-		t.Fatalf("dropped Write() = %d, %v", n, err)
+		t.Fatalf("rolled Write() = %d, %v", n, err)
 	}
-	if destination.String() != "abcd" {
-		t.Fatalf("destination grew past cap: %q", destination.String())
+	if destination.String() != "more" {
+		t.Fatalf("destination did not roll over: %q", destination.String())
+	}
+	if n, err := writer.Write([]byte("next")); err != nil || n != 4 {
+		t.Fatalf("second rolled Write() = %d, %v", n, err)
+	}
+	if destination.String() != "next" {
+		t.Fatalf("destination stopped after first rollover: %q", destination.String())
 	}
 }
 
@@ -343,7 +349,7 @@ func TestCappedWriterAccountsForExistingFileSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, err := file.WriteString("old"); err != nil {
+	if _, err := file.WriteString("already-too-large"); err != nil {
 		t.Fatal(err)
 	}
 	writer := newCappedWriter(5, file)
@@ -354,7 +360,20 @@ func TestCappedWriterAccountsForExistingFileSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "oldmo"; got != want {
+	if got, want := string(data), "more"; got != want {
 		t.Fatalf("log content = %q, want %q", got, want)
+	}
+	if len(data) > 5 {
+		t.Fatalf("log exceeded cap after startup rollover: %d", len(data))
+	}
+	if n, err := writer.Write([]byte("again")); err != nil || n != 5 {
+		t.Fatalf("second Write() = %d, %v", n, err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "again"; got != want {
+		t.Fatalf("log stopped after startup rollover: %q", got)
 	}
 }

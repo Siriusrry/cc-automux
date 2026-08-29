@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/provider"
@@ -98,16 +99,34 @@ func (h *Handler) authorized(r *http.Request) bool {
 	if len(values) != 1 {
 		return false
 	}
-	parts := strings.Fields(strings.TrimSpace(values[0]))
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
+	token, ok := parseBearerAuthorization(values[0])
+	if !ok {
 		return false
 	}
 	key := h.manager.Snapshot().ManagementKey()
 	// Hashing both values makes the constant-time comparison independent of
 	// their original lengths while preserving exact key comparison.
 	want := sha256.Sum256([]byte(key))
-	got := sha256.Sum256([]byte(parts[1]))
-	return subtle.ConstantTimeCompare(want[:], got[:]) == 1 && parts[1] == key
+	got := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(want[:], got[:]) == 1 && token == key
+}
+
+// parseBearerAuthorization accepts the RFC 7235 scheme SP token shape without
+// treating tabs, repeated spaces, or surrounding whitespace as equivalent to
+// the required single ASCII SP separator. The Bearer scheme name itself is
+// case-insensitive, as required by the HTTP authentication grammar.
+func parseBearerAuthorization(value string) (string, bool) {
+	const scheme = "Bearer"
+	if len(value) <= len(scheme) || !strings.EqualFold(value[:len(scheme)], scheme) || value[len(scheme)] != ' ' {
+		return "", false
+	}
+	token := value[len(scheme)+1:]
+	if token == "" || strings.IndexFunc(token, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) >= 0 {
+		return "", false
+	}
+	return token, true
 }
 
 func writeUnauthorized(w http.ResponseWriter) {

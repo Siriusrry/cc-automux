@@ -54,6 +54,10 @@ func TestManagementAuthenticationUsesStandardChallenge(t *testing.T) {
 		request(handler, http.MethodGet, "/api/v1/status", "Basic management-key", ""),
 		request(handler, http.MethodGet, "/api/v1/status", "Bearer wrong", ""),
 		request(handler, http.MethodGet, "/api/v1/status", "Bearer ", ""),
+		request(handler, http.MethodGet, "/api/v1/status", "Bearer\tmanagement-key", ""),
+		request(handler, http.MethodGet, "/api/v1/status", "Bearer  management-key", ""),
+		request(handler, http.MethodGet, "/api/v1/status", " Bearer management-key", ""),
+		request(handler, http.MethodGet, "/api/v1/status", "Bearer management-key ", ""),
 	}
 	for i, rec := range responses {
 		if rec.Code != http.StatusUnauthorized {
@@ -65,6 +69,9 @@ func TestManagementAuthenticationUsesStandardChallenge(t *testing.T) {
 		if i > 0 && rec.Body.String() != responses[0].Body.String() {
 			t.Fatalf("auth failure bodies differ: %q vs %q", responses[0].Body.String(), rec.Body.String())
 		}
+	}
+	if rec := request(handler, http.MethodGet, "/api/v1/status", "bearer management-key", ""); rec.Code != http.StatusOK {
+		t.Fatalf("case-insensitive Bearer scheme = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

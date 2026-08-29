@@ -47,6 +47,8 @@ go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-
 
 LaunchAgent 只携带可选的 CC_AUTOMUX_CONFIG 覆盖，不再注入旧路由或上游环境变量。配置文件路径由配置核心解析。
 
+stdout/stderr 的普通日志文件分别受配置中的 `log_max_bytes` 限制。达到上限后会截断旧内容并继续记录，不会永久停止写日志。
+
 ## 启动、停止与状态
 
 ~~~

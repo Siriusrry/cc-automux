@@ -125,12 +125,18 @@ func TestValidateRejectsWhitespaceCredentialsAndInvalidBaseURLPorts(t *testing.T
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("whitespace-only gateway key was accepted")
 	}
-	for _, raw := range []string{"https://example.test:", "https://example.test:0", "https://example.test:65536", "https://example.test:01"} {
+	for _, raw := range []string{"https://example.test:", "https://example.test:0", "https://example.test:65536", "https://example.test:01", "https://example.test/path#"} {
 		cfg = validConfig()
 		cfg.Providers[0].BaseURL = raw
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("base URL %q was accepted", raw)
 		}
+	}
+	// An escaped hash is path data, not a fragment delimiter, and remains valid.
+	cfg = validConfig()
+	cfg.Providers[0].BaseURL = "https://example.test/path%23segment"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("escaped hash in base URL was rejected: %v", err)
 	}
 }
 

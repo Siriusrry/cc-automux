@@ -54,6 +54,10 @@ Installed paths:
 The LaunchAgent carries only the optional CC_AUTOMUX_CONFIG override. It does
 not seed legacy route or upstream environment variables.
 
+Each regular stdout/stderr log file is bounded by the configured
+`log_max_bytes`. Reaching the limit rolls the file over by truncating old
+contents and continues logging; it is not a permanent write stop.
+
 ## Start, stop, and status
 
 ~~~
