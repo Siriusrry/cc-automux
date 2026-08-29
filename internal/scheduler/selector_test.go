@@ -344,9 +344,7 @@ func TestAttemptOrderAndMaximumDistinctProviders(t *testing.T) {
 
 func TestAttemptBudgetComesFromRequestSnapshot(t *testing.T) {
 	health := newFakeHealth()
-	policy := DefaultPolicy()
-	policy.MaxAttempts = 7
-	selector := newTestScheduler(t, health, policy, nil)
+	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
 	snapshot := &fakeSnapshot{
 		revision: 1,
 		attempts: AttemptPolicy{MaxAttempts: 2},

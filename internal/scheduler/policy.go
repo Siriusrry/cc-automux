@@ -29,14 +29,10 @@ type Policy struct {
 	FailureThreshold    int
 	Cooldowns           [5]time.Duration
 	HalfOpenConcurrency int
-	// MaxAttempts is retained as a composite-policy projection for callers
-	// that still construct a complete Policy. Request handling never reads it;
-	// the immutable Snapshot AttemptPolicy is the request-time source of truth.
-	MaxAttempts    int
-	StickyTTL      time.Duration
-	StickyCapacity int
-	RetryAfterMin  time.Duration
-	RetryAfterMax  time.Duration
+	StickyTTL           time.Duration
+	StickyCapacity      int
+	RetryAfterMin       time.Duration
+	RetryAfterMax       time.Duration
 }
 
 func DefaultPolicy() Policy {
@@ -45,7 +41,6 @@ func DefaultPolicy() Policy {
 		FailureThreshold:    3,
 		Cooldowns:           [5]time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 15 * time.Minute},
 		HalfOpenConcurrency: 1,
-		MaxAttempts:         defaultMaxAttempts,
 		StickyTTL:           time.Hour,
 		StickyCapacity:      8192,
 		RetryAfterMin:       time.Second,
@@ -54,12 +49,8 @@ func DefaultPolicy() Policy {
 }
 
 // DefaultAttemptPolicy is the canonical default for the request retry budget.
-// It is intentionally defined independently from the health/affinity policy.
+// It is intentionally independent from the health and affinity policy.
 func DefaultAttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: defaultMaxAttempts} }
-
-// AttemptPolicy projects the request budget from a complete Policy for
-// composition and compatibility. Runtime request paths use Snapshot instead.
-func (p Policy) AttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: p.MaxAttempts} }
 
 // ResolveAttemptPolicy reads and validates the immutable request budget from a
 // runtime snapshot. It never supplies a request-path default.
@@ -97,9 +88,6 @@ func (p Policy) Validate() error {
 	}
 	if p.HalfOpenConcurrency != 1 {
 		return errors.New("half-open concurrency must be exactly one")
-	}
-	if err := p.AttemptPolicy().Validate(); err != nil {
-		return err
 	}
 	if p.StickyTTL <= 0 || p.StickyCapacity <= 0 {
 		return errors.New("sticky limits must be positive")
