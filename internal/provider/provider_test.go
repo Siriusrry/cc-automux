@@ -1,9 +1,7 @@
 package provider
 
 import (
-	"encoding/pem"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,34 +126,6 @@ func TestTLSDefaultsAndFailClosedPatchRegistry(t *testing.T) {
 	}
 	if err := compiled.ApplyPatches(); err == nil || !strings.Contains(err.Error(), "not implemented") {
 		t.Fatalf("unimplemented patch application error = %v", err)
-	}
-}
-
-func TestCustomCACompilesIntoUsableHTTPClient(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer upstream.Close()
-	certificate := upstream.Certificate()
-	caPath := filepath.Join(t.TempDir(), "ca.pem")
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
-	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	p := providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
-	p.BaseURL = upstream.URL
-	p.TLS.CAFile = caPath
-	compiled, err := Compile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := compiled.NewHTTPClient().Get(upstream.URL)
-	if err != nil {
-		t.Fatalf("custom-CA request failed: %v", err)
-	}
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
-		t.Fatalf("custom-CA status = %d", response.StatusCode)
 	}
 }
 

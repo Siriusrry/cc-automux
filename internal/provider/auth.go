@@ -31,16 +31,3 @@ func (p *CompiledProvider) ApplyAuthHeaders(headers http.Header) error {
 	headers.Set("Authorization", "Bearer "+p.APIKey)
 	return nil
 }
-
-// PrepareHeaders clones client headers and applies the provider credential,
-// making the credential-boundary operation convenient for forwarding code.
-func (p *CompiledProvider) PrepareHeaders(source http.Header) (http.Header, error) {
-	destination := source.Clone()
-	if destination == nil {
-		destination = make(http.Header)
-	}
-	if err := p.ApplyAuthHeaders(destination); err != nil {
-		return nil, err
-	}
-	return destination, nil
-}
