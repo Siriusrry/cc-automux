@@ -147,7 +147,11 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, excluded map[strin
 	if key.TrafficClass != TrafficClassNormal && key.TrafficClass != TrafficClassClassifier {
 		return AttemptLease{}, fmt.Errorf("%w: unsupported traffic class %q", ErrInvalidSchedulingKey, key.TrafficClass)
 	}
-	if len(excluded) >= s.policy.MaxAttempts {
+	attemptPolicy, err := ResolveAttemptPolicy(snapshot)
+	if err != nil {
+		return AttemptLease{}, fmt.Errorf("%w: %v", ErrInvalidSchedulingKey, err)
+	}
+	if len(excluded) >= attemptPolicy.MaxAttempts {
 		return AttemptLease{}, ErrAttemptBudgetExhausted
 	}
 

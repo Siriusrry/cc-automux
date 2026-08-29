@@ -23,14 +23,23 @@ import (
 )
 
 type fakeSnapshot struct {
-	revision   uint64
-	gatewayKey string
-	providers  []*provider.CompiledProvider
+	revision           uint64
+	gatewayKey         string
+	attemptPolicy      scheduler.AttemptPolicy
+	attemptPolicyCalls atomic.Int32
+	providers          []*provider.CompiledProvider
 }
 
 func (s *fakeSnapshot) Revision() uint64 { return s.revision }
 func (s *fakeSnapshot) GatewayKey() string {
 	return s.gatewayKey
+}
+func (s *fakeSnapshot) AttemptPolicy() scheduler.AttemptPolicy {
+	s.attemptPolicyCalls.Add(1)
+	if s.attemptPolicy == (scheduler.AttemptPolicy{}) {
+		return scheduler.DefaultAttemptPolicy()
+	}
+	return s.attemptPolicy
 }
 func (s *fakeSnapshot) Candidates(model string) []*provider.CompiledProvider {
 	var result []*provider.CompiledProvider
@@ -387,6 +396,50 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 	}
 	if !healthFailure || !healthFailover {
 		t.Fatalf("health transition missing from failure/failover events: %#v", gotEvents)
+	}
+}
+
+func TestGatewayCapturesAttemptPolicyOncePerRequest(t *testing.T) {
+	for _, maxAttempts := range []int{2, 5} {
+		t.Run(fmt.Sprintf("maximum_%d", maxAttempts), func(t *testing.T) {
+			var upstreamCalls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				call := upstreamCalls.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = fmt.Fprintf(w, "failure-%d", call)
+			}))
+			defer upstream.Close()
+			providers := make([]*provider.CompiledProvider, maxAttempts+1)
+			leases := make([]scheduler.AttemptLease, len(providers))
+			for index := range providers {
+				providers[index] = compileTestProvider(t,
+					fmt.Sprintf("%08d-1111-4111-8111-111111111111", index+1),
+					fmt.Sprintf("provider-%d", index+1), upstream.URL, fmt.Sprintf("key-%d", index+1), "m", false)
+				leases[index] = leaseFor(providers[index], "m")
+			}
+			selector := &fakeSelector{leases: leases}
+			snapshot := &fakeSnapshot{
+				revision:      1,
+				gatewayKey:    "gateway",
+				attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: maxAttempts},
+				providers:     providers,
+			}
+			handler := New(func() scheduler.Snapshot { return snapshot }, selector)
+			defer handler.Close()
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`))
+			wantBody := fmt.Sprintf("failure-%d", maxAttempts)
+			if response.Code != http.StatusInternalServerError || response.Body.String() != wantBody {
+				t.Fatalf("final response = %d %q, want %q", response.Code, response.Body.String(), wantBody)
+			}
+			acquires, reports := selector.snapshot()
+			if acquires != maxAttempts || len(reports) != maxAttempts || upstreamCalls.Load() != int32(maxAttempts) {
+				t.Fatalf("acquires=%d reports=%d upstream=%d", acquires, len(reports), upstreamCalls.Load())
+			}
+			if calls := snapshot.attemptPolicyCalls.Load(); calls != 1 {
+				t.Fatalf("AttemptPolicy() calls = %d", calls)
+			}
+		})
 	}
 }
 

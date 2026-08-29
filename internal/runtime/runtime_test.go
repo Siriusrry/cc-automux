@@ -10,6 +10,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 func runtimeConfig() config.Config {
@@ -80,6 +81,40 @@ func TestHotApplyPublishesOnlyAfterPersist(t *testing.T) {
 	loaded, err = store.Load()
 	if err != nil || loaded.Providers[0].Priority != -1 || len(loaded.Providers[0].Models) != 1 {
 		t.Fatalf("invalid candidate changed disk: %#v, %v", loaded, err)
+	}
+}
+
+func TestSnapshotCarriesAttemptPolicyAcrossRevisions(t *testing.T) {
+	attempts := scheduler.AttemptPolicy{MaxAttempts: 2}
+	manager, _, cfg := newRuntimeManager(t, Options{AttemptPolicy: attempts})
+	if got := manager.Snapshot().AttemptPolicy(); got != attempts {
+		t.Fatalf("initial attempt policy = %#v", got)
+	}
+	next := cfg.Clone()
+	next.Auth.GatewayKey = "gateway-key"
+	if _, err := manager.Apply(next); err != nil {
+		t.Fatal(err)
+	}
+	if got := manager.Snapshot().AttemptPolicy(); got != attempts {
+		t.Fatalf("hot-applied attempt policy = %#v", got)
+	}
+
+	defaultManager, _, _ := newRuntimeManager(t, Options{})
+	if got := defaultManager.Snapshot().AttemptPolicy(); got != scheduler.DefaultAttemptPolicy() {
+		t.Fatalf("default attempt policy = %#v", got)
+	}
+}
+
+func TestNewManagerRejectsInvalidAttemptPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(store, runtimeConfig(), Options{
+		AttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: -1},
+	}); err == nil || !strings.Contains(err.Error(), "attempt policy") {
+		t.Fatalf("invalid attempt policy error = %v", err)
 	}
 }
 

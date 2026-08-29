@@ -11,6 +11,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 var (
@@ -43,7 +44,8 @@ type RestartStatus struct {
 }
 
 type Options struct {
-	Registry *provider.Registry
+	Registry      *provider.Registry
+	AttemptPolicy scheduler.AttemptPolicy
 	// Preflight runs after full schema/provider compilation but before the
 	// pending file is written. Nil uses a loopback listener probe when the
 	// address changes and relies on config validation for the log limit.
@@ -73,6 +75,7 @@ type Manager struct {
 	registry provider.Registry
 	current  atomic.Pointer[Snapshot]
 	revision uint64
+	attempts scheduler.AttemptPolicy
 
 	preflight    func(current, next config.Config) error
 	restart      func() error
@@ -100,6 +103,13 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	if err != nil {
 		return nil, err
 	}
+	attempts := options.AttemptPolicy
+	if attempts == (scheduler.AttemptPolicy{}) {
+		attempts = scheduler.DefaultAttemptPolicy()
+	}
+	if err := attempts.Validate(); err != nil {
+		return nil, fmt.Errorf("attempt policy: %w", err)
+	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
@@ -113,6 +123,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 		store:         store,
 		registry:      registry,
 		revision:      1,
+		attempts:      attempts,
 		preflight:     preflight,
 		restart:       options.Restart,
 		restartDelay:  options.RestartDelay,
@@ -136,7 +147,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	m.current.Store(newSnapshot(m.revision, initial, catalog, startedAt))
+	m.current.Store(newSnapshot(m.revision, initial, catalog, m.attempts, startedAt))
 	return m, nil
 }
 
@@ -218,7 +229,7 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 			return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
 		}
 		m.revision++
-		m.current.Store(newSnapshot(m.revision, next, catalog, m.now()))
+		m.current.Store(newSnapshot(m.revision, next, catalog, m.attempts, m.now()))
 		m.restartStatus = RestartStatus{State: "idle"}
 		return ApplyResult{
 			Revision:   m.revision,
@@ -334,7 +345,7 @@ func (m *Manager) RestartSucceeded() error {
 		return err
 	}
 	m.revision++
-	m.current.Store(newSnapshot(m.revision, pending, catalog, m.now()))
+	m.current.Store(newSnapshot(m.revision, pending, catalog, m.attempts, m.now()))
 	m.restartTriggered = false
 	m.restartStatus = RestartStatus{State: "idle"}
 	return nil

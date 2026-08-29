@@ -105,11 +105,13 @@ func New(options Options) (*App, error) {
 		return nil, resourceErr
 	}
 
+	policy := scheduler.DefaultPolicy()
 	managerOptions := runtime.Options{
-		Registry:     &registry,
-		RestartDelay: options.RestartDelay,
-		Now:          options.Now,
-		Preflight:    options.Preflight,
+		Registry:      &registry,
+		AttemptPolicy: policy.AttemptPolicy(),
+		RestartDelay:  options.RestartDelay,
+		Now:           options.Now,
+		Preflight:     options.Preflight,
 	}
 	if managerOptions.RestartDelay == 0 {
 		managerOptions.RestartDelay = 250 * time.Millisecond
@@ -184,7 +186,6 @@ func New(options Options) (*App, error) {
 	if clock == nil {
 		clock = time.Now
 	}
-	policy := scheduler.DefaultPolicy()
 	healthStore, healthErr := health.New(policy, health.ClockFunc(clock))
 	if healthErr != nil {
 		closeResources(app.logs, app.listener)

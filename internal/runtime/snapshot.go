@@ -5,6 +5,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 // Snapshot is one immutable, fully compiled runtime state.
@@ -12,14 +13,16 @@ type Snapshot struct {
 	revision uint64
 	config   config.Config
 	catalog  *provider.Catalog
+	attempts scheduler.AttemptPolicy
 	created  time.Time
 }
 
-func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, now time.Time) *Snapshot {
+func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, attempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
 	return &Snapshot{
 		revision: revision,
 		config:   cfg.Clone(),
 		catalog:  catalog,
+		attempts: attempts,
 		created:  now,
 	}
 }
@@ -52,6 +55,15 @@ func (s *Snapshot) GatewayKey() string {
 		return ""
 	}
 	return s.config.Auth.GatewayKey
+}
+
+// AttemptPolicy returns the request retry budget captured with this immutable
+// runtime revision.
+func (s *Snapshot) AttemptPolicy() scheduler.AttemptPolicy {
+	if s == nil {
+		return scheduler.AttemptPolicy{}
+	}
+	return s.attempts
 }
 
 func (s *Snapshot) Catalog() *provider.Catalog {

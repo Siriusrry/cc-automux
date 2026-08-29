@@ -21,11 +21,28 @@ const (
 
 type fakeSnapshot struct {
 	revision  uint64
+	attempts  AttemptPolicy
 	providers []*provider.CompiledProvider
+}
+
+type countingAttemptSnapshot struct {
+	*fakeSnapshot
+	calls int
+}
+
+func (s *countingAttemptSnapshot) AttemptPolicy() AttemptPolicy {
+	s.calls++
+	return s.fakeSnapshot.AttemptPolicy()
 }
 
 func (s *fakeSnapshot) Revision() uint64   { return s.revision }
 func (s *fakeSnapshot) GatewayKey() string { return "gateway-key" }
+func (s *fakeSnapshot) AttemptPolicy() AttemptPolicy {
+	if s.attempts == (AttemptPolicy{}) {
+		return DefaultAttemptPolicy()
+	}
+	return s.attempts
+}
 
 func (s *fakeSnapshot) Candidates(model string) []*provider.CompiledProvider {
 	result := make([]*provider.CompiledProvider, 0, len(s.providers))
@@ -322,6 +339,53 @@ func TestAttemptOrderAndMaximumDistinctProviders(t *testing.T) {
 	assignments := selector.Assignments(providerA)
 	if len(assignments) != 1 || assignments[0].Key != key {
 		t.Fatalf("isolated fallback changed assignment: %#v", assignments)
+	}
+}
+
+func TestAttemptBudgetComesFromRequestSnapshot(t *testing.T) {
+	health := newFakeHealth()
+	policy := DefaultPolicy()
+	policy.MaxAttempts = 7
+	selector := newTestScheduler(t, health, policy, nil)
+	snapshot := &fakeSnapshot{
+		revision: 1,
+		attempts: AttemptPolicy{MaxAttempts: 2},
+		providers: []*provider.CompiledProvider{
+			compileProvider(t, providerA, "a", []string{"m"}, 0),
+			compileProvider(t, providerB, "b", []string{"m"}, 0),
+			compileProvider(t, providerC, "c", []string{"m"}, 0),
+		},
+	}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+	if _, err := selector.Acquire(snapshot, key, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}, providerB: {}}); !errors.Is(err, ErrAttemptBudgetExhausted) {
+		t.Fatalf("snapshot attempt budget error = %v", err)
+	}
+}
+
+func TestCaptureAttemptPolicyFreezesOneSnapshotRead(t *testing.T) {
+	source := &countingAttemptSnapshot{fakeSnapshot: &fakeSnapshot{
+		revision: 1,
+		attempts: AttemptPolicy{MaxAttempts: 5},
+	}}
+	captured, policy, err := CaptureAttemptPolicy(source)
+	if err != nil || policy.MaxAttempts != 5 {
+		t.Fatalf("CaptureAttemptPolicy() = %#v, %v", policy, err)
+	}
+	for i := 0; i < 3; i++ {
+		got, err := ResolveAttemptPolicy(captured)
+		if err != nil || got != policy {
+			t.Fatalf("captured policy = %#v, %v", got, err)
+		}
+	}
+	if source.calls != 1 {
+		t.Fatalf("source AttemptPolicy() calls = %d", source.calls)
 	}
 }
 

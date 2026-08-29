@@ -175,6 +175,7 @@ type Assignment struct {
 type Snapshot interface {
 	Revision() uint64
 	GatewayKey() string
+	AttemptPolicy() AttemptPolicy
 	Candidates(model string) []*provider.CompiledProvider
 	Providers() []*provider.CompiledProvider
 }

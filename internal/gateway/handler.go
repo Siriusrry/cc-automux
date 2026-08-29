@@ -85,6 +85,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
+	capturedSnapshot, attemptPolicy, err := scheduler.CaptureAttemptPolicy(snapshot)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
+		return
+	}
+	snapshot = capturedSnapshot
 	key := snapshot.GatewayKey()
 	if key == "" {
 		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured", "gateway key is not configured")
@@ -159,7 +165,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.reconcileClients(snapshot)
-	h.forward(w, r, snapshot, replay, scheduler.StickyKey{
+	h.forward(w, r, snapshot, replay, attemptPolicy, scheduler.StickyKey{
 		SessionID:    sessionID,
 		Model:        fields.model,
 		TrafficClass: scheduler.TrafficClassNormal,
@@ -196,11 +202,10 @@ type capturedFailure struct {
 	transport bool
 }
 
-func (h *Handler) forward(w http.ResponseWriter, incoming *http.Request, snapshot scheduler.Snapshot, replay *replayBody, sticky scheduler.StickyKey) {
+func (h *Handler) forward(w http.ResponseWriter, incoming *http.Request, snapshot scheduler.Snapshot, replay *replayBody, attemptPolicy scheduler.AttemptPolicy, sticky scheduler.StickyKey) {
 	excluded := make(map[string]struct{})
-	maxAttempts := scheduler.DefaultPolicy().MaxAttempts
 	var last *capturedFailure
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := 1; attempt <= attemptPolicy.MaxAttempts; attempt++ {
 		lease, err := h.selector.Acquire(snapshot, sticky, excluded)
 		if err != nil {
 			if closeErr := replay.Close(); closeErr != nil {
