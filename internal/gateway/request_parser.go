@@ -6,12 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 )
 
 type messageFields struct {
-	model         string
-	bodySessionID string
+	model string
 }
 
 type requestParseError struct {
@@ -103,17 +101,6 @@ func (p *jsonStream) parseTopObject() (messageFields, error) {
 				return fields, &requestParseError{code: "invalid_model", message: "model must not be empty"}
 			}
 			fields.model = model
-		case captured && key == "metadata":
-			if err := p.skipWhitespace(); err != nil {
-				return fields, err
-			}
-			if p.peekByte() == '{' {
-				if err := p.parseMetadataObject(&fields); err != nil {
-					return fields, err
-				}
-			} else if err := p.parseValue(); err != nil {
-				return fields, err
-			}
 		default:
 			if err := p.parseValue(); err != nil {
 				return fields, err
@@ -138,61 +125,6 @@ func (p *jsonStream) parseTopObject() (messageFields, error) {
 			}
 		default:
 			return fields, fmt.Errorf("expected comma or object end, got %q", next)
-		}
-	}
-}
-
-func (p *jsonStream) parseMetadataObject(fields *messageFields) error {
-	if _, err := p.readByte(); err != nil {
-		return err
-	}
-	if err := p.skipWhitespace(); err != nil {
-		return err
-	}
-	if p.peekByte() == '}' {
-		_, _ = p.readByte()
-		return nil
-	}
-	for {
-		key, captured, err := p.readJSONString(128)
-		if err != nil {
-			return err
-		}
-		if err := p.expectColon(); err != nil {
-			return err
-		}
-		if captured && key == "user_id" {
-			if err := p.skipWhitespace(); err != nil {
-				return err
-			}
-			if p.peekByte() == '"' {
-				value, _, err := p.readJSONString(-1)
-				if err != nil {
-					return err
-				}
-				fields.bodySessionID = strings.TrimSpace(value)
-			} else if err := p.parseValue(); err != nil {
-				return err
-			}
-		} else if err := p.parseValue(); err != nil {
-			return err
-		}
-		if err := p.skipWhitespace(); err != nil {
-			return err
-		}
-		next, err := p.readByte()
-		if err != nil {
-			return err
-		}
-		switch next {
-		case '}':
-			return nil
-		case ',':
-			if err := p.skipWhitespace(); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("expected comma or object end, got %q", next)
 		}
 	}
 }

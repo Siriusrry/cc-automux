@@ -144,22 +144,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	headerSessionID := singleSessionHeader(r.Header)
-	sessionID := fields.bodySessionID
-	if headerSessionID != "" {
-		sessionID = headerSessionID
-	}
-	if headerSessionID != "" && fields.bodySessionID != "" && headerSessionID != fields.bodySessionID {
-		h.record(Event{
-			Kind:            EventSessionConflict,
-			Time:            h.now().UTC(),
-			SessionID:       sessionID,
-			HeaderSessionID: headerSessionID,
-			BodySessionID:   fields.bodySessionID,
-			Model:           fields.model,
-			TrafficClass:    scheduler.TrafficClassNormal,
-		})
-	}
+	sessionID := singleSessionHeader(r.Header)
 	if len(snapshot.Candidates(fields.model)) == 0 {
 		h.writeAfterReplayClose(w, replay, http.StatusNotFound, "model_not_configured", "model is not configured")
 		return
@@ -197,6 +182,7 @@ type capturedFailure struct {
 	lease     scheduler.AttemptLease
 	outcome   scheduler.Outcome
 	update    scheduler.HealthUpdate
+	attempt   int
 	headers   http.Header
 	body      []byte
 	transport bool
@@ -208,6 +194,9 @@ func (h *Handler) forward(w http.ResponseWriter, incoming *http.Request, snapsho
 	for attempt := 1; attempt <= attemptPolicy.MaxAttempts; attempt++ {
 		lease, err := h.selector.Acquire(snapshot, sticky, excluded)
 		if err != nil {
+			if last != nil {
+				h.recordCapturedFailure(last)
+			}
 			if closeErr := replay.Close(); closeErr != nil {
 				writeError(w, http.StatusInternalServerError, "replay_unavailable", "request replay cleanup failed")
 				return
@@ -220,17 +209,24 @@ func (h *Handler) forward(w http.ResponseWriter, incoming *http.Request, snapsho
 			return
 		}
 		if lease.Provider == nil {
+			if last != nil {
+				h.recordCapturedFailure(last)
+			}
 			h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sticky.SessionID})
 			h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "selected provider is unavailable")
 			return
 		}
 		if _, duplicate := excluded[lease.Provider.ID]; duplicate {
+			if last != nil {
+				h.recordCapturedFailure(last)
+			}
 			h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sticky.SessionID})
 			h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider selection repeated an attempt")
 			return
 		}
 		if last != nil {
-			h.recordFromFailure(EventFailover, last, attempt-1)
+			h.recordFailover(last, lease, attempt, incoming)
+			last = nil
 		}
 		failure, done := h.attempt(w, incoming, replay, lease, sticky.SessionID, attempt)
 		if done {
@@ -238,6 +234,9 @@ func (h *Handler) forward(w http.ResponseWriter, incoming *http.Request, snapsho
 		}
 		last = failure
 		excluded[lease.Provider.ID] = struct{}{}
+	}
+	if last != nil {
+		h.recordCapturedFailure(last)
 	}
 	if closeErr := replay.Close(); closeErr != nil {
 		writeError(w, http.StatusInternalServerError, "replay_unavailable", "request replay cleanup failed")
@@ -253,32 +252,42 @@ func (h *Handler) forward(w http.ResponseWriter, incoming *http.Request, snapsho
 func (h *Handler) attempt(w http.ResponseWriter, incoming *http.Request, replay *replayBody, lease scheduler.AttemptLease, sessionID string, attempt int) (*capturedFailure, bool) {
 	item := lease.Provider
 	if err := item.ValidateApplication(); err != nil {
-		h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, RawError: err.Error()})
+		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, RawError: err.Error()}
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider cannot process this request")
 		return nil, true
 	}
 	url, err := upstreamURL(item, incoming.URL)
 	if err != nil {
-		h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, RawError: err.Error()})
+		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, RawError: err.Error()}
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider request could not be built")
 		return nil, true
 	}
 	headers, err := prepareUpstreamHeaders(incoming.Header, item)
 	if err != nil {
-		h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()})
+		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider request could not be authenticated")
 		return nil, true
 	}
 	body, err := replay.Reader()
 	if err != nil {
-		h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()})
+		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusInternalServerError, "replay_unavailable", "request could not be replayed")
 		return nil, true
 	}
 	request, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, url.String(), body)
 	if err != nil {
 		_ = body.Close()
-		h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()})
+		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider request could not be built")
 		return nil, true
 	}
@@ -301,7 +310,9 @@ func (h *Handler) attempt(w http.ResponseWriter, incoming *http.Request, replay 
 	client, err := h.clients.Client(item)
 	if err != nil {
 		closeRequestBody(request)
-		h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()})
+		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
+		update := h.selector.Report(lease, outcome)
+		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		h.writeAfterReplayClose(w, replay, http.StatusInternalServerError, "gateway_unavailable", "provider client is unavailable")
 		return nil, true
 	}
@@ -324,7 +335,8 @@ func (h *Handler) attempt(w http.ResponseWriter, incoming *http.Request, replay 
 			_ = response.Body.Close()
 			outcome.Class = scheduler.FailureNeutral
 			outcome.RawError = closeErr.Error()
-			h.selector.Report(lease, outcome)
+			update := h.selector.Report(lease, outcome)
+			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request replay cleanup failed")
 			return nil, true
 		}
@@ -355,11 +367,11 @@ func (h *Handler) attempt(w http.ResponseWriter, incoming *http.Request, replay 
 	}
 	outcome.RawError = string(bodyBytes)
 	update := h.selector.Report(lease, outcome)
-	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 	return &capturedFailure{
 		lease:   lease,
 		outcome: outcome,
 		update:  update,
+		attempt: attempt,
 		headers: response.Header.Clone(),
 		body:    bodyBytes,
 	}, false
@@ -388,8 +400,7 @@ func (h *Handler) handleTransportError(w http.ResponseWriter, ctx context.Contex
 		return nil, true
 	}
 	update := h.selector.Report(lease, outcome)
-	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-	return &capturedFailure{lease: lease, outcome: outcome, update: update, transport: true}, false
+	return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, transport: true}, false
 }
 
 func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, response *http.Response, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int) {
@@ -506,6 +517,10 @@ func (h *Handler) record(event Event) {
 }
 
 func (h *Handler) recordOutcome(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) {
+	h.record(h.outcomeEvent(kind, lease, outcome, attempt, update))
+}
+
+func (h *Handler) outcomeEvent(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) Event {
 	item := lease.Provider
 	event := Event{
 		Kind:                   kind,
@@ -527,14 +542,30 @@ func (h *Handler) recordOutcome(kind EventKind, lease scheduler.AttemptLease, ou
 		event.ProviderID = item.ID
 		event.ProviderName = item.Name
 	}
-	h.record(event)
+	return event
 }
 
-func (h *Handler) recordFromFailure(kind EventKind, failure *capturedFailure, attempt int) {
+func (h *Handler) recordCapturedFailure(failure *capturedFailure) {
 	if failure == nil {
 		return
 	}
-	h.recordOutcome(kind, failure.lease, failure.outcome, attempt, failure.update)
+	h.recordOutcome(EventFailure, failure.lease, failure.outcome, failure.attempt, failure.update)
+}
+
+func (h *Handler) recordFailover(failure *capturedFailure, next scheduler.AttemptLease, nextAttempt int, incoming *http.Request) {
+	if failure == nil || next.Provider == nil {
+		return
+	}
+	event := h.outcomeEvent(EventFailover, failure.lease, failure.outcome, failure.attempt, failure.update)
+	event.NextProviderID = next.Provider.ID
+	event.NextProviderName = next.Provider.Name
+	event.NextAttempt = nextAttempt
+	if incoming != nil {
+		if nextURL, err := upstreamURL(next.Provider, incoming.URL); err == nil {
+			event.NextUpstreamURL = nextURL.String()
+		}
+	}
+	h.record(event)
 }
 
 func singleSessionHeader(headers http.Header) string {

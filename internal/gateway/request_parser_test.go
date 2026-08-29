@@ -80,7 +80,7 @@ func TestReplayBodyIsUnlinkedAndRepeatable(t *testing.T) {
 	}
 }
 
-func TestMessagesParserExtractsOnlyRoutingFields(t *testing.T) {
+func TestMessagesParserExtractsOnlyModel(t *testing.T) {
 	input := `{
 		"messages":[{"role":"user","content":[{"type":"text","text":"large-independent-value"}]}],
 		"metad\u0061ta":{"ignored":{"nested":[true,false,null,-12.5e+2]},"user\u005fid":" session-raw "},
@@ -91,7 +91,7 @@ func TestMessagesParserExtractsOnlyRoutingFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fields.model != "Model-X" || fields.bodySessionID != "session-raw" {
+	if fields.model != "Model-X" {
 		t.Fatalf("fields = %#v", fields)
 	}
 }

@@ -208,7 +208,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		return
 	}
 	target := a.logs.info
-	if event.Kind == gateway.EventFailure {
+	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover {
 		target = a.logs.error
 	}
 	cooldownUntil := ""
@@ -216,7 +216,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		cooldownUntil = event.CooldownUntil.UTC().Format(time.RFC3339Nano)
 	}
 	target.Printf(
-		"gateway kind=%s provider_id=%q provider_name=%q session_id=%q model=%q traffic_class=%q attempt=%d upstream_url=%q http_status=%d raw_error=%q global_health=%q channel_health=%q global_entered_cooldown=%t channel_entered_cooldown=%t cooldown_until=%q header_session_id=%q body_session_id=%q",
+		"gateway kind=%s provider_id=%q provider_name=%q session_id=%q model=%q traffic_class=%q attempt=%d upstream_url=%q http_status=%d raw_error=%q next_provider_id=%q next_provider_name=%q next_attempt=%d next_upstream_url=%q global_health=%q channel_health=%q global_entered_cooldown=%t channel_entered_cooldown=%t cooldown_until=%q",
 		event.Kind,
 		event.ProviderID,
 		event.ProviderName,
@@ -227,12 +227,14 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		event.UpstreamURL,
 		event.HTTPStatus,
 		event.RawError,
+		event.NextProviderID,
+		event.NextProviderName,
+		event.NextAttempt,
+		event.NextUpstreamURL,
 		event.GlobalHealth,
 		event.ChannelHealth,
 		event.GlobalEnteredCooldown,
 		event.ChannelEnteredCooldown,
 		cooldownUntil,
-		event.HeaderSessionID,
-		event.BodySessionID,
 	)
 }

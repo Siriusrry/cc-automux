@@ -9,11 +9,10 @@ import (
 type EventKind string
 
 const (
-	EventForward         EventKind = "forward"
-	EventFailover        EventKind = "failover"
-	EventSuccess         EventKind = "success"
-	EventFailure         EventKind = "failure"
-	EventSessionConflict EventKind = "session_conflict"
+	EventForward  EventKind = "forward"
+	EventFailover EventKind = "failover"
+	EventSuccess  EventKind = "success"
+	EventFailure  EventKind = "failure"
 )
 
 // Event contains the complete diagnostic values observed by the data plane.
@@ -24,14 +23,16 @@ type Event struct {
 	ProviderID             string
 	ProviderName           string
 	SessionID              string
-	HeaderSessionID        string
-	BodySessionID          string
 	Model                  string
 	TrafficClass           scheduler.TrafficClass
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int
 	RawError               string
+	NextProviderID         string
+	NextProviderName       string
+	NextAttempt            int
+	NextUpstreamURL        string
 	GlobalHealth           scheduler.GlobalHealthState
 	ChannelHealth          scheduler.ChannelHealthState
 	GlobalEnteredCooldown  bool

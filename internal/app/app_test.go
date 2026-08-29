@@ -133,6 +133,7 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=1", strings.NewReader(`{"model":"model-a","metadata":{"user_id":"app-session"}}`))
 	request.Header.Set("Authorization", "Bearer gateway-key")
+	request.Header.Set("X-Claude-Code-Session-Id", "app-session")
 	response := httptest.NewRecorder()
 	application.server.Handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "bad_gateway") {
@@ -156,6 +157,94 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 		!strings.Contains(healthResponse.Body.String(), `"last_error":"raw-app-upstream-error"`) ||
 		!strings.Contains(healthResponse.Body.String(), upstream.URL+`/prefix/v1/messages?beta=1`) {
 		t.Fatalf("provider health = %d %s", healthResponse.Code, healthResponse.Body.String())
+	}
+}
+
+func TestAppLogsFailoverToStderrWithCompleteSourceAndNextProvider(t *testing.T) {
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "raw-failover-error")
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "fallback-success")
+	}))
+	defer second.Close()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Default()
+	cfg.Service.ListenAddr = freeListenAddr(t)
+	cfg.Auth.ManagementKey = "management-key"
+	cfg.Auth.GatewayKey = "gateway-key"
+	cfg.Providers = []config.ProviderConfig{
+		{
+			ID:       "11111111-1111-4111-8111-111111111111",
+			Name:     "first-provider",
+			BaseURL:  first.URL,
+			APIKey:   "first-key",
+			Models:   []string{"model-a"},
+			Priority: 1,
+			Enabled:  true,
+		},
+		{
+			ID:       "22222222-2222-4222-8222-222222222222",
+			Name:     "second-provider",
+			BaseURL:  second.URL,
+			APIKey:   "second-key",
+			Models:   []string{"model-a"},
+			Priority: 0,
+			Enabled:  true,
+		},
+	}
+	writeAppConfig(t, path, cfg)
+	var stdout, stderr bytes.Buffer
+	application, err := New(Options{
+		ConfigPath: path,
+		Stdout:     &stdout,
+		Stderr:     &stderr,
+		Restart:    func() error { return errors.New("not used") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"model-a","metadata":{"user_id":"body-session"}}`))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	request.Header.Set("X-Claude-Code-Session-Id", "header-session")
+	response := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "fallback-success" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+
+	stdoutText := stdout.String()
+	stderrText := stderr.String()
+	if strings.Contains(stdoutText, "kind=failover") {
+		t.Fatalf("failover was logged to stdout: %q", stdoutText)
+	}
+	if !strings.Contains(stdoutText, "kind=forward") || !strings.Contains(stdoutText, "kind=success") {
+		t.Fatalf("stdout events = %q", stdoutText)
+	}
+	if count := strings.Count(stderrText, "kind=failover"); count != 1 {
+		t.Fatalf("stderr failover count = %d, log=%q", count, stderrText)
+	}
+	for _, field := range []string{
+		`provider_id="11111111-1111-4111-8111-111111111111"`,
+		`provider_name="first-provider"`,
+		`session_id="header-session"`,
+		`model="model-a"`,
+		`attempt=1`,
+		`upstream_url="` + first.URL + `/v1/messages"`,
+		`raw_error="raw-failover-error"`,
+		`next_provider_id="22222222-2222-4222-8222-222222222222"`,
+		`next_provider_name="second-provider"`,
+		`next_attempt=2`,
+		`next_upstream_url="` + second.URL + `/v1/messages"`,
+	} {
+		if !strings.Contains(stderrText, field) {
+			t.Fatalf("stderr missing %s: %q", field, stderrText)
+		}
 	}
 }
 
@@ -190,8 +279,9 @@ func TestAppHotUpdateUsesNewProviderGenerationOnNextRequest(t *testing.T) {
 	defer application.Close()
 
 	request := func(session string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"model-a","metadata":{"user_id":"`+session+`"}}`))
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"model-a"}`))
 		req.Header.Set("Authorization", "Bearer gateway-key")
+		req.Header.Set("X-Claude-Code-Session-Id", session)
 		response := httptest.NewRecorder()
 		application.server.Handler.ServeHTTP(response, req)
 		return response

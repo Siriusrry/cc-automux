@@ -60,14 +60,16 @@ type fakeSelector struct {
 	updates  []scheduler.HealthUpdate
 	next     int
 	reports  []scheduler.Outcome
+	keys     []scheduler.StickyKey
 	acquires int
 	err      error
 }
 
-func (s *fakeSelector) Acquire(_ scheduler.Snapshot, _ scheduler.StickyKey, _ map[string]struct{}) (scheduler.AttemptLease, error) {
+func (s *fakeSelector) Acquire(_ scheduler.Snapshot, key scheduler.StickyKey, _ map[string]struct{}) (scheduler.AttemptLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.acquires++
+	s.keys = append(s.keys, key)
 	if s.next >= len(s.leases) {
 		if s.err != nil {
 			return scheduler.AttemptLease{}, s.err
@@ -77,6 +79,12 @@ func (s *fakeSelector) Acquire(_ scheduler.Snapshot, _ scheduler.StickyKey, _ ma
 	lease := s.leases[s.next]
 	s.next++
 	return lease, nil
+}
+
+func (s *fakeSelector) stickyKeys() []scheduler.StickyKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]scheduler.StickyKey(nil), s.keys...)
 }
 func (s *fakeSelector) Report(_ scheduler.AttemptLease, outcome scheduler.Outcome) scheduler.HealthUpdate {
 	s.mu.Lock()
@@ -300,7 +308,7 @@ func TestGatewayComposesURLCleansHeadersAndRecordsSession(t *testing.T) {
 			}
 
 			gotEvents := events.snapshot()
-			if len(gotEvents) != 3 || gotEvents[0].Kind != EventSessionConflict || gotEvents[1].Kind != EventForward || gotEvents[2].Kind != EventSuccess {
+			if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventSuccess {
 				t.Fatalf("events = %#v", gotEvents)
 			}
 			for _, event := range gotEvents {
@@ -308,12 +316,69 @@ func TestGatewayComposesURLCleansHeadersAndRecordsSession(t *testing.T) {
 					t.Fatalf("event session = %q", event.SessionID)
 				}
 			}
-			if gotEvents[0].HeaderSessionID != "header-session" || gotEvents[0].BodySessionID != "body-session" {
-				t.Fatalf("conflict = %#v", gotEvents[0])
-			}
 			_, reports := selector.snapshot()
 			if len(reports) != 1 || reports[0].Class != scheduler.FailureNone || reports[0].SessionID != "header-session" {
 				t.Fatalf("reports = %#v", reports)
+			}
+			if keys := selector.stickyKeys(); len(keys) != 1 || keys[0].SessionID != "header-session" {
+				t.Fatalf("sticky keys = %#v", keys)
+			}
+		})
+	}
+}
+
+func TestGatewaySessionUsesOnlyOneNonEmptyHeader(t *testing.T) {
+	const body = `{"model":"m","metadata":{"user_id":"body-session"}}`
+	for _, test := range []struct {
+		name        string
+		headers     []string
+		wantSession string
+	}{
+		{name: "missing"},
+		{name: "blank", headers: []string{"   "}},
+		{name: "multiple", headers: []string{"session-one", "session-two"}},
+		{name: "unique", headers: []string{" header-session "}, wantSession: "header-session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var upstreamBody string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read upstream body: %v", err)
+					return
+				}
+				upstreamBody = string(data)
+				_, _ = io.WriteString(w, "ok")
+			}))
+			defer upstream.Close()
+			item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", upstream.URL, "key", "m", false)
+			selector := &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(item, "m")}}
+			events := &eventCollector{}
+			handler := NewWithOptions(func() scheduler.Snapshot {
+				return &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}}
+			}, selector, Options{Recorder: events})
+			defer handler.Close()
+
+			request := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", body)
+			if test.headers != nil {
+				request.Header["X-Claude-Code-Session-Id"] = append([]string(nil), test.headers...)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK || upstreamBody != body {
+				t.Fatalf("response=%d upstream body=%q", response.Code, upstreamBody)
+			}
+			keys := selector.stickyKeys()
+			_, reports := selector.snapshot()
+			gotEvents := events.snapshot()
+			if len(keys) != 1 || keys[0].SessionID != test.wantSession {
+				t.Fatalf("sticky keys = %#v", keys)
+			}
+			if len(reports) != 1 || reports[0].SessionID != test.wantSession {
+				t.Fatalf("reports = %#v", reports)
+			}
+			if len(gotEvents) != 2 || gotEvents[0].SessionID != test.wantSession || gotEvents[1].SessionID != test.wantSession {
+				t.Fatalf("events = %#v", gotEvents)
 			}
 		})
 	}
@@ -357,7 +422,9 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 	}, selector, Options{Recorder: events, Now: func() time.Time { return time.Unix(1_000, 0) }})
 	defer handler.Close()
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","metadata":{"user_id":"session-exact"}}`))
+	request := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","metadata":{"user_id":"ignored-body-session"}}`)
+	request.Header.Set("X-Claude-Code-Session-Id", "session-exact")
+	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || response.Body.String() != bodies[2] || response.Header().Get("X-Final") != "503" {
 		t.Fatalf("final response = %d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 	}
@@ -369,33 +436,34 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 		t.Fatalf("Retry-After report = %#v", reports[1])
 	}
 	gotEvents := events.snapshot()
-	failovers := 0
-	healthFailure := false
-	healthFailover := false
-	for _, event := range gotEvents {
-		if event.Kind == EventFailover {
-			failovers++
-		}
-		if event.Kind == EventFailure && event.RawError != bodies[event.Attempt-1] {
-			t.Fatalf("attempt %d raw error = %q", event.Attempt, event.RawError)
+	wantKinds := []EventKind{EventForward, EventFailover, EventForward, EventFailover, EventForward, EventFailure}
+	if len(gotEvents) != len(wantKinds) {
+		t.Fatalf("events = %#v", gotEvents)
+	}
+	for index, event := range gotEvents {
+		if event.Kind != wantKinds[index] {
+			t.Fatalf("event %d kind = %q, want %q: %#v", index, event.Kind, wantKinds[index], gotEvents)
 		}
 		if event.SessionID != "session-exact" {
 			t.Fatalf("event session = %q", event.SessionID)
 		}
-		if event.Attempt == 1 && event.GlobalEnteredCooldown {
-			if event.GlobalHealth != scheduler.GlobalCooldown || event.ChannelHealth != scheduler.ChannelUnknown ||
-				event.CooldownUntil == nil || !event.CooldownUntil.Equal(cooldownUntil) {
-				t.Fatalf("cooldown diagnostic event = %#v", event)
-			}
-			healthFailure = healthFailure || event.Kind == EventFailure
-			healthFailover = healthFailover || event.Kind == EventFailover
-		}
 	}
-	if failovers != 2 {
-		t.Fatalf("failovers = %d, events=%#v", failovers, gotEvents)
+	firstFailover, secondFailover, finalFailure := gotEvents[1], gotEvents[3], gotEvents[5]
+	if firstFailover.ProviderID != providers[0].ID || firstFailover.Attempt != 1 || firstFailover.RawError != bodies[0] ||
+		firstFailover.NextProviderID != providers[1].ID || firstFailover.NextProviderName != providers[1].Name || firstFailover.NextAttempt != 2 || firstFailover.NextUpstreamURL == "" {
+		t.Fatalf("first failover = %#v", firstFailover)
 	}
-	if !healthFailure || !healthFailover {
-		t.Fatalf("health transition missing from failure/failover events: %#v", gotEvents)
+	if firstFailover.GlobalHealth != scheduler.GlobalCooldown || firstFailover.ChannelHealth != scheduler.ChannelUnknown ||
+		!firstFailover.GlobalEnteredCooldown || firstFailover.CooldownUntil == nil || !firstFailover.CooldownUntil.Equal(cooldownUntil) {
+		t.Fatalf("first failover health = %#v", firstFailover)
+	}
+	if secondFailover.ProviderID != providers[1].ID || secondFailover.Attempt != 2 || secondFailover.RawError != bodies[1] ||
+		secondFailover.NextProviderID != providers[2].ID || secondFailover.NextAttempt != 3 || secondFailover.NextUpstreamURL == "" {
+		t.Fatalf("second failover = %#v", secondFailover)
+	}
+	if finalFailure.ProviderID != providers[2].ID || finalFailure.Attempt != 3 || finalFailure.RawError != bodies[2] ||
+		finalFailure.NextProviderID != "" || finalFailure.NextAttempt != 0 || finalFailure.NextUpstreamURL != "" {
+		t.Fatalf("final failure = %#v", finalFailure)
 	}
 }
 
@@ -476,7 +544,9 @@ func TestGatewayTransportFailuresFailOverWithCompleteDiagnostics(t *testing.T) {
 			defer handler.Close()
 
 			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","metadata":{"user_id":"transport-session"}}`))
+			request := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","metadata":{"user_id":"ignored-body-session"}}`)
+			request.Header.Set("X-Claude-Code-Session-Id", "transport-session")
+			handler.ServeHTTP(response, request)
 			if response.Code != http.StatusOK || response.Body.String() != "fallback-success" {
 				t.Fatalf("fallback response = %d %q", response.Code, response.Body.String())
 			}
@@ -485,8 +555,10 @@ func TestGatewayTransportFailuresFailOverWithCompleteDiagnostics(t *testing.T) {
 				t.Fatalf("transport reports = %#v", reports)
 			}
 			gotEvents := events.snapshot()
-			if len(gotEvents) != 5 || gotEvents[1].Kind != EventFailure || gotEvents[2].Kind != EventFailover ||
-				!strings.Contains(gotEvents[1].RawError, failure.text) || gotEvents[1].SessionID != "transport-session" {
+			if len(gotEvents) != 4 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventFailover ||
+				gotEvents[2].Kind != EventForward || gotEvents[3].Kind != EventSuccess ||
+				!strings.Contains(gotEvents[1].RawError, failure.text) || gotEvents[1].SessionID != "transport-session" ||
+				gotEvents[1].ProviderID != first.ID || gotEvents[1].NextProviderID != second.ID || gotEvents[1].NextAttempt != 2 {
 				t.Fatalf("transport events = %#v", gotEvents)
 			}
 		})
@@ -525,7 +597,8 @@ func TestGatewayDoesNotFollowRedirectAndMapsFinalContractError(t *testing.T) {
 		t.Fatalf("reports = %#v", reports)
 	}
 	gotEvents := events.snapshot()
-	if len(gotEvents) != 2 || gotEvents[1].RawError != "unredacted redirect failure" {
+	if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventFailure ||
+		gotEvents[1].RawError != "unredacted redirect failure" || gotEvents[1].NextProviderID != "" || gotEvents[1].NextAttempt != 0 {
 		t.Fatalf("events = %#v", gotEvents)
 	}
 }
