@@ -104,6 +104,47 @@ func TestProviderPriorityModelsAndKeyRules(t *testing.T) {
 	}
 }
 
+func TestProviderDisableHealthStrictDecoding(t *testing.T) {
+	missing, err := DecodeProvider([]byte(`{"name":"p","base_url":"https://p.test","models":[]}`))
+	if err != nil || missing.DisableHealth {
+		t.Fatalf("missing disable_health = %v, err %v", missing.DisableHealth, err)
+	}
+
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{raw: `{"name":"p","base_url":"https://p.test","models":[],"disable_health":false}`, want: false},
+		{raw: `{"name":"p","base_url":"https://p.test","models":[],"disable_health":true}`, want: true},
+	} {
+		got, err := DecodeProvider([]byte(tc.raw))
+		if err != nil || got.DisableHealth != tc.want {
+			t.Fatalf("DecodeProvider(%s) disable_health = %v, err %v", tc.raw, got.DisableHealth, err)
+		}
+	}
+
+	for _, raw := range []string{
+		`{"name":"p","base_url":"https://p.test","models":[],"disable_health":null}`,
+		`{"name":"p","base_url":"https://p.test","models":[],"disable_health":"true"}`,
+		`{"name":"p","base_url":"https://p.test","models":[],"disable_health":1}`,
+	} {
+		if _, err := DecodeProvider([]byte(raw)); err == nil {
+			t.Fatalf("DecodeProvider(%s) succeeded, want error", raw)
+		}
+	}
+
+	cfg := validConfig()
+	cfg.Providers[0].DisableHealth = true
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := Decode(data)
+	if err != nil || !roundTrip.Providers[0].DisableHealth {
+		t.Fatalf("round trip disable_health = %v, err %v", roundTrip.Providers[0].DisableHealth, err)
+	}
+}
+
 func TestValidateRejectsConflictingKeysAndListenAddresses(t *testing.T) {
 	cfg := validConfig()
 	cfg.Auth.GatewayKey = cfg.Auth.ManagementKey

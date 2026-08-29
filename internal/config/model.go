@@ -44,16 +44,17 @@ type AuthConfig struct {
 }
 
 type ProviderConfig struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	BaseURL    string    `json:"base_url"`
-	APIKey     string    `json:"api_key"`
-	Models     []string  `json:"models"`
-	Priority   int64     `json:"priority"`
-	Enabled    bool      `json:"enabled"`
-	UseXAPIKey bool      `json:"use_x_api_key"`
-	TLS        TLSConfig `json:"tls"`
-	Patches    []string  `json:"patches"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	BaseURL       string    `json:"base_url"`
+	APIKey        string    `json:"api_key"`
+	Models        []string  `json:"models"`
+	Priority      int64     `json:"priority"`
+	Enabled       bool      `json:"enabled"`
+	UseXAPIKey    bool      `json:"use_x_api_key"`
+	TLS           TLSConfig `json:"tls"`
+	Patches       []string  `json:"patches"`
+	DisableHealth bool      `json:"disable_health"`
 }
 
 type TLSConfig struct {

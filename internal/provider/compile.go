@@ -15,17 +15,19 @@ import (
 // provider. It contains only static data; health and scheduling state are not
 // stored here.
 type CompiledProvider struct {
-	ID          string
-	Name        string
-	BaseURL     *url.URL
-	APIKey      string
-	Models      []string
-	Priority    int64
-	Enabled     bool
-	UseXAPIKey  bool
-	TLS         *tls.Config
-	TLSSettings config.TLSConfig
-	Patches     []PatchMetadata
+	ID            string
+	Name          string
+	BaseURL       *url.URL
+	APIKey        string
+	Models        []string
+	Priority      int64
+	Enabled       bool
+	UseXAPIKey    bool
+	TLS           *tls.Config
+	TLSSettings   config.TLSConfig
+	Patches       []PatchMetadata
+	DisableHealth bool
+	Generation    ProviderGeneration
 
 	modelSet map[string]struct{}
 }
@@ -73,18 +75,20 @@ func CompileWithRegistry(input config.ProviderConfig, registry Registry) (*Compi
 		modelSet[model] = struct{}{}
 	}
 	return &CompiledProvider{
-		ID:          input.ID,
-		Name:        input.Name,
-		BaseURL:     parsed,
-		APIKey:      input.APIKey,
-		Models:      models,
-		Priority:    input.Priority,
-		Enabled:     input.Enabled,
-		UseXAPIKey:  input.UseXAPIKey,
-		TLS:         tlsConfig,
-		TLSSettings: input.TLS,
-		Patches:     patches,
-		modelSet:    modelSet,
+		ID:            input.ID,
+		Name:          input.Name,
+		BaseURL:       parsed,
+		APIKey:        input.APIKey,
+		Models:        models,
+		Priority:      input.Priority,
+		Enabled:       input.Enabled,
+		UseXAPIKey:    input.UseXAPIKey,
+		TLS:           tlsConfig,
+		TLSSettings:   input.TLS,
+		Patches:       patches,
+		DisableHealth: input.DisableHealth,
+		Generation:    generationFor(input),
+		modelSet:      modelSet,
 	}, nil
 }
 
@@ -237,16 +241,17 @@ func (p *CompiledProvider) Config() config.ProviderConfig {
 		return config.ProviderConfig{}
 	}
 	out := config.ProviderConfig{
-		ID:         p.ID,
-		Name:       p.Name,
-		BaseURL:    p.URLString(),
-		APIKey:     p.APIKey,
-		Models:     append([]string(nil), p.Models...),
-		Priority:   p.Priority,
-		Enabled:    p.Enabled,
-		UseXAPIKey: p.UseXAPIKey,
-		TLS:        p.TLSSettings,
-		Patches:    make([]string, len(p.Patches)),
+		ID:            p.ID,
+		Name:          p.Name,
+		BaseURL:       p.URLString(),
+		APIKey:        p.APIKey,
+		Models:        append([]string(nil), p.Models...),
+		Priority:      p.Priority,
+		Enabled:       p.Enabled,
+		UseXAPIKey:    p.UseXAPIKey,
+		TLS:           p.TLSSettings,
+		Patches:       make([]string, len(p.Patches)),
+		DisableHealth: p.DisableHealth,
 	}
 	for i, patch := range p.Patches {
 		out.Patches[i] = patch.ID

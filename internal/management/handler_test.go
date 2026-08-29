@@ -100,7 +100,7 @@ func TestConfigAndProviderCRUDAndKeyRotation(t *testing.T) {
 		t.Fatalf("GET config did not return full management key")
 	}
 
-	providerBody := `{"name":"test-provider","base_url":"https://provider.example/anthropic","api_key":"provider-key","models":["Model"],"enabled":true}`
+	providerBody := `{"name":"test-provider","base_url":"https://provider.example/anthropic","api_key":"provider-key","models":["Model"],"enabled":true,"disable_health":true}`
 	created := request(handler, http.MethodPost, "/api/v1/providers", auth, providerBody)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("POST provider = %d %s", created.Code, created.Body.String())
@@ -109,8 +109,8 @@ func TestConfigAndProviderCRUDAndKeyRotation(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &p); err != nil {
 		t.Fatal(err)
 	}
-	if !config.IsUUID(p.ID) {
-		t.Fatalf("generated provider ID = %q", p.ID)
+	if !config.IsUUID(p.ID) || !p.DisableHealth {
+		t.Fatalf("created provider = id %q, disable_health %v", p.ID, p.DisableHealth)
 	}
 	duplicateIDBody := `{"id":"` + p.ID + `","name":"different-name","base_url":"https://different.example","api_key":"key","models":["m"],"enabled":true}`
 	if rec := request(handler, http.MethodPost, "/api/v1/providers", auth, duplicateIDBody); rec.Code != http.StatusConflict {
@@ -120,12 +120,21 @@ func TestConfigAndProviderCRUDAndKeyRotation(t *testing.T) {
 	if getProvider.Code != http.StatusOK {
 		t.Fatalf("GET provider = %d", getProvider.Code)
 	}
+	var fetched config.ProviderConfig
+	if err := json.Unmarshal(getProvider.Body.Bytes(), &fetched); err != nil || !fetched.DisableHealth {
+		t.Fatalf("GET provider disable_health = %v, err %v", fetched.DisableHealth, err)
+	}
 
 	p.Priority = -1
+	p.DisableHealth = false
 	updatedBody, _ := json.Marshal(p)
 	updated := request(handler, http.MethodPut, "/api/v1/providers/"+p.ID, auth, string(updatedBody))
 	if updated.Code != http.StatusOK {
 		t.Fatalf("PUT provider = %d %s", updated.Code, updated.Body.String())
+	}
+	var updatedProvider config.ProviderConfig
+	if err := json.Unmarshal(updated.Body.Bytes(), &updatedProvider); err != nil || updatedProvider.DisableHealth {
+		t.Fatalf("PUT provider disable_health = %v, err %v", updatedProvider.DisableHealth, err)
 	}
 	changedID := p
 	changedID.ID = "99999999-9999-4999-8999-999999999999"

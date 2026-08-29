@@ -214,6 +214,7 @@ func checkProviderKeys(raw map[string]json.RawMessage) error {
 	if err := rejectUnknownKeys(raw, map[string]struct{}{
 		"id": {}, "name": {}, "base_url": {}, "api_key": {}, "models": {},
 		"priority": {}, "enabled": {}, "use_x_api_key": {}, "tls": {}, "patches": {},
+		"disable_health": {},
 	}); err != nil {
 		return err
 	}

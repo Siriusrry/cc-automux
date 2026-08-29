@@ -177,6 +177,59 @@ func TestCompiledProviderCloneDoesNotShareSlices(t *testing.T) {
 	}
 }
 
+func TestProviderGenerationTracksOnlyRuntimeIdentity(t *testing.T) {
+	base := providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
+	compiled, err := Compile(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Generation == "" {
+		t.Fatal("compiled provider has an empty generation")
+	}
+
+	for _, mutate := range []func(*config.ProviderConfig){
+		func(p *config.ProviderConfig) { p.Name = "renamed" },
+		func(p *config.ProviderConfig) { p.Priority = -99 },
+		func(p *config.ProviderConfig) { p.Models = []string{"other"} },
+		func(p *config.ProviderConfig) { p.DisableHealth = true },
+	} {
+		candidate := base
+		candidate.Models = append([]string(nil), base.Models...)
+		mutate(&candidate)
+		got, err := Compile(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Generation != compiled.Generation {
+			t.Fatalf("non-identity change altered generation: %s != %s", got.Generation, compiled.Generation)
+		}
+	}
+
+	for _, mutate := range []func(*config.ProviderConfig){
+		func(p *config.ProviderConfig) { p.BaseURL = "https://other.test" },
+		func(p *config.ProviderConfig) { p.APIKey = "other-key" },
+		func(p *config.ProviderConfig) { p.UseXAPIKey = true },
+		func(p *config.ProviderConfig) { p.TLS.InsecureSkipVerify = true },
+		func(p *config.ProviderConfig) { p.Patches = []string{PatchAnyRouter} },
+	} {
+		candidate := base
+		candidate.Models = append([]string(nil), base.Models...)
+		mutate(&candidate)
+		got, err := Compile(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Generation == compiled.Generation {
+			t.Fatalf("runtime identity change kept generation %s", got.Generation)
+		}
+	}
+
+	roundTrip := compiled.Config()
+	if roundTrip.DisableHealth != base.DisableHealth {
+		t.Fatalf("Config() disable_health = %v", roundTrip.DisableHealth)
+	}
+}
+
 func TestRegistryRejectsMalformedAndDuplicateMetadata(t *testing.T) {
 	for _, entries := range [][]PatchMetadata{
 		{{ID: "", Name: "empty"}},
