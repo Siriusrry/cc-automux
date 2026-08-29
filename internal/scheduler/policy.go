@@ -12,6 +12,8 @@ type AttemptPolicy struct {
 	MaxAttempts int
 }
 
+const defaultMaxAttempts = 3
+
 func (p AttemptPolicy) Validate() error {
 	if p.MaxAttempts <= 0 {
 		return errors.New("maximum attempts must be positive")
@@ -19,18 +21,22 @@ func (p AttemptPolicy) Validate() error {
 	return nil
 }
 
-// Policy contains the fixed production scheduling and health timing values.
+// Policy contains the fixed production health, availability, and affinity
+// values. Request retry budgets are carried separately by AttemptPolicy.
 // Tests may inject another valid value directly into the owning components.
 type Policy struct {
 	FailureWindow       time.Duration
 	FailureThreshold    int
 	Cooldowns           [5]time.Duration
 	HalfOpenConcurrency int
-	MaxAttempts         int
-	StickyTTL           time.Duration
-	StickyCapacity      int
-	RetryAfterMin       time.Duration
-	RetryAfterMax       time.Duration
+	// MaxAttempts is retained as a composite-policy projection for callers
+	// that still construct a complete Policy. Request handling never reads it;
+	// the immutable Snapshot AttemptPolicy is the request-time source of truth.
+	MaxAttempts    int
+	StickyTTL      time.Duration
+	StickyCapacity int
+	RetryAfterMin  time.Duration
+	RetryAfterMax  time.Duration
 }
 
 func DefaultPolicy() Policy {
@@ -39,7 +45,7 @@ func DefaultPolicy() Policy {
 		FailureThreshold:    3,
 		Cooldowns:           [5]time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 15 * time.Minute},
 		HalfOpenConcurrency: 1,
-		MaxAttempts:         3,
+		MaxAttempts:         defaultMaxAttempts,
 		StickyTTL:           time.Hour,
 		StickyCapacity:      8192,
 		RetryAfterMin:       time.Second,
@@ -47,13 +53,13 @@ func DefaultPolicy() Policy {
 	}
 }
 
-func DefaultAttemptPolicy() AttemptPolicy { return DefaultPolicy().AttemptPolicy() }
+// DefaultAttemptPolicy is the canonical default for the request retry budget.
+// It is intentionally defined independently from the health/affinity policy.
+func DefaultAttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: defaultMaxAttempts} }
 
-// AttemptPolicy projects the request-level retry budget from the complete
-// scheduler policy.
-func (p Policy) AttemptPolicy() AttemptPolicy {
-	return AttemptPolicy{MaxAttempts: p.MaxAttempts}
-}
+// AttemptPolicy projects the request budget from a complete Policy for
+// composition and compatibility. Runtime request paths use Snapshot instead.
+func (p Policy) AttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: p.MaxAttempts} }
 
 // ResolveAttemptPolicy reads and validates the immutable request budget from a
 // runtime snapshot. It never supplies a request-path default.
@@ -86,14 +92,14 @@ func CaptureAttemptPolicy(snapshot Snapshot) (Snapshot, AttemptPolicy, error) {
 }
 
 func (p Policy) Validate() error {
-	if err := p.AttemptPolicy().Validate(); err != nil {
-		return err
-	}
 	if p.FailureWindow <= 0 || p.FailureThreshold <= 0 {
 		return errors.New("failure window and threshold must be positive")
 	}
 	if p.HalfOpenConcurrency != 1 {
 		return errors.New("half-open concurrency must be exactly one")
+	}
+	if err := p.AttemptPolicy().Validate(); err != nil {
+		return err
 	}
 	if p.StickyTTL <= 0 || p.StickyCapacity <= 0 {
 		return errors.New("sticky limits must be positive")

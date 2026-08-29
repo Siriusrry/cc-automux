@@ -108,7 +108,7 @@ func New(options Options) (*App, error) {
 	policy := scheduler.DefaultPolicy()
 	managerOptions := runtime.Options{
 		Registry:      &registry,
-		AttemptPolicy: policy.AttemptPolicy(),
+		AttemptPolicy: scheduler.DefaultAttemptPolicy(),
 		RestartDelay:  options.RestartDelay,
 		Now:           options.Now,
 		Preflight:     options.Preflight,

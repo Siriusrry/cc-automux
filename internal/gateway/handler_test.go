@@ -467,6 +467,38 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 	}
 }
 
+func TestGatewayFinalRetryableFailureRecordsOnlyFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "final-provider-error")
+	}))
+	defer upstream.Close()
+	item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "only-provider", upstream.URL, "provider-key", "m", false)
+	selector := &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(item, "m")}}
+	events := &eventCollector{}
+	handler := NewWithOptions(func() scheduler.Snapshot {
+		return &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}}
+	}, selector, Options{Recorder: events})
+	defer handler.Close()
+
+	request := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`)
+	request.Header.Set("X-Claude-Code-Session-Id", "final-session")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "final-provider-error" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	got := events.snapshot()
+	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventFailure {
+		t.Fatalf("events = %#v", got)
+	}
+	failure := got[1]
+	if failure.ProviderID != item.ID || failure.Attempt != 1 || failure.RawError != "final-provider-error" ||
+		failure.NextProviderID != "" || failure.NextProviderName != "" || failure.NextAttempt != 0 || failure.NextUpstreamURL != "" {
+		t.Fatalf("final failure event = %#v", failure)
+	}
+}
+
 func TestGatewayCapturesAttemptPolicyOncePerRequest(t *testing.T) {
 	for _, maxAttempts := range []int{2, 5} {
 		t.Run(fmt.Sprintf("maximum_%d", maxAttempts), func(t *testing.T) {
