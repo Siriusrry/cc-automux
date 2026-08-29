@@ -49,6 +49,7 @@ func TestOutcomeClassificationAndFailover(t *testing.T) {
 		{200, FailureNone, false},
 		{400, FailureNeutral, false},
 		{401, FailureGlobalImmediate, true},
+		{403, FailureGlobalImmediate, true},
 		{404, FailureChannelImmediate, true},
 		{405, FailureGlobalImmediate, true},
 		{302, FailureGlobalImmediate, true},

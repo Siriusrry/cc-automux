@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -92,6 +93,12 @@ func (s *fakeSelector) snapshot() (int, []scheduler.Outcome) {
 type eventCollector struct {
 	mu     sync.Mutex
 	events []Event
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func (c *eventCollector) RecordGatewayEvent(event Event) {
@@ -380,6 +387,56 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 	}
 	if !healthFailure || !healthFailover {
 		t.Fatalf("health transition missing from failure/failover events: %#v", gotEvents)
+	}
+}
+
+func TestGatewayTransportFailuresFailOverWithCompleteDiagnostics(t *testing.T) {
+	failures := []struct {
+		name string
+		err  error
+		text string
+	}{
+		{name: "dns", err: &net.DNSError{Err: "resolver unavailable", Name: "upstream.invalid", IsTemporary: true}, text: "resolver unavailable"},
+		{name: "tls", err: errors.New("tls: handshake failure from fake upstream"), text: "tls: handshake failure from fake upstream"},
+		{name: "connection", err: errors.New("dial tcp 127.0.0.1: connection refused by fake upstream"), text: "connection refused by fake upstream"},
+	}
+	for _, failure := range failures {
+		t.Run(failure.name, func(t *testing.T) {
+			success := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, "fallback-success")
+			}))
+			defer success.Close()
+			first := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "failing", "https://upstream.invalid", "key-1", "m", false)
+			second := compileTestProvider(t, "22222222-2222-4222-8222-222222222222", "fallback", success.URL, "key-2", "m", false)
+			selector := &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(first, "m"), leaseFor(second, "m")}}
+			events := &eventCollector{}
+			pool := NewClientPool()
+			pool.clients[clientKey{providerID: first.ID, generation: first.Generation}] = pooledClient{
+				client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return nil, failure.err
+				})},
+				transport: &http.Transport{},
+			}
+			handler := NewWithOptions(func() scheduler.Snapshot {
+				return &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{first, second}}
+			}, selector, Options{ClientPool: pool, Recorder: events})
+			defer handler.Close()
+
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","metadata":{"user_id":"transport-session"}}`))
+			if response.Code != http.StatusOK || response.Body.String() != "fallback-success" {
+				t.Fatalf("fallback response = %d %q", response.Code, response.Body.String())
+			}
+			_, reports := selector.snapshot()
+			if len(reports) != 2 || reports[0].Class != scheduler.FailureGlobalTransient || !strings.Contains(reports[0].RawError, failure.text) || reports[1].Class != scheduler.FailureNone {
+				t.Fatalf("transport reports = %#v", reports)
+			}
+			gotEvents := events.snapshot()
+			if len(gotEvents) != 5 || gotEvents[1].Kind != EventFailure || gotEvents[2].Kind != EventFailover ||
+				!strings.Contains(gotEvents[1].RawError, failure.text) || gotEvents[1].SessionID != "transport-session" {
+				t.Fatalf("transport events = %#v", gotEvents)
+			}
+		})
 	}
 }
 
