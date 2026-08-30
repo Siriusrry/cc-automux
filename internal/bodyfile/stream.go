@@ -549,7 +549,7 @@ func (t *scanToken) appendRaw(value byte) {
 	if t == nil {
 		return
 	}
-	if t.kind != tokenKey || t.rawLimit == 0 || len(t.raw) < t.rawLimit {
+	if t.rawLimit == 0 || len(t.raw) < t.rawLimit {
 		t.raw = append(t.raw, value)
 		return
 	}
@@ -570,10 +570,14 @@ func (s *JSONScanner) startValue(first byte, ctx valueContext) (bool, error) {
 	case '"':
 		s.offset++
 		var raw []byte
+		rawLimit := 0
 		if ctx.isModel {
 			raw = append(raw, '"')
+			// A valid JSON spelling of at most MaxBytes decoded UTF-8 bytes
+			// needs at most six source bytes per decoded byte, plus quotes.
+			rawLimit = modelname.MaxBytes*6 + 2
 		}
-		s.token = &scanToken{kind: tokenString, start: ctx.start, ctx: ctx, raw: raw}
+		s.token = &scanToken{kind: tokenString, start: ctx.start, ctx: ctx, raw: raw, rawLimit: rawLimit}
 		return true, nil
 	case '{', '[':
 		s.offset++

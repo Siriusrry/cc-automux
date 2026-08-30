@@ -537,6 +537,34 @@ func TestCaptureRejectsOverlongModelBeforeWritingOverflowByte(t *testing.T) {
 	}
 }
 
+func TestOverlongModelTokenRetainsOnlyBoundedRawSpelling(t *testing.T) {
+	spec, err := RequestScanSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner, err := NewJSONScanner(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanner.Write([]byte(`{"model":"`)); err != nil {
+		t.Fatal(err)
+	}
+	chunk := bytes.Repeat([]byte("a"), 32*1024)
+	for i := 0; i < 64; i++ {
+		_, writeErr := scanner.Write(chunk)
+		if len(scanner.token.raw) > modelname.MaxBytes*6+2 {
+			t.Fatalf("model raw token grew to %d bytes", len(scanner.token.raw))
+		}
+		if errors.Is(writeErr, ErrModelTooLong) {
+			return
+		}
+		if writeErr != nil {
+			t.Fatalf("scanner error = %v", writeErr)
+		}
+	}
+	t.Fatal("overlong model was not rejected")
+}
+
 func TestCaptureAndScanLargeUnselectedBody(t *testing.T) {
 	const large = 68 * 1024 * 1024
 	spec, err := RequestScanSpec("/thinking/type")
