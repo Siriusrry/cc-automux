@@ -70,11 +70,11 @@ func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, r
 }
 
 // requestScanSpec computes the single ingress scan contract before the model
-// and request type are known.  Normal fallback and every specialised detector
+// and request type are known. Normal fallback and every specialised detector
 // type are possible at this point, so the scanner retains the union of their
-// request-patch paths (plus detector-declared paths).  The union is deliberately
-// assembled from immutable plans already present in the captured Snapshot; it
-// does not compile or publish runtime state on the request path.
+// request-patch paths (plus detector-declared paths). The resulting index is
+// retained after classification; the request path never performs a second
+// projection pass.
 func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpec, error) {
 	types := []traffic.RequestType{traffic.RequestTypeNormal}
 	paths := make([]string, 0)
@@ -100,33 +100,6 @@ func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpe
 		}
 	}
 	return bodyfile.RequestScanSpec(paths...)
-}
-
-// projectRequestIndex narrows the already-built ingress index after type
-// detection.  No body bytes are read: JSONIndex.Project filters the retained
-// descriptors and preserves the body binding.
-func (h *Handler) projectRequestIndex(snapshot scheduler.Snapshot, ingress traffic.IngressRequest) (bodyfile.JSONIndex, error) {
-	paths := make([]string, 0)
-	if h != nil && h.detectors != nil {
-		paths = appendUniquePaths(paths, h.detectors.RequiredPathsForType(ingress.RequestType)...)
-	}
-	if snapshot != nil {
-		for _, item := range snapshot.Providers() {
-			if item == nil || !item.Enabled || len(item.Models) == 0 {
-				continue
-			}
-			required, err := item.PatchPlan.RequiredPaths(patch.StageRequest, ingress.RequestType)
-			if err != nil {
-				return bodyfile.JSONIndex{}, err
-			}
-			paths = appendUniquePaths(paths, required...)
-		}
-	}
-	spec, err := bodyfile.RequestScanSpec(paths...)
-	if err != nil {
-		return bodyfile.JSONIndex{}, err
-	}
-	return ingress.CapturedIndex.Project(spec)
 }
 
 func appendUniquePaths(paths []string, additions ...string) []string {

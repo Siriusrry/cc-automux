@@ -30,6 +30,7 @@ type fakeSnapshot struct {
 	attemptPolicy      scheduler.AttemptPolicy
 	attemptPolicyCalls atomic.Int32
 	providers          []*provider.CompiledProvider
+	providerCalls      atomic.Int32
 }
 
 func (s *fakeSnapshot) Revision() uint64 { return s.revision }
@@ -53,6 +54,7 @@ func (s *fakeSnapshot) Candidates(model string) []*provider.CompiledProvider {
 	return result
 }
 func (s *fakeSnapshot) Providers() []*provider.CompiledProvider {
+	s.providerCalls.Add(1)
 	return append([]*provider.CompiledProvider(nil), s.providers...)
 }
 

@@ -30,9 +30,8 @@ type DetectorRegistry interface {
 // not a detector entry; an empty registry therefore classifies every request
 // as normal in production.
 type Registry struct {
-	detectors       []Detector
-	scanPaths       []string
-	scanPathsByType map[RequestType][]string
+	detectors []Detector
+	scanPaths []string
 }
 
 // NewRegistry validates and snapshots detectors.  Detector order is retained
@@ -43,7 +42,6 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 	seen := make(map[RequestType]struct{}, len(entries))
 	seenPaths := make(map[string]struct{})
 	var scanPaths []string
-	scanPathsByType := make(map[RequestType][]string, len(entries))
 	for index, detector := range entries {
 		if isNilDetector(detector) {
 			return nil, fmt.Errorf("%w at index %d", ErrNilDetector, index)
@@ -70,7 +68,6 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 			return nil, fmt.Errorf("detector %d: invalid required paths: %w", index, pathErr)
 		}
 		for _, path := range paths {
-			scanPathsByType[requestType] = append(scanPathsByType[requestType], path)
 			if _, duplicate := seenPaths[path]; duplicate {
 				continue
 			}
@@ -78,7 +75,7 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 			scanPaths = append(scanPaths, path)
 		}
 	}
-	return &Registry{detectors: entries, scanPaths: scanPaths, scanPathsByType: scanPathsByType}, nil
+	return &Registry{detectors: entries, scanPaths: scanPaths}, nil
 }
 
 // NewDetectorRegistry is an alias for NewRegistry.
@@ -224,21 +221,6 @@ func (r *Registry) RequiredPaths() []string {
 		return []string{}
 	}
 	return append([]string(nil), r.scanPaths...)
-}
-
-// RequiredPathsForType returns the paths frozen for the detector which can
-// produce requestType. Registry construction has already called Type and
-// RequiredPaths through panic-safe boundaries, so request handling never
-// invokes mutable detector metadata methods again.
-func (r *Registry) RequiredPathsForType(requestType RequestType) []string {
-	if r == nil {
-		return []string{}
-	}
-	paths := r.scanPathsByType[requestType]
-	if len(paths) == 0 {
-		return []string{}
-	}
-	return append([]string(nil), paths...)
 }
 
 // Types returns registered specialised types in deterministic registration

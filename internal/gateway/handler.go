@@ -176,21 +176,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	// The ingress scan may have covered several possible request types and
-	// Provider plans so that classification required no second pass.  Once the
-	// type is known, project that already-built index down to the detector and
-	// request-patch paths relevant to this request; Project only filters in
-	// memory and remains bound to the same immutable body.
-	projected, projectErr := h.projectRequestIndex(snapshot, ingress)
-	if projectErr != nil {
-		if errors.Is(projectErr, bodyfile.ErrLocalIO) {
-			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
-		} else {
-			writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request index could not be prepared")
-		}
-		return
-	}
-	ingress.CapturedIndex = projected
+	// Keep the selective union captured at ingress. Classification does not
+	// reread Providers or copy/filter the index; every possible request hook was
+	// already accounted for before the body was received.
 	plan, err := h.dispatchIngress(r.Context(), plannerSnapshot, ingress)
 	if err != nil {
 		if errors.Is(err, bodyfile.ErrLocalIO) {

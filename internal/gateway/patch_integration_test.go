@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"net/http"
@@ -29,6 +30,12 @@ type requestPatchFunc func(patch.PatchContext, *patch.MutableRequest) error
 
 func (f requestPatchFunc) ApplyRequest(context patch.PatchContext, request *patch.MutableRequest) error {
 	return f(context, request)
+}
+
+type responsePatchFunc func(patch.PatchContext, *patch.MutableResponse) error
+
+func (f responsePatchFunc) ApplyResponse(context patch.PatchContext, response *patch.MutableResponse) error {
+	return f(context, response)
 }
 
 func testRequestPatchRegistry(t *testing.T, id string, hook func(patch.FactoryContext) patch.RequestPatch) patch.Registry {
@@ -282,6 +289,26 @@ func (classifierPlanner) Build(_ context.Context, snapshot flow.SnapshotView, in
 	return flow.ExecutionPlan{PreparedRequest: prepared, TargetMode: flow.TargetModeProviderPool, AttemptPolicy: snapshot.ClassifierAttemptPolicy()}, nil
 }
 
+type retainedUnionClassifierPlanner struct{}
+
+func (retainedUnionClassifierPlanner) RequestType() traffic.RequestType {
+	return traffic.RequestTypeClassifier
+}
+
+func (retainedUnionClassifierPlanner) Build(ctx context.Context, snapshot flow.SnapshotView, ingress traffic.IngressRequest) (flow.ExecutionPlan, error) {
+	for _, path := range []string{"/normal_marker", "/classifier_marker"} {
+		if _, ok := ingress.CapturedIndex.Lookup(path); !ok {
+			return flow.ExecutionPlan{}, fmt.Errorf("ingress request union lost %s", path)
+		}
+	}
+	for _, path := range []string{"/response_only", "/unrelated"} {
+		if _, ok := ingress.CapturedIndex.Lookup(path); ok {
+			return flow.ExecutionPlan{}, fmt.Errorf("ingress request index retained %s", path)
+		}
+	}
+	return (classifierPlanner{}).Build(ctx, snapshot, ingress)
+}
+
 type flowAwareSnapshot struct {
 	*fakeSnapshot
 	classifierAttempts scheduler.AttemptPolicy
@@ -325,6 +352,74 @@ func classifierGatewayOptions(t *testing.T, recorder EventRecorder, directory st
 		t.Fatal(err)
 	}
 	return Options{Recorder: recorder, ReplayDirectory: directory, DetectorRegistry: detectors, FlowDispatcher: flow.NewDispatcher(flows)}
+}
+
+func TestGatewayRetainsIngressRequestUnionWithoutPostClassificationProjection(t *testing.T) {
+	definitions := []patch.PatchDefinition{
+		{
+			ID: "normal-request-field", Name: "normal-request-field",
+			RequestTypes: []patch.RequestType{patch.RequestTypeNormal}, Stages: []patch.Stage{patch.StageRequest},
+			RequestPaths: []string{"/normal_marker"}, Idempotence: patch.Idempotent,
+			Factory: func(patch.FactoryContext) (patch.PatchInstance, error) {
+				return patch.NewHooksInstance(patch.Hooks{Request: requestPatchFunc(func(patch.PatchContext, *patch.MutableRequest) error { return nil })}), nil
+			},
+		},
+		{
+			ID: "classifier-request-field", Name: "classifier-request-field",
+			RequestTypes: []patch.RequestType{patch.RequestTypeClassifier}, Stages: []patch.Stage{patch.StageRequest},
+			RequestPaths: []string{"/classifier_marker"}, Idempotence: patch.Idempotent,
+			Factory: func(patch.FactoryContext) (patch.PatchInstance, error) {
+				return patch.NewHooksInstance(patch.Hooks{Request: requestPatchFunc(func(patch.PatchContext, *patch.MutableRequest) error { return nil })}), nil
+			},
+		},
+		{
+			ID: "classifier-response-field", Name: "classifier-response-field",
+			RequestTypes: []patch.RequestType{patch.RequestTypeClassifier}, Stages: []patch.Stage{patch.StageResponse},
+			ResponsePaths: []string{"/response_only"}, Idempotence: patch.Idempotent,
+			Factory: func(patch.FactoryContext) (patch.PatchInstance, error) {
+				return patch.NewHooksInstance(patch.Hooks{Response: responsePatchFunc(func(patch.PatchContext, *patch.MutableResponse) error { return nil })}), nil
+			},
+		},
+	}
+	registry, err := patch.NewRegistry(definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+	item := compileWithRegistry(t, registry, "11111111-1111-4111-8111-111111111111", "union", upstream.URL, "key", "m",
+		"normal-request-field", "classifier-request-field", "classifier-response-field")
+	snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}}
+	selector := &fakeSelector{leases: []scheduler.AttemptLease{classifierLease(item, "m"), classifierLease(item, "m")}}
+	detectors, err := traffic.NewRegistry(classifierDetector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flows, err := flow.NewRegistry(retainedUnionClassifierPlanner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{
+		DetectorRegistry: detectors,
+		FlowDispatcher:   flow.NewDispatcher(flows),
+	})
+	defer handler.Close()
+	requestBody := `{"model":"m","normal_marker":true,"classifier_marker":true,"response_only":true,"unrelated":true}`
+	for attempt := 0; attempt < 2; attempt++ {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", requestBody))
+		if response.Code != http.StatusOK || response.Body.String() != `{}` {
+			t.Fatalf("request %d response = %d %q", attempt, response.Code, response.Body.String())
+		}
+	}
+	// The first request needs one additional Provider copy to reconcile the
+	// client pool. Every request performs exactly one scan-union read.
+	if got := snapshot.providerCalls.Load(); got != 3 {
+		t.Fatalf("Providers calls = %d, want 3", got)
+	}
 }
 
 func TestGatewayPlannerReceivesOriginalFlowSnapshot(t *testing.T) {

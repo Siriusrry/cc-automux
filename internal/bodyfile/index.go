@@ -215,8 +215,8 @@ func (i JSONIndex) Spec() ScanSpec {
 }
 
 // Project derives a narrower index from already scanned fields without
-// reading body again. It is used after request classification to discard
-// detector/other-request-type fields from the stable PreparedRequest index.
+// reading body again. It is available for explicit downstream scan-contract
+// changes; ingress request classification deliberately retains its union.
 func (i JSONIndex) Project(spec ScanSpec) (JSONIndex, error) {
 	if err := i.ValidateBody(i.body); err != nil {
 		return JSONIndex{}, err
