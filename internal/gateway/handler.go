@@ -351,7 +351,7 @@ func (h *Handler) outcomeEvent(kind EventKind, lease scheduler.AttemptLease, out
 		Time:                   h.now().UTC(),
 		SessionID:              outcome.SessionID,
 		Model:                  lease.Model,
-		TrafficClass:           lease.TrafficClass,
+		RequestType:            lease.RequestType,
 		Attempt:                attempt,
 		UpstreamURL:            outcome.UpstreamURL,
 		HTTPStatus:             outcome.HTTPStatus,

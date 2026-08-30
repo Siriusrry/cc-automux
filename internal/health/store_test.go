@@ -7,6 +7,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 type fakeClock struct {
@@ -44,7 +45,7 @@ func TestReconcileCreatesUnknownTwoLayerSnapshot(t *testing.T) {
 		t.Fatalf("provider snapshot = %#v", got)
 	}
 	for _, channel := range got.Channels {
-		if channel.State != scheduler.ChannelUnknown || channel.TrafficClass != scheduler.TrafficClassNormal {
+		if channel.State != scheduler.ChannelUnknown || channel.RequestType != traffic.RequestTypeNormal {
 			t.Fatalf("channel = %#v", channel)
 		}
 	}

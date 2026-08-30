@@ -11,6 +11,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 const (
@@ -176,7 +177,7 @@ func newTestScheduler(t *testing.T, health HealthController, policy Policy, now 
 }
 
 func normalKey(session, model string) StickyKey {
-	return StickyKey{SessionID: session, Model: model, TrafficClass: TrafficClassNormal}
+	return StickyKey{SessionID: session, Model: model, RequestType: traffic.RequestTypeNormal}
 }
 
 func providerID(t *testing.T, lease AttemptLease, err error) string {
@@ -305,9 +306,9 @@ func TestInvalidSchedulingInputsAndPolicy(t *testing.T) {
 	selector := newTestScheduler(t, health, Policy{}, nil)
 	snapshot := &fakeSnapshot{revision: 1}
 	for _, key := range []StickyKey{
-		{TrafficClass: TrafficClassNormal},
+		{RequestType: traffic.RequestTypeNormal},
 		{Model: "m"},
-		{Model: "m", TrafficClass: "unknown"},
+		{Model: "m", RequestType: "unknown"},
 	} {
 		if _, err := selector.Acquire(snapshot, key, nil); !errors.Is(err, ErrInvalidSchedulingKey) {
 			t.Fatalf("key %#v error = %v", key, err)
@@ -541,7 +542,7 @@ func TestHigherPriorityDegradationAndRecovery(t *testing.T) {
 	low := compileProvider(t, providerB, "low", []string{"m"}, -10)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{low, high}}
 	selector.Reconcile(snapshot)
-	highKey := HealthKey{ProviderID: high.ID, Generation: high.Generation, Model: "m", TrafficClass: TrafficClassNormal}
+	highKey := HealthKey{ProviderID: high.ID, Generation: high.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
 	health.decisions[highKey] = HealthDecision{
 		Available: false, GlobalState: GlobalHealthy, ChannelState: ChannelCooldown,
 		Lease: HealthLease{Key: highKey},
@@ -574,7 +575,7 @@ func TestUnavailableErrorCarriesEarliestRetry(t *testing.T) {
 	item := compileProvider(t, providerA, "a", []string{"m"}, 0)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{item}}
 	selector.Reconcile(snapshot)
-	key := HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: "m", TrafficClass: TrafficClassNormal}
+	key := HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
 	health.decisions[key] = HealthDecision{
 		Available: false, GlobalState: GlobalCooldown, ChannelState: ChannelHealthy,
 		Lease: HealthLease{Key: key},
@@ -601,8 +602,8 @@ func TestHalfOpenSelectionDefersCursorWithoutOverwritingNewerRotation(t *testing
 	c := compileProvider(t, providerC, "c", []string{"m"}, 0)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b, c}}
 	selector.Reconcile(snapshot)
-	aKey := HealthKey{ProviderID: a.ID, Generation: a.Generation, Model: "m", TrafficClass: TrafficClassNormal}
-	bKey := HealthKey{ProviderID: b.ID, Generation: b.Generation, Model: "m", TrafficClass: TrafficClassNormal}
+	aKey := HealthKey{ProviderID: a.ID, Generation: a.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
+	bKey := HealthKey{ProviderID: b.ID, Generation: b.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
 	health.decisions[aKey] = HealthDecision{Available: false, GlobalState: GlobalCooldown, ChannelState: ChannelHealthy}
 	health.decisions[bKey] = HealthDecision{
 		Available: true, GlobalState: GlobalHalfOpen, ChannelState: ChannelHealthy,

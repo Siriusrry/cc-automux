@@ -59,10 +59,6 @@ func capturedFlowView(runtimeSnapshot, capturedSnapshot scheduler.Snapshot, norm
 	return capturedFlowSnapshot{snapshot: capturedSnapshot, view: view, normal: normal}
 }
 
-func requestTypeTrafficClass(requestType traffic.RequestType) scheduler.TrafficClass {
-	return scheduler.TrafficClass(requestType)
-}
-
 func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, request *http.Request) (traffic.IngressRequest, error) {
 	model := index.ModelValue()
 	session := singleSessionHeader(request.Header)
@@ -100,11 +96,10 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 		return
 	}
 
-	trafficClass := requestTypeTrafficClass(prepared.Plan.RequestType)
 	sticky := scheduler.StickyKey{
-		SessionID:    prepared.Plan.OriginalSessionID,
-		Model:        prepared.Plan.EffectiveModel,
-		TrafficClass: trafficClass,
+		SessionID:   prepared.Plan.OriginalSessionID,
+		Model:       prepared.Plan.EffectiveModel,
+		RequestType: prepared.Plan.RequestType,
 	}
 	excluded := make(map[string]struct{})
 	var last *capturedFailure
@@ -226,7 +221,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	request.ContentLength = mutable.Body.Size()
 	request.Host = ""
 	request.GetBody = nil
-	h.record(Event{Kind: EventForward, Time: h.now().UTC(), ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, TrafficClass: lease.TrafficClass, Attempt: attempt, UpstreamURL: url.String()})
+	h.record(Event{Kind: EventForward, Time: h.now().UTC(), ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
 
 	client, err := h.clients.Client(item)
 	if err != nil {

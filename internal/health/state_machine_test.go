@@ -9,6 +9,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 func TestOutcomeClassesAffectOnlyTheirHealthLayer(t *testing.T) {
@@ -80,8 +81,8 @@ func TestNeutralUpstreamErrorIsObservedWithoutBreakerMutation(t *testing.T) {
 	if !reflect.DeepEqual(got.Global, before.Global) {
 		t.Fatalf("neutral response changed global diagnostics: before=%#v after=%#v", before.Global, got.Global)
 	}
-	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
-	beforeChannel := findChannel(t, before, "model", scheduler.TrafficClassNormal)
+	channel := findChannel(t, got, "model", traffic.RequestTypeNormal)
+	beforeChannel := findChannel(t, before, "model", traffic.RequestTypeNormal)
 	if channel.State != beforeChannel.State || channel.ConsecutiveFailures != beforeChannel.ConsecutiveFailures ||
 		channel.ObservedFailures != beforeChannel.ObservedFailures+1 || channel.LastFailureAt == nil ||
 		!channel.LastFailureAt.Equal(clock.Now()) {
@@ -104,7 +105,7 @@ func TestNeutralUpstreamErrorIsObservedWithoutBreakerMutation(t *testing.T) {
 	if !reflect.DeepEqual(got.Global, before.Global) {
 		t.Fatalf("empty neutral response changed global diagnostics: before=%#v after=%#v", before.Global, got.Global)
 	}
-	channel = findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel = findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if channel.LastError != "" || channel.ObservedFailures != beforeChannel.ObservedFailures+2 || channel.ConsecutiveFailures != beforeChannel.ConsecutiveFailures {
 		t.Fatalf("empty neutral diagnostics = %#v", channel)
 	}
@@ -123,7 +124,7 @@ func TestLocalNeutralErrorDoesNotPolluteProviderDiagnostics(t *testing.T) {
 		SessionID: "session-local",
 	})
 	got := mustProviderSnapshot(t, store, p)
-	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel := findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if channel.ObservedFailures != 0 || channel.LastError != "" || channel.LastSessionID != "" || channel.LastFailureAt != nil {
 		t.Fatalf("local error polluted provider diagnostics: %#v", channel)
 	}
@@ -143,7 +144,7 @@ func TestFailureWindowThresholdAndLayerIsolation(t *testing.T) {
 	clock.Advance(2*time.Minute + time.Nanosecond)
 	report(t, store, keyA, false, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
 	got := mustProviderSnapshot(t, store, p)
-	channelA := findChannel(t, got, "model-a", scheduler.TrafficClassNormal)
+	channelA := findChannel(t, got, "model-a", traffic.RequestTypeNormal)
 	if channelA.State != scheduler.ChannelDegraded || channelA.ConsecutiveFailures != 1 || channelA.ObservedFailures != 3 {
 		t.Fatalf("window reset channel = %#v", channelA)
 	}
@@ -154,8 +155,8 @@ func TestFailureWindowThresholdAndLayerIsolation(t *testing.T) {
 		t.Fatalf("threshold update = %#v", update)
 	}
 	got = mustProviderSnapshot(t, store, p)
-	channelA = findChannel(t, got, "model-a", scheduler.TrafficClassNormal)
-	channelB := findChannel(t, got, "model-b", scheduler.TrafficClassNormal)
+	channelA = findChannel(t, got, "model-a", traffic.RequestTypeNormal)
+	channelB := findChannel(t, got, "model-b", traffic.RequestTypeNormal)
 	if channelA.State != scheduler.ChannelCooldown || channelB.State != scheduler.ChannelUnknown || got.Global.State != scheduler.GlobalUnknown {
 		t.Fatalf("isolated states = %#v", got)
 	}
@@ -207,12 +208,12 @@ func TestConcurrentSuccessRecoversCooldown(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		store.Report(leases[i], scheduler.Outcome{Class: scheduler.FailureChannelTransient})
 	}
-	if got := findChannel(t, mustProviderSnapshot(t, store, p), "model", scheduler.TrafficClassNormal); got.State != scheduler.ChannelCooldown {
+	if got := findChannel(t, mustProviderSnapshot(t, store, p), "model", traffic.RequestTypeNormal); got.State != scheduler.ChannelCooldown {
 		t.Fatalf("threshold state = %#v", got)
 	}
 	store.Report(leases[3], scheduler.Outcome{Class: scheduler.FailureNone, HTTPStatus: 200})
 	got := mustProviderSnapshot(t, store, p)
-	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel := findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if got.Global.State != scheduler.GlobalHealthy || channel.State != scheduler.ChannelHealthy || channel.ConsecutiveFailures != 0 || channel.BackoffLevel != 0 {
 		t.Fatalf("successful completion did not recover health = %#v", got)
 	}
@@ -259,7 +260,7 @@ func TestHalfOpenSingleLeaseNeutralCancelFailureAndSuccess(t *testing.T) {
 	clock.Advance(2 * time.Minute)
 	probe = mustAcquire(t, store, key, false)
 	store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureNone, HTTPStatus: 200})
-	got := findChannel(t, mustProviderSnapshot(t, store, p), "model", scheduler.TrafficClassNormal)
+	got := findChannel(t, mustProviderSnapshot(t, store, p), "model", traffic.RequestTypeNormal)
 	if got.State != scheduler.ChannelHealthy || got.BackoffLevel != 0 || got.ConsecutiveFailures != 0 || got.ProbeInFlight {
 		t.Fatalf("half-open recovery = %#v", got)
 	}
@@ -303,7 +304,7 @@ func TestBackoffScheduleAndRetryAfterClamp(t *testing.T) {
 		}
 		current = duration
 	}
-	got := findChannel(t, mustProviderSnapshot(t, store, p), "model", scheduler.TrafficClassNormal)
+	got := findChannel(t, mustProviderSnapshot(t, store, p), "model", traffic.RequestTypeNormal)
 	if got.BackoffLevel != 4 {
 		t.Fatalf("final backoff level = %d", got.BackoffLevel)
 	}
@@ -332,7 +333,7 @@ func TestComposedHalfOpenProbeResolvesLayersIndependently(t *testing.T) {
 	}
 	store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
 	got := mustProviderSnapshot(t, store, p)
-	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel := findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if got.Global.State != scheduler.GlobalHalfOpen || got.Global.ProbeInFlight || channel.State != scheduler.ChannelCooldown {
 		t.Fatalf("cross-layer resolution = %#v", got)
 	}
@@ -344,7 +345,7 @@ func TestComposedHalfOpenProbeResolvesLayersIndependently(t *testing.T) {
 	}
 	store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureNone, HTTPStatus: 200})
 	got = mustProviderSnapshot(t, store, p)
-	channel = findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel = findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if got.Global.State != scheduler.GlobalHealthy || channel.State != scheduler.ChannelHealthy {
 		t.Fatalf("composed recovery = %#v", got)
 	}
@@ -376,7 +377,7 @@ func TestDisableHealthNeverSuppressesAndPreservesDiagnostics(t *testing.T) {
 	}
 
 	got := mustProviderSnapshot(t, store, p)
-	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel := findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if got.Global.State != scheduler.GlobalDisabled || got.Global.ObservedFailures != 2 || got.Global.ConsecutiveFailures != 0 || got.Global.CooldownUntil != nil {
 		t.Fatalf("disabled global = %#v", got.Global)
 	}
@@ -410,7 +411,7 @@ func TestDisableHealthToggleClearsBreakerState(t *testing.T) {
 	disabled := testProvider("provider", "generation", true, "model")
 	store.Reconcile([]*provider.CompiledProvider{disabled})
 	got := mustProviderSnapshot(t, store, disabled)
-	channel := findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel := findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if channel.State != scheduler.ChannelDisabled || channel.CooldownUntil != nil || channel.ProbeInFlight || channel.ConsecutiveFailures != 0 || channel.BackoffLevel != 0 {
 		t.Fatalf("disabled state = %#v", channel)
 	}
@@ -420,7 +421,7 @@ func TestDisableHealthToggleClearsBreakerState(t *testing.T) {
 
 	store.Reconcile([]*provider.CompiledProvider{enabled})
 	got = mustProviderSnapshot(t, store, enabled)
-	channel = findChannel(t, got, "model", scheduler.TrafficClassNormal)
+	channel = findChannel(t, got, "model", traffic.RequestTypeNormal)
 	if channel.State != scheduler.ChannelUnknown || channel.CooldownUntil != nil || channel.ProbeInFlight || channel.ConsecutiveFailures != 0 || channel.BackoffLevel != 0 {
 		t.Fatalf("re-enabled state = %#v", channel)
 	}
@@ -441,8 +442,8 @@ func TestReconcileGenerationModeAndModels(t *testing.T) {
 	p1Disabled := testProvider("provider", "generation-1", true, "model-a", "model-c")
 	store.Reconcile([]*provider.CompiledProvider{p1Disabled})
 	got := mustProviderSnapshot(t, store, p1Disabled)
-	channelA := findChannel(t, got, "model-a", scheduler.TrafficClassNormal)
-	channelC := findChannel(t, got, "model-c", scheduler.TrafficClassNormal)
+	channelA := findChannel(t, got, "model-a", traffic.RequestTypeNormal)
+	channelC := findChannel(t, got, "model-c", traffic.RequestTypeNormal)
 	if got.Global.State != scheduler.GlobalDisabled || channelA.State != scheduler.ChannelDisabled || channelA.ObservedFailures != 1 || channelA.LastError != "first" {
 		t.Fatalf("mode toggle preserved diagnostics = %#v", got)
 	}
@@ -549,7 +550,7 @@ func TestOnlyOneConcurrentHalfOpenProbe(t *testing.T) {
 	if available.Load() != 1 {
 		t.Fatalf("available probes = %d", available.Load())
 	}
-	got := findChannel(t, mustProviderSnapshot(t, store, p), "model", scheduler.TrafficClassNormal)
+	got := findChannel(t, mustProviderSnapshot(t, store, p), "model", traffic.RequestTypeNormal)
 	if got.State != scheduler.ChannelHalfOpen || !got.ProbeInFlight {
 		t.Fatalf("half-open snapshot = %#v", got)
 	}
@@ -680,10 +681,10 @@ func newTestStore(t *testing.T, clock Clock) *Store {
 
 func testHealthKey(p *provider.CompiledProvider, model string) scheduler.HealthKey {
 	return scheduler.HealthKey{
-		ProviderID:   p.ID,
-		Generation:   p.Generation,
-		Model:        model,
-		TrafficClass: scheduler.TrafficClassNormal,
+		ProviderID:  p.ID,
+		Generation:  p.Generation,
+		Model:       model,
+		RequestType: traffic.RequestTypeNormal,
 	}
 }
 
@@ -710,13 +711,13 @@ func mustProviderSnapshot(t *testing.T, store *Store, p *provider.CompiledProvid
 	return snapshot
 }
 
-func findChannel(t *testing.T, snapshot ProviderSnapshot, model string, trafficClass scheduler.TrafficClass) ChannelSnapshot {
+func findChannel(t *testing.T, snapshot ProviderSnapshot, model string, requestType traffic.RequestType) ChannelSnapshot {
 	t.Helper()
 	for _, channel := range snapshot.Channels {
-		if channel.Model == model && channel.TrafficClass == trafficClass {
+		if channel.Model == model && channel.RequestType == requestType {
 			return channel
 		}
 	}
-	t.Fatalf("missing channel %q/%q in %#v", model, trafficClass, snapshot.Channels)
+	t.Fatalf("missing channel %q/%q in %#v", model, requestType, snapshot.Channels)
 	return ChannelSnapshot{}
 }

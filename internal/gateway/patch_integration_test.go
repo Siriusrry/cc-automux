@@ -380,7 +380,7 @@ func TestGatewayPlannerReceivesOriginalFlowSnapshot(t *testing.T) {
 
 func classifierLease(item *provider.CompiledProvider, model string) scheduler.AttemptLease {
 	lease := leaseFor(item, model)
-	lease.TrafficClass = scheduler.TrafficClassClassifier
+	lease.RequestType = traffic.RequestTypeClassifier
 	return lease
 }
 
@@ -425,10 +425,10 @@ func TestGatewayExplicitClassifierPlanRunsGPTRequestAndResponseHooks(t *testing.
 	if len(decoded.Content) != 1 || decoded.Content[0].Type != "text" || decoded.Content[0].Text != "allow " || decoded.StopReason != "stop_sequence" || decoded.StopSequence != "STOP" {
 		t.Fatalf("decoded response = %#v", decoded)
 	}
-	if keys := selector.stickyKeys(); len(keys) != 1 || keys[0].TrafficClass != scheduler.TrafficClassClassifier {
+	if keys := selector.stickyKeys(); len(keys) != 1 || keys[0].RequestType != traffic.RequestTypeClassifier {
 		t.Fatalf("sticky keys = %#v", keys)
 	}
-	if got := events.snapshot(); len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventSuccess || got[0].TrafficClass != scheduler.TrafficClassClassifier {
+	if got := events.snapshot(); len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventSuccess || got[0].RequestType != traffic.RequestTypeClassifier {
 		t.Fatalf("events = %#v", got)
 	}
 }

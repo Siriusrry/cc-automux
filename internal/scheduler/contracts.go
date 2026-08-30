@@ -9,17 +9,10 @@ import (
 
 type ProviderGeneration = provider.ProviderGeneration
 
-type TrafficClass = traffic.RequestType
-
-const (
-	TrafficClassNormal     = traffic.RequestTypeNormal
-	TrafficClassClassifier = traffic.RequestTypeClassifier
-)
-
 type StickyKey struct {
-	SessionID    string
-	Model        string
-	TrafficClass TrafficClass
+	SessionID   string
+	Model       string
+	RequestType traffic.RequestType
 }
 
 type StaticAvailability string
@@ -116,10 +109,10 @@ func (o Outcome) IsHealthFailure() bool {
 }
 
 type HealthKey struct {
-	ProviderID   string
-	Generation   ProviderGeneration
-	Model        string
-	TrafficClass TrafficClass
+	ProviderID  string
+	Generation  ProviderGeneration
+	Model       string
+	RequestType traffic.RequestType
 }
 
 type HealthLease struct {
@@ -151,7 +144,7 @@ type AttemptLease struct {
 	SnapshotRevision uint64
 	Provider         *provider.CompiledProvider
 	Model            string
-	TrafficClass     TrafficClass
+	RequestType      traffic.RequestType
 	Generation       ProviderGeneration
 	FromSticky       bool
 	HalfOpenProbe    bool

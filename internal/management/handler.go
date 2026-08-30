@@ -416,7 +416,7 @@ type healthDiagnosticResponse struct {
 
 type channelHealthResponse struct {
 	Model               string     `json:"model"`
-	TrafficClass        string     `json:"traffic_class"`
+	RequestType         string     `json:"request_type"`
 	State               string     `json:"state"`
 	BackoffLevel        int        `json:"backoff_level"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
@@ -431,11 +431,11 @@ type channelHealthResponse struct {
 }
 
 type sessionHealthResponse struct {
-	SessionID    string    `json:"session_id"`
-	Model        string    `json:"model"`
-	TrafficClass string    `json:"traffic_class"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastUsedAt   time.Time `json:"last_used_at"`
+	SessionID   string    `json:"session_id"`
+	Model       string    `json:"model"`
+	RequestType string    `json:"request_type"`
+	CreatedAt   time.Time `json:"created_at"`
+	LastUsedAt  time.Time `json:"last_used_at"`
 }
 
 type providerHealthResponse struct {
@@ -513,7 +513,7 @@ func (h *Handler) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
 				diagnostic := channelHealthDiagnosticResponse(channel)
 				providerHealth.Channels = append(providerHealth.Channels, channelHealthResponse{
 					Model:               channel.Model,
-					TrafficClass:        string(channel.TrafficClass),
+					RequestType:         string(channel.RequestType),
 					State:               diagnostic.State,
 					BackoffLevel:        diagnostic.BackoffLevel,
 					ConsecutiveFailures: diagnostic.ConsecutiveFailures,
@@ -533,11 +533,11 @@ func (h *Handler) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
 			providerHealth.Sessions = make([]sessionHealthResponse, 0, len(assignments))
 			for _, assignment := range assignments {
 				providerHealth.Sessions = append(providerHealth.Sessions, sessionHealthResponse{
-					SessionID:    assignment.Key.SessionID,
-					Model:        assignment.Key.Model,
-					TrafficClass: string(assignment.Key.TrafficClass),
-					CreatedAt:    assignment.CreatedAt.UTC(),
-					LastUsedAt:   assignment.LastUsedAt.UTC(),
+					SessionID:   assignment.Key.SessionID,
+					Model:       assignment.Key.Model,
+					RequestType: string(assignment.Key.RequestType),
+					CreatedAt:   assignment.CreatedAt.UTC(),
+					LastUsedAt:  assignment.LastUsedAt.UTC(),
 				})
 			}
 		}

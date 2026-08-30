@@ -139,7 +139,8 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "bad_gateway") {
 		t.Fatalf("Messages response = %d %q", response.Code, response.Body.String())
 	}
-	if !strings.Contains(stderr.String(), `session_id="app-session"`) ||
+	if !strings.Contains(stderr.String(), `request_type="normal"`) ||
+		!strings.Contains(stderr.String(), `session_id="app-session"`) ||
 		!strings.Contains(stderr.String(), `raw-app-upstream-error`) ||
 		!strings.Contains(stderr.String(), `global_health="cooldown"`) ||
 		!strings.Contains(stderr.String(), `global_entered_cooldown=true channel_entered_cooldown=false cooldown_until="`) ||
@@ -223,7 +224,8 @@ func TestAppLogsFailoverToStderrWithCompleteSourceAndNextProvider(t *testing.T) 
 	if strings.Contains(stdoutText, "kind=failover") {
 		t.Fatalf("failover was logged to stdout: %q", stdoutText)
 	}
-	if !strings.Contains(stdoutText, "kind=forward") || !strings.Contains(stdoutText, "kind=success") {
+	if !strings.Contains(stdoutText, "kind=forward") || !strings.Contains(stdoutText, "kind=success") ||
+		!strings.Contains(stdoutText, `request_type="normal"`) {
 		t.Fatalf("stdout events = %q", stdoutText)
 	}
 	if count := strings.Count(stderrText, "kind=failover"); count != 1 {

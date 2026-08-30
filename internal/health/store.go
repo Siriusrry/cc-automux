@@ -6,6 +6,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 // Clock supplies time to the health state machine.
@@ -46,8 +47,8 @@ type stateEntry struct {
 }
 
 type channelKey struct {
-	model        string
-	trafficClass scheduler.TrafficClass
+	model       string
+	requestType traffic.RequestType
 }
 
 type scopeKey struct {
@@ -135,7 +136,7 @@ func newScope(p *provider.CompiledProvider) *providerScope {
 	scope.global.state = initialState(disabled)
 	for _, model := range p.Models {
 		scope.modelSet[model] = struct{}{}
-		key := channelKey{model: model, trafficClass: scheduler.TrafficClassNormal}
+		key := channelKey{model: model, requestType: traffic.RequestTypeNormal}
 		scope.channels[key] = &stateEntry{state: initialState(disabled)}
 	}
 	return scope
@@ -153,7 +154,7 @@ func newRetiredScope(key scheduler.HealthKey, disableHealth bool) *providerScope
 		channels:      make(map[channelKey]*stateEntry),
 	}
 	scope.global.state = initialState(disableHealth)
-	scope.channels[channelKey{model: key.Model, trafficClass: key.TrafficClass}] = &stateEntry{state: initialState(disableHealth)}
+	scope.channels[channelKey{model: key.Model, requestType: key.RequestType}] = &stateEntry{state: initialState(disableHealth)}
 	return scope
 }
 
@@ -222,7 +223,7 @@ func (s *Store) reconcileModelsLocked(scope *providerScope, models []string) {
 	scope.modelSet = make(map[string]struct{}, len(models))
 	for _, model := range models {
 		scope.modelSet[model] = struct{}{}
-		key := channelKey{model: model, trafficClass: scheduler.TrafficClassNormal}
+		key := channelKey{model: model, requestType: traffic.RequestTypeNormal}
 		if _, ok := scope.channels[key]; !ok {
 			scope.channels[key] = &stateEntry{state: initialState(scope.disableHealth)}
 		}
@@ -253,14 +254,14 @@ func (s *Store) Acquire(key scheduler.HealthKey, disableHealth bool) scheduler.H
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if key.ProviderID == "" || key.Generation == "" || key.Model == "" || key.TrafficClass == "" {
+	if key.ProviderID == "" || key.Generation == "" || key.Model == "" || key.RequestType == "" {
 		return scheduler.HealthDecision{
 			GlobalState:  scheduler.GlobalUnknown,
 			ChannelState: scheduler.ChannelUnknown,
 		}
 	}
 	scope := s.scopeForAcquireLocked(key, disableHealth)
-	entryKey := channelKey{model: key.Model, trafficClass: key.TrafficClass}
+	entryKey := channelKey{model: key.Model, requestType: key.RequestType}
 	channel := scope.channels[entryKey]
 	if channel == nil {
 		channel = &stateEntry{state: initialState(scope.disableHealth)}
@@ -386,7 +387,7 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 	}
 	delete(s.leases, lease.Token)
 	scope := record.scope
-	entryKey := channelKey{model: record.key.Model, trafficClass: record.key.TrafficClass}
+	entryKey := channelKey{model: record.key.Model, requestType: record.key.RequestType}
 	channel := scope.channels[entryKey]
 	if channel == nil || lease.Key != record.key ||
 		lease.GlobalProbe != record.globalProbe ||
@@ -604,7 +605,7 @@ func (s *Store) EarliestRetry(keys []scheduler.HealthKey) (time.Time, bool) {
 	var earliest time.Time
 	for _, key := range keys {
 		for _, scope := range s.scopesForKeyLocked(key) {
-			entry := scope.channels[channelKey{model: key.Model, trafficClass: key.TrafficClass}]
+			entry := scope.channels[channelKey{model: key.Model, requestType: key.RequestType}]
 			readyAt := composedRetryAt(now, &scope.global, entry)
 			if !readyAt.IsZero() && (earliest.IsZero() || readyAt.Before(earliest)) {
 				earliest = readyAt

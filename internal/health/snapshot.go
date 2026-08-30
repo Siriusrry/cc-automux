@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 // Diagnostic contains the state-machine and latest-observation fields shared
@@ -28,9 +29,9 @@ type GlobalSnapshot struct {
 }
 
 type ChannelSnapshot struct {
-	Model        string
-	TrafficClass scheduler.TrafficClass
-	State        scheduler.ChannelHealthState
+	Model       string
+	RequestType traffic.RequestType
+	State       scheduler.ChannelHealthState
 	Diagnostic
 }
 
@@ -125,10 +126,10 @@ func snapshotScope(scope *providerScope) ProviderSnapshot {
 			continue
 		}
 		result.Channels = append(result.Channels, ChannelSnapshot{
-			Model:        key.model,
-			TrafficClass: key.trafficClass,
-			State:        channelState(entry.state),
-			Diagnostic:   snapshotDiagnostic(entry),
+			Model:       key.model,
+			RequestType: key.requestType,
+			State:       channelState(entry.state),
+			Diagnostic:  snapshotDiagnostic(entry),
 		})
 	}
 	sort.Slice(result.Channels, func(i, j int) bool {
@@ -136,7 +137,7 @@ func snapshotScope(scope *providerScope) ProviderSnapshot {
 		if modelOrder[left.Model] != modelOrder[right.Model] {
 			return modelOrder[left.Model] < modelOrder[right.Model]
 		}
-		return left.TrafficClass < right.TrafficClass
+		return left.RequestType < right.RequestType
 	})
 	return result
 }

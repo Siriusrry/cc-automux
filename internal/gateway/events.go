@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 type EventKind string
@@ -24,7 +25,7 @@ type Event struct {
 	ProviderName           string
 	SessionID              string
 	Model                  string
-	TrafficClass           scheduler.TrafficClass
+	RequestType            traffic.RequestType
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int

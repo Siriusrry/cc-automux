@@ -21,6 +21,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 type fakeSnapshot struct {
@@ -168,7 +169,7 @@ func leaseFor(item *provider.CompiledProvider, model string) scheduler.AttemptLe
 		SnapshotRevision: 1,
 		Provider:         item,
 		Model:            model,
-		TrafficClass:     scheduler.TrafficClassNormal,
+		RequestType:      traffic.RequestTypeNormal,
 		Generation:       item.Generation,
 	}
 }

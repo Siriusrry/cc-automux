@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 var (
@@ -46,9 +47,9 @@ type Options struct {
 }
 
 type roundRobinKey struct {
-	Model        string
-	TrafficClass TrafficClass
-	Priority     int64
+	Model       string
+	RequestType traffic.RequestType
+	Priority    int64
 }
 
 type cursorState struct {
@@ -141,8 +142,8 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, excluded map[strin
 	if key.Model == "" {
 		return AttemptLease{}, fmt.Errorf("%w: model is required", ErrInvalidSchedulingKey)
 	}
-	if key.TrafficClass != TrafficClassNormal && key.TrafficClass != TrafficClassClassifier {
-		return AttemptLease{}, fmt.Errorf("%w: unsupported traffic class %q", ErrInvalidSchedulingKey, key.TrafficClass)
+	if key.RequestType != traffic.RequestTypeNormal && key.RequestType != traffic.RequestTypeClassifier {
+		return AttemptLease{}, fmt.Errorf("%w: unsupported request type %q", ErrInvalidSchedulingKey, key.RequestType)
 	}
 	attemptPolicy, err := ResolveAttemptPolicy(snapshot)
 	if err != nil {
@@ -180,10 +181,10 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, excluded map[strin
 			continue
 		}
 		healthKeys = append(healthKeys, HealthKey{
-			ProviderID:   item.ID,
-			Generation:   item.Generation,
-			Model:        key.Model,
-			TrafficClass: key.TrafficClass,
+			ProviderID:  item.ID,
+			Generation:  item.Generation,
+			Model:       key.Model,
+			RequestType: key.RequestType,
 		})
 	}
 
@@ -192,10 +193,10 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, excluded map[strin
 			continue
 		}
 		healthKey := HealthKey{
-			ProviderID:   item.ID,
-			Generation:   item.Generation,
-			Model:        key.Model,
-			TrafficClass: key.TrafficClass,
+			ProviderID:  item.ID,
+			Generation:  item.Generation,
+			Model:       key.Model,
+			RequestType: key.RequestType,
 		}
 		decision := s.health.Acquire(healthKey, item.DisableHealth)
 		if !decision.Available {
@@ -226,7 +227,7 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, excluded map[strin
 		}
 
 		advanceCursor := allocate && (key.SessionID != "" || len(excluded) == 0)
-		cursorKey := roundRobinKey{Model: key.Model, TrafficClass: key.TrafficClass, Priority: item.Priority}
+		cursorKey := roundRobinKey{Model: key.Model, RequestType: key.RequestType, Priority: item.Priority}
 		cursor := s.cursors[cursorKey]
 		halfOpen := decision.Lease.GlobalProbe || decision.Lease.ChannelProbe
 		if advanceCursor && !halfOpen {
@@ -237,7 +238,7 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, excluded map[strin
 			SnapshotRevision:       snapshot.Revision(),
 			Provider:               item,
 			Model:                  key.Model,
-			TrafficClass:           key.TrafficClass,
+			RequestType:            key.RequestType,
 			Generation:             item.Generation,
 			FromSticky:             fromSticky,
 			HalfOpenProbe:          halfOpen,
@@ -287,8 +288,8 @@ func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) HealthUpdate {
 		s.removeProviderAssignmentsLocked(lease.Provider.ID, lease.Generation)
 		s.clearProviderCursorsLocked(lease.Provider.ID)
 	} else if !lease.Provider.DisableHealth && update.ChannelEnteredCooldown {
-		s.removeChannelAssignmentsLocked(lease.Provider.ID, lease.Generation, lease.Model, lease.TrafficClass)
-		s.clearChannelCursorLocked(lease.Provider.ID, lease.Model, lease.TrafficClass)
+		s.removeChannelAssignmentsLocked(lease.Provider.ID, lease.Generation, lease.Model, lease.RequestType)
+		s.clearChannelCursorLocked(lease.Provider.ID, lease.Model, lease.RequestType)
 	}
 	return update
 }
@@ -361,7 +362,7 @@ func (s *Scheduler) Assignments(providerID string) []Assignment {
 		if result[i].Key.Model != result[j].Key.Model {
 			return result[i].Key.Model < result[j].Key.Model
 		}
-		return result[i].Key.TrafficClass < result[j].Key.TrafficClass
+		return result[i].Key.RequestType < result[j].Key.RequestType
 	})
 	return result
 }
@@ -415,7 +416,7 @@ func (s *Scheduler) orderCandidatesLocked(items []*provider.CompiledProvider, ke
 			ordered = append(ordered, rotateAfter(group, assigned.ID)...)
 			continue
 		}
-		cursor := s.cursors[roundRobinKey{Model: key.Model, TrafficClass: key.TrafficClass, Priority: group[0].Priority}]
+		cursor := s.cursors[roundRobinKey{Model: key.Model, RequestType: key.RequestType, Priority: group[0].Priority}]
 		ordered = append(ordered, rotateAfter(group, cursor.ProviderID)...)
 	}
 	if assigned == nil {
@@ -526,10 +527,10 @@ func (s *Scheduler) removeProviderAssignmentsLocked(providerID string, generatio
 	}
 }
 
-func (s *Scheduler) removeChannelAssignmentsLocked(providerID string, generation ProviderGeneration, model string, trafficClass TrafficClass) {
+func (s *Scheduler) removeChannelAssignmentsLocked(providerID string, generation ProviderGeneration, model string, requestType traffic.RequestType) {
 	for _, entry := range appendProviderEntries(s.byProvider[providerID]) {
 		if entry.assignment.Generation == generation && entry.assignment.Key.Model == model &&
-			entry.assignment.Key.TrafficClass == trafficClass {
+			entry.assignment.Key.RequestType == requestType {
 			s.removeAssignmentLocked(entry)
 		}
 	}
@@ -573,9 +574,9 @@ func (s *Scheduler) clearProviderCursorsLocked(providerID string) {
 	}
 }
 
-func (s *Scheduler) clearChannelCursorLocked(providerID, model string, trafficClass TrafficClass) {
+func (s *Scheduler) clearChannelCursorLocked(providerID, model string, requestType traffic.RequestType) {
 	for key, cursor := range s.cursors {
-		if cursor.ProviderID == providerID && key.Model == model && key.TrafficClass == trafficClass {
+		if cursor.ProviderID == providerID && key.Model == model && key.RequestType == requestType {
 			s.clearCursorLocked(key)
 		}
 	}

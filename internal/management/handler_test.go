@@ -18,6 +18,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 func testManager(t *testing.T, restart func() error) *runtime.Manager {
@@ -309,9 +310,9 @@ func TestProviderHealthReturnsCompleteDiagnosticsAndStatusAggregates(t *testing.
 	snapshot := manager.Snapshot()
 	selector.Reconcile(snapshot)
 	lease, err := selector.Acquire(snapshot, scheduler.StickyKey{
-		SessionID:    "raw-session-id",
-		Model:        "model-a",
-		TrafficClass: scheduler.TrafficClassNormal,
+		SessionID:   "raw-session-id",
+		Model:       "model-a",
+		RequestType: traffic.RequestTypeNormal,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -334,6 +335,9 @@ func TestProviderHealthReturnsCompleteDiagnosticsAndStatusAggregates(t *testing.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("provider health = %d %s", rec.Code, rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"request_type":"normal"`) {
+		t.Fatalf("provider health request type representation = %s", rec.Body.String())
+	}
 	var healthResponse providerHealthListResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &healthResponse); err != nil {
 		t.Fatal(err)
@@ -348,7 +352,8 @@ func TestProviderHealthReturnsCompleteDiagnosticsAndStatusAggregates(t *testing.
 	}
 	if item.Channels[0].LastUpstreamURL != "https://provider.example/prefix/v1/messages?beta=1" ||
 		item.Channels[0].LastError != "complete upstream error text" || item.Channels[0].LastSessionID != "raw-session-id" ||
-		item.Sessions[0].SessionID != "raw-session-id" {
+		item.Channels[0].RequestType != string(traffic.RequestTypeNormal) ||
+		item.Sessions[0].SessionID != "raw-session-id" || item.Sessions[0].RequestType != string(traffic.RequestTypeNormal) {
 		t.Fatalf("complete diagnostic fields = %#v", item)
 	}
 
