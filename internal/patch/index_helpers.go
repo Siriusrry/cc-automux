@@ -36,25 +36,7 @@ func requestIndex(request *MutableRequest) (bodyfile.JSONIndex, error) {
 	if err := request.index.ValidateBody(request.Body); err == nil {
 		return request.index, nil
 	}
-	if request.strictIndex {
-		return bodyfile.JSONIndex{}, ErrIndexUnavailable
-	}
-	spec := request.index.Spec()
-	var index bodyfile.JSONIndex
-	var err error
-	if spec.RequireModel || spec.SelectAll || spec.Paths != nil {
-		index, err = bodyfile.IndexSelective(request.Body, spec)
-	} else {
-		// Explicit compatibility for focused callers that construct a bare
-		// MutableRequest literal. NewMutableRequest marks production requests
-		// strict, so this branch can never reopen a live Gateway body.
-		index, err = bodyfile.Index(request.Body)
-	}
-	if err != nil {
-		return bodyfile.JSONIndex{}, err
-	}
-	request.index = index
-	return index, nil
+	return bodyfile.JSONIndex{}, ErrIndexUnavailable
 }
 
 func responseIndex(response *MutableResponse) (bodyfile.JSONIndex, error) {

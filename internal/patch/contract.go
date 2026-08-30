@@ -103,15 +103,14 @@ type MutableRequest struct {
 	Body    bodyfile.Body
 	Headers MutableHeaderSet
 
-	index       bodyfile.JSONIndex
-	strictIndex bool
+	index bodyfile.JSONIndex
 }
 
 // NewMutableRequest binds the PreparedRequest index to the immutable BaseBody
 // for the first request hook. If a hook replaces Body, later hooks rebuild an
 // attempt-level index only when they actually need one.
 func NewMutableRequest(body bodyfile.Body, index bodyfile.JSONIndex, headers MutableHeaderSet) *MutableRequest {
-	return &MutableRequest{Body: body, Headers: headers, index: index, strictIndex: true}
+	return &MutableRequest{Body: body, Headers: headers, index: index}
 }
 
 // SetBody replaces the current request body together with the index produced
@@ -126,7 +125,6 @@ func (r *MutableRequest) SetBody(body bodyfile.Body, index bodyfile.JSONIndex) e
 	}
 	r.Body = body
 	r.index = index
-	r.strictIndex = true
 	return nil
 }
 
@@ -145,15 +143,14 @@ type MutableResponse struct {
 	Body    bodyfile.Body
 	Headers MutableHeaderSet
 
-	index       bodyfile.JSONIndex
-	strictIndex bool
+	index bodyfile.JSONIndex
 }
 
 // NewMutableResponse binds the selective index produced while the terminal
 // response was captured. If a response hook derives a new body, later hooks
 // rebuild the same selective index while writing that derived body.
 func NewMutableResponse(status int, body bodyfile.Body, index bodyfile.JSONIndex, headers MutableHeaderSet) *MutableResponse {
-	return &MutableResponse{Status: status, Body: body, Headers: headers, index: index, strictIndex: true}
+	return &MutableResponse{Status: status, Body: body, Headers: headers, index: index}
 }
 
 // SetBody replaces the current response body and its already-built index.
@@ -166,7 +163,6 @@ func (r *MutableResponse) SetBody(body bodyfile.Body, index bodyfile.JSONIndex) 
 	}
 	r.Body = body
 	r.index = index
-	r.strictIndex = true
 	return nil
 }
 

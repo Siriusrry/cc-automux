@@ -921,6 +921,16 @@ func TestGPTResponseRequiresPlanBoundResponseIndex(t *testing.T) {
 	}
 }
 
+func TestRequestHookRequiresPlanBoundSelectiveIndex(t *testing.T) {
+	request := &MutableRequest{
+		Body:    bodyFromString(t, `{"model":"m","thinking":{"type":"disabled"}}`),
+		Headers: NewHTTPHeaderSet(nil),
+	}
+	if err := (anyRouterSubagentPatch{}).ApplyRequest(PatchContext{}, request); !errors.Is(err, ErrIndexUnavailable) {
+		t.Fatalf("unbound request index error = %v, want ErrIndexUnavailable", err)
+	}
+}
+
 func TestAppendStopFieldsUsesActualRootMembership(t *testing.T) {
 	for _, test := range []struct {
 		name  string
