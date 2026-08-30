@@ -225,11 +225,10 @@ func ApplyEditsAndScanWithIndex(body Body, index JSONIndex, edits []Edit, spec S
 		return nil, JSONIndex{}, err
 	}
 	if len(edits) == 0 {
-		projected, err := index.Project(spec)
-		if err != nil {
-			return nil, JSONIndex{}, err
-		}
-		return body, projected, nil
+		// An indexed no-op preserves the scan result exactly. Ingress callers
+		// already retain the complete request union; do not introduce a second
+		// post-classification projection just because the edit set is empty.
+		return body, index, nil
 	}
 	return ApplyEditsAndScan(body, edits, spec, directory...)
 }
