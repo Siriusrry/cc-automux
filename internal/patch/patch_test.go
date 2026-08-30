@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,8 +57,57 @@ func executeRequest(t *testing.T, id string, context PatchContext, input string,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = execution.Close() })
-	request := &MutableRequest{Body: bodyFromString(t, input), Headers: NewHTTPHeaderSet(headers)}
+	paths, err := plan.RequiredPaths(StageRequest, context.RequestType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := bodyfile.RequestScanSpec(paths...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bodyFromString(t, input)
+	index, err := bodyfile.IndexSelective(body, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := NewMutableRequest(body, index, NewHTTPHeaderSet(headers))
 	return request, execution.ApplyRequestOnly(request)
+}
+
+func selectiveRequest(t *testing.T, plan Plan, requestType RequestType, input string, headers http.Header) *MutableRequest {
+	t.Helper()
+	paths, err := plan.RequiredPaths(StageRequest, requestType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := bodyfile.RequestScanSpec(paths...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bodyFromString(t, input)
+	index, err := bodyfile.IndexSelective(body, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewMutableRequest(body, index, NewHTTPHeaderSet(headers))
+}
+
+func selectiveResponse(t *testing.T, plan Plan, requestType RequestType, status int, input string, headers http.Header) *MutableResponse {
+	t.Helper()
+	paths, err := plan.RequiredPaths(StageResponse, requestType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := bodyfile.ResponseScanSpec(paths...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bodyFromString(t, input)
+	index, err := bodyfile.IndexSelective(body, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewMutableResponse(status, body, index, NewHTTPHeaderSet(headers))
 }
 
 func TestDefaultRegistryMetadataOrderAndFiltering(t *testing.T) {
@@ -86,6 +136,37 @@ func TestDefaultRegistryMetadataOrderAndFiltering(t *testing.T) {
 	}
 	if _, err := registry.Compile([]string{AnyRouterSubagentThinkingID, AnyRouterSubagentThinkingID}); !errors.Is(err, ErrDuplicatePatch) {
 		t.Fatalf("duplicate = %v", err)
+	}
+}
+
+func TestBuiltinDefinitionsDeclareSelectiveHookPaths(t *testing.T) {
+	registry := DefaultRegistry(Services{AliasStore: NewAliasStore()})
+	wantRequests := map[string][]string{
+		AnyRouterSubagentThinkingID:       {"/thinking", "/thinking/type"},
+		AnyRouterClassifierRequestID:      {"/thinking", "/thinking/type", "/system", "/system/*", "/system/*/text"},
+		CLIProxyAPIClassifierSessionID:    {"/metadata", "/metadata/user_id"},
+		GPTClassifierResponseReassemblyID: {"/stop_sequences", "/stop_sequences/*"},
+	}
+	wantResponses := map[string][]string{
+		GPTClassifierResponseReassemblyID: {"/type", "/content", "/content/*", "/content/*/type", "/content/*/text", "/stop_reason", "/stop_sequence"},
+	}
+	for id, want := range wantRequests {
+		definition, ok := registry.Lookup(id)
+		if !ok {
+			t.Fatalf("missing definition %q", id)
+		}
+		if !reflect.DeepEqual(definition.RequestPaths, want) {
+			t.Fatalf("%s request paths = %#v, want %#v", id, definition.RequestPaths, want)
+		}
+	}
+	for id, want := range wantResponses {
+		definition, ok := registry.Lookup(id)
+		if !ok {
+			t.Fatalf("missing definition %q", id)
+		}
+		if !reflect.DeepEqual(definition.ResponsePaths, want) {
+			t.Fatalf("%s response paths = %#v, want %#v", id, definition.ResponsePaths, want)
+		}
 	}
 }
 
@@ -174,9 +255,8 @@ func TestExecutionRequestForwardResponseReverseAndAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := bodyFromString(t, `{"model":"m"}`)
-	request := &MutableRequest{Body: body, Headers: NewHTTPHeaderSet(nil)}
-	response := &MutableResponse{Status: 200, Body: body, Headers: NewHTTPHeaderSet(nil)}
+	request := selectiveRequest(t, plan, RequestTypeNormal, `{"model":"m"}`, nil)
+	response := selectiveResponse(t, plan, RequestTypeNormal, 200, `{"model":"m"}`, nil)
 	if err := execution.ApplyRequestOnly(request); err != nil {
 		t.Fatal(err)
 	}
@@ -487,10 +567,7 @@ func TestAnyRouterClassifierScansLargeSystemTextWithBoundedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	index, err := bodyfile.Index(request.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
+	index := request.Index()
 	marker, ok := index.Lookup("/system/0/text")
 	if !ok {
 		t.Fatal("marker text missing")
@@ -732,7 +809,7 @@ func TestGPTClassifierResponseReassembly(t *testing.T) {
 		t.Fatal(err)
 	}
 	requestHeaders := NewHTTPHeaderSet(http.Header{"Accept-Encoding": []string{"gzip"}})
-	request := &MutableRequest{Body: bodyFromString(t, `{"model":"m","stop_sequences":["</block>","END"]}`), Headers: requestHeaders}
+	request := selectiveRequest(t, plan, RequestTypeClassifier, `{"model":"m","stop_sequences":["</block>","END"]}`, requestHeaders.Header)
 	if err := execution.ApplyRequestOnly(request); err != nil {
 		t.Fatal(err)
 	}
@@ -740,11 +817,7 @@ func TestGPTClassifierResponseReassembly(t *testing.T) {
 		t.Fatal("Accept-Encoding not removed")
 	}
 	responseHeaders := NewHTTPHeaderSet(http.Header{"Content-Encoding": []string{"gzip"}})
-	response := &MutableResponse{
-		Status:  200,
-		Body:    bodyFromString(t, `{"type":"message","model":"m","content":[{"type":"thinking","thinking":"secret"},{"type":"text","text":"<block>yes</block><reason>x</reason>"},{"type":"text","text":"discard"}],"stop_reason":"end_turn","stop_sequence":null}`),
-		Headers: responseHeaders,
-	}
+	response := selectiveResponse(t, plan, RequestTypeClassifier, 200, `{"type":"message","model":"m","content":[{"type":"thinking","thinking":"secret"},{"type":"text","text":"<block>yes</block><reason>x</reason>"},{"type":"text","text":"discard"}],"stop_reason":"end_turn","stop_sequence":null}`, responseHeaders.Header)
 	if err := execution.ApplyResponseOnly(response); err != nil {
 		t.Fatal(err)
 	}
@@ -783,18 +856,11 @@ func TestGPTStopSequenceSameStartUsesRequestOrderAndResponseNeedsNoModel(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			request := &MutableRequest{
-				Body:    bodyFromString(t, `{"model":"m","stop_sequences":`+string(encodedSequences)+`}`),
-				Headers: NewHTTPHeaderSet(nil),
-			}
+			request := selectiveRequest(t, plan, RequestTypeClassifier, `{"model":"m","stop_sequences":`+string(encodedSequences)+`}`, nil)
 			if err := execution.ApplyRequestOnly(request); err != nil {
 				t.Fatal(err)
 			}
-			response := &MutableResponse{
-				Status:  200,
-				Body:    bodyFromString(t, `{"type":"message","content":[{"type":"text","text":"prefix abc suffix"}],"stop_reason":"end_turn","stop_sequence":null}`),
-				Headers: NewHTTPHeaderSet(nil),
-			}
+			response := selectiveResponse(t, plan, RequestTypeClassifier, 200, `{"type":"message","content":[{"type":"text","text":"prefix abc suffix"}],"stop_reason":"end_turn","stop_sequence":null}`, nil)
 			if err := execution.ApplyResponseOnly(response); err != nil {
 				t.Fatal(err)
 			}
@@ -831,11 +897,11 @@ func TestGPTResponseRejectsDuplicateOrInvalidStopFieldsWithoutMatch(t *testing.T
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = execution.Close() })
-			request := &MutableRequest{Body: bodyFromString(t, `{"model":"m","stop_sequences":["STOP"]}`), Headers: NewHTTPHeaderSet(nil)}
+			request := selectiveRequest(t, plan, RequestTypeClassifier, `{"model":"m","stop_sequences":["STOP"]}`, nil)
 			if err := execution.ApplyRequestOnly(request); err != nil {
 				t.Fatal(err)
 			}
-			response := &MutableResponse{Status: 200, Body: bodyFromString(t, responseBody), Headers: NewHTTPHeaderSet(nil)}
+			response := selectiveResponse(t, plan, RequestTypeClassifier, 200, responseBody, nil)
 			if err := execution.ApplyResponseOnly(response); err == nil {
 				t.Fatal("invalid stop fields succeeded")
 			}
@@ -864,7 +930,11 @@ func (b *trackingBody) Close() error {
 
 func TestMutableRequestReusesBaseIndexAndReindexesOnlyAfterBodyChange(t *testing.T) {
 	base := &trackingBody{content: `{"model":"m"}`}
-	index, err := bodyfile.Index(base)
+	spec, err := bodyfile.RequestScanSpec("/thinking", "/thinking/type")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := bodyfile.IndexSelective(base, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +948,7 @@ func TestMutableRequestReusesBaseIndexAndReindexesOnlyAfterBodyChange(t *testing
 	}
 
 	derived := &trackingBody{content: `{"model":"m","derived":true}`}
-	derivedIndex, err := bodyfile.Index(derived)
+	derivedIndex, err := bodyfile.IndexSelective(derived, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
