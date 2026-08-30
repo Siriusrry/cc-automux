@@ -16,6 +16,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
+	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
@@ -142,7 +143,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Keep the original runtime snapshot for scan-contract discovery so its
 	// optional flow view (including a fixed classifier target) remains visible;
 	// the policy wrapper intentionally exposes only the scheduler interface.
-	requestSpec, specErr := h.requestScanSpec(runtimeSnapshot)
+	requestSpec, scanProviders, specErr := h.requestScanSpecWithProviders(runtimeSnapshot)
 	if specErr != nil {
 		writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request scan could not be prepared")
 		return
@@ -197,11 +198,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "model_not_configured", "model is not configured")
 		return
 	}
-	h.reconcileClients(snapshot)
+	h.reconcileClientsWithProviders(snapshot, scanProviders)
 	h.forwardExecution(w, r, snapshot, plan)
 }
 
 func (h *Handler) reconcileClients(snapshot scheduler.Snapshot) {
+	if h == nil || snapshot == nil {
+		return
+	}
+	h.reconcileClientsWithProviders(snapshot, snapshot.Providers())
+}
+
+func (h *Handler) reconcileClientsWithProviders(snapshot scheduler.Snapshot, providers []*provider.CompiledProvider) {
 	if h == nil || snapshot == nil {
 		return
 	}
@@ -210,7 +218,7 @@ func (h *Handler) reconcileClients(snapshot scheduler.Snapshot) {
 	if snapshot.Revision() <= h.clientRevision {
 		return
 	}
-	h.clients.Reconcile(snapshot.Providers())
+	h.clients.Reconcile(providers)
 	h.clientRevision = snapshot.Revision()
 }
 

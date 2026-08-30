@@ -415,10 +415,10 @@ func TestGatewayRetainsIngressRequestUnionWithoutPostClassificationProjection(t 
 			t.Fatalf("request %d response = %d %q", attempt, response.Code, response.Body.String())
 		}
 	}
-	// The first request needs one additional Provider copy to reconcile the
-	// client pool. Every request performs exactly one scan-union read.
-	if got := snapshot.providerCalls.Load(); got != 3 {
-		t.Fatalf("Providers calls = %d, want 3", got)
+	// The scan contract and client-pool reconciliation reuse one defensive
+	// Provider snapshot per request.
+	if got := snapshot.providerCalls.Load(); got != 2 {
+		t.Fatalf("Providers calls = %d, want 2", got)
 	}
 }
 

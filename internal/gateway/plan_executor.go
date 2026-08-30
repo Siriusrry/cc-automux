@@ -11,6 +11,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
+	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
@@ -76,14 +77,25 @@ func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, r
 // retained after classification; the request path never performs a second
 // projection pass.
 func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpec, error) {
+	spec, _, err := h.requestScanSpecWithProviders(snapshot)
+	return spec, err
+}
+
+// requestScanSpecWithProviders returns the ingress scan contract and the one
+// defensive Provider snapshot used to compute it. The Gateway reuses that
+// exact slice for client-pool reconciliation, avoiding a second provider-list
+// copy on accepted requests.
+func (h *Handler) requestScanSpecWithProviders(snapshot scheduler.Snapshot) (bodyfile.ScanSpec, []*provider.CompiledProvider, error) {
 	types := []traffic.RequestType{traffic.RequestTypeNormal}
 	paths := make([]string, 0)
+	var providers []*provider.CompiledProvider
 	if h != nil && h.detectors != nil {
 		paths = appendUniquePaths(paths, h.detectors.RequiredPaths()...)
 		types = append(types, h.detectors.Types()...)
 	}
 	if snapshot != nil {
-		for _, item := range snapshot.Providers() {
+		providers = snapshot.Providers()
+		for _, item := range providers {
 			// Only providers that can be selected in this immutable snapshot
 			// contribute to the ingress union. Disabled/no-model entries are not
 			// reachable and must not force unrelated patch fields into every index.
@@ -93,7 +105,7 @@ func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpe
 			for _, requestType := range types {
 				required, err := item.PatchPlan.RequiredPaths(patch.StageRequest, requestType)
 				if err != nil {
-					return bodyfile.ScanSpec{}, err
+					return bodyfile.ScanSpec{}, providers, err
 				}
 				paths = appendUniquePaths(paths, required...)
 			}
@@ -111,12 +123,13 @@ func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpe
 			// scheduler.Snapshot.Providers().
 			required, err := fixed.PatchPlan.RequiredPaths(patch.StageRequest, traffic.RequestTypeClassifier)
 			if err != nil {
-				return bodyfile.ScanSpec{}, err
+				return bodyfile.ScanSpec{}, providers, err
 			}
 			paths = appendUniquePaths(paths, required...)
 		}
 	}
-	return bodyfile.RequestScanSpec(paths...)
+	spec, err := bodyfile.RequestScanSpec(paths...)
+	return spec, providers, err
 }
 
 func appendUniquePaths(paths []string, additions ...string) []string {
