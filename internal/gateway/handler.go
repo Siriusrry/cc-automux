@@ -139,7 +139,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	requestSpec, specErr := h.requestScanSpec(snapshot)
+	// Keep the original runtime snapshot for scan-contract discovery so its
+	// optional flow view (including a fixed classifier target) remains visible;
+	// the policy wrapper intentionally exposes only the scheduler interface.
+	requestSpec, specErr := h.requestScanSpec(runtimeSnapshot)
 	if specErr != nil {
 		writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request scan could not be prepared")
 		return
