@@ -99,6 +99,23 @@ func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpe
 			}
 		}
 	}
+	// A fixed classifier target is outside the scheduler Provider catalog, but
+	// its request hooks are still a possible ingress consumer. Include its
+	// classifier paths in the same pre-receive union so fixed-target execution
+	// never depends on a post-capture rescan.
+	if flowView, ok := snapshot.(flow.SnapshotView); ok {
+		fixed := flowView.AutoMode().FixedTarget
+		if fixed != nil {
+			// Fixed targets are classifier-only by contract. Their request paths
+			// belong to the same ingress union even though the target is outside
+			// scheduler.Snapshot.Providers().
+			required, err := fixed.PatchPlan.RequiredPaths(patch.StageRequest, traffic.RequestTypeClassifier)
+			if err != nil {
+				return bodyfile.ScanSpec{}, err
+			}
+			paths = appendUniquePaths(paths, required...)
+		}
+	}
 	return bodyfile.RequestScanSpec(paths...)
 }
 

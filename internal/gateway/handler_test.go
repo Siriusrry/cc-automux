@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
@@ -189,6 +190,50 @@ func TestRequestScanSpecUsesOnlyReachableProviderPlans(t *testing.T) {
 	}
 	if containsPath(paths.Paths, "/thinking/type") {
 		t.Fatalf("unreachable provider path retained: %#v", paths)
+	}
+}
+
+type fixedTargetScanSnapshot struct {
+	*fakeSnapshot
+	auto flow.AutoModeSnapshot
+}
+
+func (s *fixedTargetScanSnapshot) NormalAttemptPolicy() scheduler.AttemptPolicy {
+	return s.AttemptPolicy()
+}
+
+func (s *fixedTargetScanSnapshot) ClassifierAttemptPolicy() scheduler.AttemptPolicy {
+	return scheduler.DefaultClassifierAttemptPolicy()
+}
+
+func (s *fixedTargetScanSnapshot) AutoMode() flow.AutoModeSnapshot { return s.auto }
+
+func TestRequestScanSpecIncludesFixedClassifierTargetRequestPaths(t *testing.T) {
+	registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+	plan, err := registry.Compile([]string{
+		patch.AnyRouterClassifierRequestID,
+		patch.GPTClassifierResponseReassemblyID,
+	}, patch.RequestTypeClassifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := &provider.CompiledTarget{PatchPlan: plan}
+	snapshot := &fixedTargetScanSnapshot{
+		fakeSnapshot: &fakeSnapshot{revision: 1, gatewayKey: "gateway"},
+		auto:         flow.AutoModeSnapshot{Mode: "fixed_provider", FixedTarget: target},
+	}
+	handler := NewWithOptions(nil, nil, Options{})
+	paths, err := handler.requestScanSpec(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(paths.Paths, "/system/*/text") || !containsPath(paths.Paths, "/stop_sequences/*") {
+		t.Fatalf("fixed-target request paths missing: %#v", paths.Paths)
+	}
+	for _, responsePath := range []string{"/type", "/content", "/content/*/text", "/stop_reason", "/stop_sequence"} {
+		if containsPath(paths.Paths, responsePath) {
+			t.Fatalf("response path %q leaked into request scan: %#v", responsePath, paths.Paths)
+		}
 	}
 }
 
