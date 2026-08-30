@@ -9,7 +9,7 @@
 *.pprof
 
 # Product-generated local files
-.cc-auto.bak
+.cc-automux.bak
 
 # Logs and temporary files
 *.log
