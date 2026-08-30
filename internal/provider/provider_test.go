@@ -26,6 +26,16 @@ func providerConfig(id, name, model, key string, priority int64) config.Provider
 	}
 }
 
+func testCompileContext(t *testing.T) RuntimeContext {
+	t.Helper()
+	registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+	context, err := NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return context
+}
+
 func TestCompileCatalogExactModelIndexAndPriority(t *testing.T) {
 	inputs := []config.ProviderConfig{
 		providerConfig("11111111-1111-4111-8111-111111111111", "low", "Model", "key-low", -1),
@@ -42,7 +52,7 @@ func TestCompileCatalogExactModelIndexAndPriority(t *testing.T) {
 		},
 	}
 	inputs[3].Enabled = false
-	catalog, err := CompileCatalog(inputs)
+	catalog, err := CompileCatalog(inputs, testCompileContext(t))
 	if err != nil {
 		t.Fatalf("CompileCatalog() error = %v", err)
 	}
@@ -61,9 +71,19 @@ func TestCompileCatalogExactModelIndexAndPriority(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsMissingRuntimeContext(t *testing.T) {
+	input := providerConfig("11111111-1111-4111-8111-111111111111", "provider", "model", "key", 0)
+	if _, err := Compile(input, RuntimeContext{}); err == nil || !strings.Contains(err.Error(), "patch registry is required") {
+		t.Fatalf("Compile missing context error = %v", err)
+	}
+	if _, err := CompileCatalog([]config.ProviderConfig{input}, RuntimeContext{}); err == nil || !strings.Contains(err.Error(), "patch registry is required") {
+		t.Fatalf("CompileCatalog missing context error = %v", err)
+	}
+}
+
 func TestApplyAuthHeadersReplacesClientCredentials(t *testing.T) {
 	p := providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "provider-key", 0)
-	compiled, err := Compile(p)
+	compiled, err := Compile(p, testCompileContext(t))
 	if err != nil {
 		t.Fatalf("Compile() error = %v", err)
 	}
@@ -86,7 +106,7 @@ func TestApplyAuthHeadersReplacesClientCredentials(t *testing.T) {
 	}
 
 	p.UseXAPIKey = true
-	compiled, err = Compile(p)
+	compiled, err = Compile(p, testCompileContext(t))
 	if err != nil {
 		t.Fatalf("Compile(x-api-key) error = %v", err)
 	}
@@ -101,12 +121,12 @@ func TestApplyAuthHeadersReplacesClientCredentials(t *testing.T) {
 
 func TestTLSDefaultsAndExecutablePatchRegistry(t *testing.T) {
 	p := providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
-	compiled, err := Compile(p)
+	compiled, err := Compile(p, testCompileContext(t))
 	if err != nil || compiled.TLS != nil {
 		t.Fatalf("default TLS = %#v, err %v; want system-root nil", compiled.TLS, err)
 	}
 	p.TLS.InsecureSkipVerify = true
-	compiled, err = Compile(p)
+	compiled, err = Compile(p, testCompileContext(t))
 	if err != nil || compiled.TLS == nil || !compiled.TLS.InsecureSkipVerify {
 		t.Fatalf("insecure TLS = %#v, err %v", compiled.TLS, err)
 	}
@@ -114,17 +134,17 @@ func TestTLSDefaultsAndExecutablePatchRegistry(t *testing.T) {
 	if err := os.WriteFile(p.TLS.CAFile, []byte("not pem"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Compile(p); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+	if _, err := Compile(p, testCompileContext(t)); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("CA/insecure conflict error = %v", err)
 	}
 
 	p = providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
 	p.Patches = []string{"not-known"}
-	if _, err := Compile(p); err == nil || !strings.Contains(err.Error(), "unknown provider patch") {
+	if _, err := Compile(p, testCompileContext(t)); err == nil || !strings.Contains(err.Error(), "unknown provider patch") {
 		t.Fatalf("unknown patch error = %v", err)
 	}
 	p.Patches = []string{patch.AnyRouterSubagentThinkingID}
-	compiled, err = Compile(p)
+	compiled, err = Compile(p, testCompileContext(t))
 	if err != nil {
 		t.Fatalf("known executable patch compile error = %v", err)
 	}
@@ -133,7 +153,7 @@ func TestTLSDefaultsAndExecutablePatchRegistry(t *testing.T) {
 	}
 }
 
-func TestCompileWithRegistryRejectsUnknownAndConflictingPatchesAndFiltersByRequestType(t *testing.T) {
+func TestCompileWithRuntimeContextRejectsUnknownAndConflictingPatchesAndFiltersByRequestType(t *testing.T) {
 	registry, err := patch.NewRegistry([]patch.PatchDefinition{
 		providerTestRequestDefinition("classifier-only", []patch.RequestType{patch.RequestTypeClassifier}, nil),
 		providerTestRequestDefinition("normal-only", []patch.RequestType{patch.RequestTypeNormal}, nil),
@@ -143,7 +163,11 @@ func TestCompileWithRegistryRejectsUnknownAndConflictingPatchesAndFiltersByReque
 	}
 	input := providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
 	input.Patches = []string{"classifier-only", "normal-only"}
-	compiled, err := CompileWithRegistry(input, registry)
+	context, err := NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := Compile(input, context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +190,7 @@ func TestCompileWithRegistryRejectsUnknownAndConflictingPatchesAndFiltersByReque
 	}
 
 	input.Patches = []string{"missing"}
-	if _, err := CompileWithRegistry(input, registry); !errors.Is(err, patch.ErrUnknownPatch) {
+	if _, err := Compile(input, context); !errors.Is(err, patch.ErrUnknownPatch) {
 		t.Fatalf("unknown patch error = %v", err)
 	}
 
@@ -179,7 +203,11 @@ func TestCompileWithRegistryRejectsUnknownAndConflictingPatchesAndFiltersByReque
 		t.Fatal(err)
 	}
 	input.Patches = []string{"conflict-a", "conflict-b"}
-	if _, err := CompileWithRegistry(input, conflictRegistry); !errors.Is(err, patch.ErrPatchConflict) {
+	conflictContext, err := NewRuntimeContext(conflictRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Compile(input, conflictContext); !errors.Is(err, patch.ErrPatchConflict) {
 		t.Fatalf("conflicting patches error = %v", err)
 	}
 }
@@ -190,7 +218,7 @@ func TestCompiledProviderCloneDoesNotShareSlices(t *testing.T) {
 		patch.CLIProxyAPIClassifierSessionID,
 		patch.GPTClassifierResponseReassemblyID,
 	}
-	compiled, err := Compile(p)
+	compiled, err := Compile(p, testCompileContext(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +252,7 @@ func TestCompiledProviderCloneDoesNotShareSlices(t *testing.T) {
 
 func TestProviderGenerationTracksOnlyRuntimeIdentity(t *testing.T) {
 	base := providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
-	compiled, err := Compile(base)
+	compiled, err := Compile(base, testCompileContext(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +269,7 @@ func TestProviderGenerationTracksOnlyRuntimeIdentity(t *testing.T) {
 		candidate := base
 		candidate.Models = append([]string(nil), base.Models...)
 		mutate(&candidate)
-		got, err := Compile(candidate)
+		got, err := Compile(candidate, testCompileContext(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +288,7 @@ func TestProviderGenerationTracksOnlyRuntimeIdentity(t *testing.T) {
 		candidate := base
 		candidate.Models = append([]string(nil), base.Models...)
 		mutate(&candidate)
-		got, err := Compile(candidate)
+		got, err := Compile(candidate, testCompileContext(t))
 		if err != nil {
 			t.Fatal(err)
 		}

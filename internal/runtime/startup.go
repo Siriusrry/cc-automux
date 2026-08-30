@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
-	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 )
 
@@ -23,18 +22,18 @@ type StartupCandidate struct {
 	warning        error
 }
 
-func LoadStartup(store *config.Store, registry patch.Registry) (*StartupCandidate, error) {
+func LoadStartup(store *config.Store, context provider.RuntimeContext) (*StartupCandidate, error) {
 	if store == nil {
 		return nil, errors.New("configuration store is required")
 	}
-	if registry.Empty() {
-		registry = patch.DefaultRegistry()
+	if err := context.Validate(); err != nil {
+		return nil, fmt.Errorf("runtime context: %w", err)
 	}
 	active, err := store.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load active configuration: %w", err)
 	}
-	activeCatalog, err := provider.CompileCatalogWithRegistry(active.Providers, registry)
+	activeCatalog, err := provider.CompileCatalog(active.Providers, context)
 	if err != nil {
 		return nil, fmt.Errorf("compile active configuration: %w", err)
 	}
@@ -61,7 +60,7 @@ func LoadStartup(store *config.Store, registry patch.Registry) (*StartupCandidat
 		}
 		return candidate, nil
 	}
-	pendingCatalog, err := provider.CompileCatalogWithRegistry(pending.Providers, registry)
+	pendingCatalog, err := provider.CompileCatalog(pending.Providers, context)
 	if err != nil {
 		candidate.warning = fmt.Errorf("discard uncompilable pending configuration: %w", err)
 		if removeErr := store.RemovePending(); removeErr != nil {

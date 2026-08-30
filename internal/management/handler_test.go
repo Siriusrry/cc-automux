@@ -15,6 +15,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/patch"
+	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
@@ -32,13 +33,24 @@ func testManager(t *testing.T, restart func() error) *runtime.Manager {
 		t.Fatal(err)
 	}
 	manager, err := runtime.NewManager(store, cfg, runtime.Options{
-		Restart:   restart,
-		Preflight: func(config.Config, config.Config) error { return nil },
+		Restart:        restart,
+		RuntimeContext: testRuntimeContext(t),
+		Preflight:      func(config.Config, config.Config) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return manager
+}
+
+func testRuntimeContext(t *testing.T) provider.RuntimeContext {
+	t.Helper()
+	registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+	context, err := provider.NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return context
 }
 
 func request(handler http.Handler, method, path, auth, body string) *httptest.ResponseRecorder {
@@ -380,9 +392,10 @@ func TestRestartResponseAndConflict(t *testing.T) {
 			t.Fatal(err)
 		}
 		m, err := runtime.NewManager(store, cfg, runtime.Options{
-			Restart:      func() error { calls.Add(1); return errors.New("exec failed") },
-			RestartDelay: 50 * time.Millisecond,
-			Preflight:    func(config.Config, config.Config) error { return nil },
+			Restart:        func() error { calls.Add(1); return errors.New("exec failed") },
+			RestartDelay:   50 * time.Millisecond,
+			RuntimeContext: testRuntimeContext(t),
+			Preflight:      func(config.Config, config.Config) error { return nil },
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -471,7 +484,7 @@ func TestPersistenceFailureReturns500WithoutPublishingSnapshot(t *testing.T) {
 	if err := store.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := runtime.NewManager(&failingManagementStore{Store: store}, cfg, runtime.Options{})
+	manager, err := runtime.NewManager(&failingManagementStore{Store: store}, cfg, runtime.Options{RuntimeContext: testRuntimeContext(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

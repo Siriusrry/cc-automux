@@ -26,6 +26,39 @@ type CompiledTarget struct {
 	Generation  ProviderGeneration
 }
 
+// RuntimeContext is the explicit, application-owned context required to
+// compile providers.  It carries the one immutable Patch Registry and its
+// process-local shared services (including the AliasStore).  Provider
+// compilation never creates a registry or session map on its own; the
+// composition root creates this context once and Runtime Manager reuses it
+// for every snapshot.
+type RuntimeContext struct {
+	Registry patch.Registry
+}
+
+// NewRuntimeContext validates and freezes the caller-supplied runtime
+// resources.  The registry value contains handles to shared services; those
+// handles are intentionally not cloned.
+func NewRuntimeContext(registry patch.Registry) (RuntimeContext, error) {
+	if registry.Empty() {
+		return RuntimeContext{}, errors.New("patch registry is required")
+	}
+	if registry.RequiresAliasStore() && registry.AliasStore() == nil {
+		return RuntimeContext{}, errors.New("alias store service is required by the patch registry")
+	}
+	return RuntimeContext{Registry: registry}, nil
+}
+
+func (c RuntimeContext) Validate() error {
+	if c.Registry.Empty() {
+		return errors.New("patch registry is required")
+	}
+	if c.Registry.RequiresAliasStore() && c.Registry.AliasStore() == nil {
+		return errors.New("alias store service is required by the patch registry")
+	}
+	return nil
+}
+
 // CompiledProvider is the immutable, runtime-ready form of one configured
 // provider. It contains only static data; health and scheduling state are not
 // stored here.
@@ -41,17 +74,18 @@ type CompiledProvider struct {
 	modelSet map[string]struct{}
 }
 
-// Compile validates and compiles one provider using the single built-in patch
-// registry. Every discoverable patch is executable; unknown IDs fail before a
-// runtime snapshot can be published.
-func Compile(input config.ProviderConfig) (*CompiledProvider, error) {
-	return CompileWithRegistry(input, patch.DefaultRegistry())
+// Compile validates and compiles one provider using the caller-supplied,
+// process-owned RuntimeContext. Every discoverable patch is executable;
+// unknown IDs fail before a runtime snapshot can be published. No implicit
+// registry or AliasStore is created here.
+func Compile(input config.ProviderConfig, context RuntimeContext) (*CompiledProvider, error) {
+	if err := context.Validate(); err != nil {
+		return nil, err
+	}
+	return compileWithRegistry(input, context.Registry)
 }
 
-func CompileWithRegistry(input config.ProviderConfig, registry patch.Registry) (*CompiledProvider, error) {
-	if registry.Empty() {
-		registry = patch.DefaultRegistry()
-	}
+func compileWithRegistry(input config.ProviderConfig, registry patch.Registry) (*CompiledProvider, error) {
 	// The config package owns the schema-level provider rules. Wrapping this one
 	// provider in a complete configuration keeps the two packages from duplicating
 	// validation logic while still allowing the provider compiler to be used on
@@ -104,14 +138,14 @@ func CompileWithRegistry(input config.ProviderConfig, registry patch.Registry) (
 
 // CompileCatalog compiles every provider and builds an exact, case-sensitive
 // model index. The returned catalog owns all slices and maps.
-func CompileCatalog(inputs []config.ProviderConfig) (*Catalog, error) {
-	return CompileCatalogWithRegistry(inputs, patch.DefaultRegistry())
+func CompileCatalog(inputs []config.ProviderConfig, context RuntimeContext) (*Catalog, error) {
+	if err := context.Validate(); err != nil {
+		return nil, err
+	}
+	return compileCatalogWithRegistry(inputs, context.Registry)
 }
 
-func CompileCatalogWithRegistry(inputs []config.ProviderConfig, registry patch.Registry) (*Catalog, error) {
-	if registry.Empty() {
-		registry = patch.DefaultRegistry()
-	}
+func compileCatalogWithRegistry(inputs []config.ProviderConfig, registry patch.Registry) (*Catalog, error) {
 	// Validate root-level duplicate IDs/names and auth-independent schema rules
 	// before compiling. A complete config also catches duplicate models.
 	check := config.Default()
@@ -123,7 +157,7 @@ func CompileCatalogWithRegistry(inputs []config.ProviderConfig, registry patch.R
 	providers := make([]*CompiledProvider, 0, len(inputs))
 	index := make(map[string][]*CompiledProvider)
 	for _, input := range inputs {
-		compiled, err := CompileWithRegistry(input, registry)
+		compiled, err := compileWithRegistry(input, registry)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", input.ID, err)
 		}

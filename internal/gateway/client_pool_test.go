@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 )
 
@@ -41,7 +42,14 @@ func TestClientPoolUsesCompiledCustomCAAndGatewayAuthHeaders(t *testing.T) {
 		Models:  []string{"model"},
 		Enabled: true,
 		TLS:     config.TLSConfig{CAFile: caPath},
-	})
+	}, func() provider.RuntimeContext {
+		registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+		context, contextErr := provider.NewRuntimeContext(registry)
+		if contextErr != nil {
+			t.Fatal(contextErr)
+		}
+		return context
+	}())
 	if err != nil {
 		t.Fatal(err)
 	}

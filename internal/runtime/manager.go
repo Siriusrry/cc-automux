@@ -45,7 +45,11 @@ type RestartStatus struct {
 }
 
 type Options struct {
-	Registry                *patch.Registry
+	// RuntimeContext is created once by the application composition root and
+	// carries the sole Patch Registry/shared AliasStore for this process.
+	// Manager requires it explicitly and reuses it for every published
+	// snapshot; it never constructs replacement runtime state.
+	RuntimeContext          provider.RuntimeContext
 	AttemptPolicy           scheduler.AttemptPolicy
 	ClassifierAttemptPolicy scheduler.AttemptPolicy
 	// Preflight runs after full schema/provider compilation but before the
@@ -74,7 +78,7 @@ type ConfigStore interface {
 type Manager struct {
 	mu                 sync.Mutex
 	store              ConfigStore
-	registry           patch.Registry
+	runtimeContext     provider.RuntimeContext
 	current            atomic.Pointer[Snapshot]
 	revision           uint64
 	attempts           scheduler.AttemptPolicy
@@ -98,11 +102,11 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	if err := initial.Validate(); err != nil {
 		return nil, err
 	}
-	registry := patch.DefaultRegistry()
-	if options.Registry != nil && !options.Registry.Empty() {
-		registry = *options.Registry
+	context := options.RuntimeContext
+	if err := context.Validate(); err != nil {
+		return nil, fmt.Errorf("runtime context: %w", err)
 	}
-	catalog, err := provider.CompileCatalogWithRegistry(initial.Providers, registry)
+	catalog, err := provider.CompileCatalog(initial.Providers, context)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +135,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	startedAt := now()
 	m := &Manager{
 		store:              store,
-		registry:           registry,
+		runtimeContext:     context,
 		revision:           1,
 		attempts:           attempts,
 		classifierAttempts: classifierAttempts,
@@ -158,7 +162,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	m.current.Store(newSnapshot(m.revision, initial, catalog, m.attempts, m.classifierAttempts, startedAt))
+	m.current.Store(newSnapshot(m.revision, initial, catalog, m.runtimeContext, m.attempts, m.classifierAttempts, startedAt))
 	return m, nil
 }
 
@@ -172,7 +176,32 @@ func (m *Manager) Snapshot() *Snapshot {
 	return current
 }
 
-func (m *Manager) Registry() patch.Registry { return m.registry }
+func (m *Manager) Registry() patch.Registry {
+	if m == nil {
+		return patch.Registry{}
+	}
+	return m.runtimeContext.Registry
+}
+
+// RuntimeContext returns the process-owned compilation context.  It is a
+// value containing immutable registry metadata and shared service handles;
+// callers must not construct a second context for a live application.
+func (m *Manager) RuntimeContext() provider.RuntimeContext {
+	if m == nil {
+		return provider.RuntimeContext{}
+	}
+	return m.runtimeContext
+}
+
+// AliasStore returns the one process-local session map owned by the runtime
+// manager.  Hot-applied snapshots keep this exact handle even when target
+// generations change (the generation remains part of each alias key).
+func (m *Manager) AliasStore() *patch.AliasStore {
+	if m == nil {
+		return nil
+	}
+	return m.runtimeContext.Registry.AliasStore()
+}
 
 func (m *Manager) StartedAt() time.Time {
 	if m == nil {
@@ -220,7 +249,7 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 	if err := next.Validate(); err != nil {
 		return ApplyResult{}, err
 	}
-	catalog, err := provider.CompileCatalogWithRegistry(next.Providers, m.registry)
+	catalog, err := provider.CompileCatalog(next.Providers, m.runtimeContext)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -240,7 +269,7 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 			return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
 		}
 		m.revision++
-		m.current.Store(newSnapshot(m.revision, next, catalog, m.attempts, m.classifierAttempts, m.now()))
+		m.current.Store(newSnapshot(m.revision, next, catalog, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
 		m.restartStatus = RestartStatus{State: "idle"}
 		return ApplyResult{
 			Revision:   m.revision,
@@ -346,7 +375,7 @@ func (m *Manager) RestartSucceeded() error {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
-	catalog, err := provider.CompileCatalogWithRegistry(pending.Providers, m.registry)
+	catalog, err := provider.CompileCatalog(pending.Providers, m.runtimeContext)
 	if err != nil {
 		_ = m.restartFailedLocked(err)
 		return err
@@ -356,7 +385,7 @@ func (m *Manager) RestartSucceeded() error {
 		return err
 	}
 	m.revision++
-	m.current.Store(newSnapshot(m.revision, pending, catalog, m.attempts, m.classifierAttempts, m.now()))
+	m.current.Store(newSnapshot(m.revision, pending, catalog, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
 	m.restartTriggered = false
 	m.restartStatus = RestartStatus{State: "idle"}
 	return nil

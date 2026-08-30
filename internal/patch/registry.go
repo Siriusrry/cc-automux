@@ -83,6 +83,25 @@ type Registry struct {
 
 func (r Registry) Empty() bool { return len(r.entries) == 0 }
 
+// Services returns the immutable service handles captured when the registry
+// was built.  The handles themselves (for example AliasStore) are process
+// runtime resources and are intentionally shared across all compiled target
+// snapshots; this method never creates or clones them.
+func (r Registry) Services() Services { return r.services }
+
+// AliasStore returns the shared alias map, if this registry was constructed
+// with one.  It is primarily a diagnostics/test seam; production callers must
+// obtain the registry from Runtime Manager rather than constructing another.
+func (r Registry) AliasStore() *AliasStore { return r.services.AliasStore }
+
+// RequiresAliasStore reports whether this registry contains the built-in
+// session-isolation definition. RuntimeContext uses it to reject a production
+// context that forgot to inject the central AliasStore.
+func (r Registry) RequiresAliasStore() bool {
+	_, ok := r.entries[CLIProxyAPIClassifierSessionID]
+	return ok
+}
+
 // NewRegistry validates and freezes definitions. It rejects unknown request
 // types/stages, malformed metadata, duplicate IDs, one-way/self conflicts,
 // missing factories, and factory capability mismatches.
@@ -200,23 +219,45 @@ func NewRegistryWithServices(definitions []PatchDefinition, services Services) (
 	return newRegistry(definitions, services)
 }
 
-// DefaultRegistry is the one built-in registry. The four definitions are
-// executable and therefore discoverable/configurable; no placeholder entries
-// are exposed.
-func DefaultRegistry() Registry {
+// DefaultRegistry builds the one built-in registry from caller-owned shared
+// services.  The caller (normally the application composition root) must
+// create and retain the AliasStore; this constructor never allocates runtime
+// state.  The four definitions are executable and therefore
+// discoverable/configurable; no placeholder entries are exposed.
+func DefaultRegistry(services Services) Registry {
 	definitions := []PatchDefinition{
 		newAnyRouterSubagentDefinition(),
 		newAnyRouterClassifierDefinition(),
 		newCLIProxyAPIClassifierDefinition(),
 		newGPTClassifierResponseDefinition(),
 	}
-	r, err := NewRegistryWithServices(definitions, Services{AliasStore: NewAliasStore()})
+	if services.AliasStore == nil {
+		panic(errors.New("alias store service is required"))
+	}
+	r, err := NewRegistryWithServices(definitions, services)
 	if err != nil {
 		// Built-in definitions are compile-time constants. A panic here is a
 		// programmer error and is preferable to a partially populated registry.
 		panic(err)
 	}
 	return r
+}
+
+// NewDefaultRegistry is the error-returning form of DefaultRegistry for
+// startup paths that prefer to surface a construction error instead of
+// panicking.  It still requires caller-owned services and never allocates an
+// AliasStore itself.
+func NewDefaultRegistry(services Services) (Registry, error) {
+	if services.AliasStore == nil {
+		return Registry{}, errors.New("alias store service is required")
+	}
+	definitions := []PatchDefinition{
+		newAnyRouterSubagentDefinition(),
+		newAnyRouterClassifierDefinition(),
+		newCLIProxyAPIClassifierDefinition(),
+		newGPTClassifierResponseDefinition(),
+	}
+	return NewRegistryWithServices(definitions, services)
 }
 
 // Lookup returns a defensive definition copy. The bool is false for unknown

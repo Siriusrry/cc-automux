@@ -140,7 +140,7 @@ func compileProvider(t *testing.T, id, name string, models []string, priority in
 		Models:   append([]string(nil), models...),
 		Priority: priority,
 		Enabled:  true,
-	})
+	}, testProviderRuntimeContext(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,11 +149,21 @@ func compileProvider(t *testing.T, id, name string, models []string, priority in
 
 func compileProviderConfig(t *testing.T, input config.ProviderConfig) *provider.CompiledProvider {
 	t.Helper()
-	item, err := provider.Compile(input)
+	item, err := provider.Compile(input, testProviderRuntimeContext(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return item
+}
+
+func testProviderRuntimeContext(t *testing.T) provider.RuntimeContext {
+	t.Helper()
+	registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+	context, err := provider.NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return context
 }
 
 func newTestScheduler(t *testing.T, health HealthController, policy Policy, now func() time.Time) *Scheduler {

@@ -57,7 +57,11 @@ func testTypedRequestPatchRegistry(t *testing.T, id string, requestType patch.Re
 
 func compileWithRegistry(t *testing.T, registry patch.Registry, id, name, baseURL, key, model string, patchIDs ...string) *provider.CompiledProvider {
 	t.Helper()
-	item, err := provider.CompileWithRegistry(config.ProviderConfig{
+	context, err := provider.NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := provider.Compile(config.ProviderConfig{
 		ID:      id,
 		Name:    name,
 		BaseURL: baseURL,
@@ -65,7 +69,7 @@ func compileWithRegistry(t *testing.T, registry patch.Registry, id, name, baseUR
 		Models:  []string{model},
 		Enabled: true,
 		Patches: append([]string(nil), patchIDs...),
-	}, registry)
+	}, context)
 	if err != nil {
 		t.Fatal(err)
 	}

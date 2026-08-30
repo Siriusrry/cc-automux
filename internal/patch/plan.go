@@ -6,7 +6,9 @@ import (
 
 // Plan is an immutable ordered collection of patch definitions. It can be
 // shared by all requests targeting the same compiled target. Request-level
-// mutable state is created only by NewInstance.
+// mutable state is created only by NewInstance. The services handle captured
+// here belongs to the process-owned RuntimeContext; Plan construction never
+// allocates a replacement AliasStore.
 type Plan struct {
 	definitions []PatchDefinition
 	services    Services

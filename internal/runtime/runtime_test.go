@@ -45,11 +45,24 @@ func newRuntimeManager(t *testing.T, options Options) (*Manager, *config.Store, 
 	if options.Preflight == nil {
 		options.Preflight = func(config.Config, config.Config) error { return nil }
 	}
+	if options.RuntimeContext.Registry.Empty() {
+		options.RuntimeContext = testRuntimeContext(t)
+	}
 	manager, err := NewManager(store, cfg, options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return manager, store, cfg
+}
+
+func testRuntimeContext(t *testing.T) provider.RuntimeContext {
+	t.Helper()
+	registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+	context, err := provider.NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return context
 }
 
 func TestHotApplyPublishesOnlyAfterPersist(t *testing.T) {
@@ -126,14 +139,34 @@ func TestNewManagerRejectsInvalidAttemptPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := NewManager(store, runtimeConfig(), Options{
-		AttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: -1},
+		AttemptPolicy:  scheduler.AttemptPolicy{MaxAttempts: -1},
+		RuntimeContext: testRuntimeContext(t),
 	}); err == nil || !strings.Contains(err.Error(), "attempt policy") {
 		t.Fatalf("invalid attempt policy error = %v", err)
 	}
 	if _, err := NewManager(store, runtimeConfig(), Options{
 		ClassifierAttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: -1},
+		RuntimeContext:          testRuntimeContext(t),
 	}); err == nil || !strings.Contains(err.Error(), "classifier attempt policy") {
 		t.Fatalf("invalid classifier attempt policy error = %v", err)
+	}
+}
+
+func TestNewManagerAndStartupRejectMissingRuntimeContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := runtimeConfig()
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(store, cfg, Options{}); err == nil || !strings.Contains(err.Error(), "runtime context") {
+		t.Fatalf("NewManager missing context error = %v", err)
+	}
+	if _, err := LoadStartup(store, provider.RuntimeContext{}); err == nil || !strings.Contains(err.Error(), "runtime context") {
+		t.Fatalf("LoadStartup missing context error = %v", err)
 	}
 }
 
@@ -169,7 +202,7 @@ func TestPatchPlanHotApplyAndAliasGenerationIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	failing := &failingConfigStore{Store: store}
-	manager, err := NewManager(failing, cfg, Options{Preflight: func(config.Config, config.Config) error { return nil }})
+	manager, err := NewManager(failing, cfg, Options{RuntimeContext: testRuntimeContext(t), Preflight: func(config.Config, config.Config) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +268,51 @@ func TestPatchPlanHotApplyAndAliasGenerationIsolation(t *testing.T) {
 	}
 }
 
+// A hot-applied configuration rebuilds the immutable catalog, but the runtime
+// manager must keep publishing plans backed by the one process-owned AliasStore.
+// This models the normal management update path (name/priority changes do not
+// alter target generation) and catches accidental per-compile store creation.
+func TestHotApplyRetainsSharedSessionAliasStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := runtimeConfig()
+	cfg.Providers[0].Patches = []string{patch.CLIProxyAPIClassifierSessionID}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	context := testRuntimeContext(t)
+	manager, err := NewManager(store, cfg, Options{
+		RuntimeContext: context,
+		Preflight:      func(config.Config, config.Config) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.AliasStore() == nil || manager.AliasStore() != context.Registry.AliasStore() {
+		t.Fatal("manager did not retain the injected AliasStore")
+	}
+	oldProvider := onlyRuntimeProvider(t, manager.Snapshot())
+	oldAlias := runtimeClassifierAlias(t, oldProvider, "session-hot-update")
+
+	next := cfg.Clone()
+	next.Providers[0].Name = "renamed-provider"
+	next.Providers[0].Priority = 42
+	if _, err := manager.Apply(next); err != nil {
+		t.Fatal(err)
+	}
+	newProvider := onlyRuntimeProvider(t, manager.Snapshot())
+	if newProvider.Generation != oldProvider.Generation {
+		t.Fatalf("non-identity hot update changed generation: %s != %s", newProvider.Generation, oldProvider.Generation)
+	}
+	newAlias := runtimeClassifierAlias(t, newProvider, "session-hot-update")
+	if newAlias != oldAlias {
+		t.Fatalf("hot update replaced shared alias store: %q != %q", newAlias, oldAlias)
+	}
+}
+
 func TestPersistenceFailureLeavesDiskAndSnapshotUnchanged(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	store, err := config.NewStore(path)
@@ -246,7 +324,7 @@ func TestPersistenceFailureLeavesDiskAndSnapshotUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	failing := &failingConfigStore{Store: store, failSave: true}
-	manager, err := NewManager(failing, cfg, Options{Preflight: func(config.Config, config.Config) error { return nil }})
+	manager, err := NewManager(failing, cfg, Options{RuntimeContext: testRuntimeContext(t), Preflight: func(config.Config, config.Config) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +463,8 @@ func TestLoadStartupPromotesOnlyExplicitly(t *testing.T) {
 	if err := store.SavePending(next); err != nil {
 		t.Fatal(err)
 	}
-	startup, err := LoadStartup(store, providerRegistry())
+	context := testRuntimeContext(t)
+	startup, err := LoadStartup(store, context)
 	if err != nil {
 		t.Fatalf("LoadStartup() error = %v", err)
 	}
@@ -418,7 +497,7 @@ func TestNewManagerBlocksSubmissionsWhenPendingCleanupSurvives(t *testing.T) {
 	if err := store.SavePending(cfg); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(store, cfg, Options{InitialPending: true})
+	manager, err := NewManager(store, cfg, Options{InitialPending: true, RuntimeContext: testRuntimeContext(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,8 +509,6 @@ func TestNewManagerBlocksSubmissionsWhenPendingCleanupSurvives(t *testing.T) {
 		t.Fatalf("Apply() = %v, want ErrRestartInProgress", err)
 	}
 }
-
-func providerRegistry() patch.Registry { return patch.DefaultRegistry() }
 
 func onlyRuntimeProvider(t *testing.T, snapshot *Snapshot) *provider.CompiledProvider {
 	t.Helper()

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
@@ -14,20 +15,42 @@ type Snapshot struct {
 	revision           uint64
 	config             config.Config
 	catalog            *provider.Catalog
+	runtimeContext     provider.RuntimeContext
 	attempts           scheduler.AttemptPolicy
 	classifierAttempts scheduler.AttemptPolicy
 	created            time.Time
 }
 
-func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
+func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, runtimeContext provider.RuntimeContext, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
 	return &Snapshot{
 		revision:           revision,
 		config:             cfg.Clone(),
 		catalog:            catalog,
+		runtimeContext:     runtimeContext,
 		attempts:           attempts,
 		classifierAttempts: classifierAttempts,
 		created:            now,
 	}
+}
+
+// RuntimeContext returns the shared, process-owned preparation context used to
+// compile this snapshot. It is intentionally the same value across hot-applied
+// revisions; only immutable configuration-derived catalog data changes.
+func (s *Snapshot) RuntimeContext() provider.RuntimeContext {
+	if s == nil {
+		return provider.RuntimeContext{}
+	}
+	return s.runtimeContext
+}
+
+// AliasStore returns the shared session alias map captured by this snapshot's
+// runtime context. Generation remains part of each key, so target identity
+// changes cannot reuse an old alias while the map itself remains shared.
+func (s *Snapshot) AliasStore() *patch.AliasStore {
+	if s == nil {
+		return nil
+	}
+	return s.runtimeContext.Registry.AliasStore()
 }
 
 // NormalAttemptPolicy and ClassifierAttemptPolicy implement flow.SnapshotView

@@ -146,11 +146,21 @@ func compileTestProviderWithPatches(t *testing.T, id, name, baseURL, key, model 
 		Enabled:    true,
 		UseXAPIKey: useXAPIKey,
 		Patches:    append([]string(nil), patchIDs...),
-	})
+	}, testProviderRuntimeContext(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return item
+}
+
+func testProviderRuntimeContext(t *testing.T) provider.RuntimeContext {
+	t.Helper()
+	registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+	context, err := provider.NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return context
 }
 
 func leaseFor(item *provider.CompiledProvider, model string) scheduler.AttemptLease {

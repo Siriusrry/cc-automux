@@ -29,7 +29,6 @@ var errProviderNotFound = errors.New("provider not found")
 type Options struct {
 	MaxBodyBytes   int64
 	Version        string
-	Registry       *patch.Registry
 	Health         *health.Store
 	Selector       scheduler.Selector
 	Sync           func()
@@ -52,12 +51,9 @@ func New(manager *runtime.Manager) *Handler {
 }
 
 func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
-	registry := patch.DefaultRegistry()
+	var registry patch.Registry
 	if manager != nil {
 		registry = manager.Registry()
-	}
-	if options.Registry != nil && !options.Registry.Empty() {
-		registry = *options.Registry
 	}
 	maxBodyBytes := options.MaxBodyBytes
 	if maxBodyBytes <= 0 {

@@ -18,6 +18,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/management"
 	"github.com/Siriusrry/cc-automux/internal/patch"
+	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
@@ -71,11 +72,27 @@ func New(options Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry := patch.DefaultRegistry()
+	// The composition root creates the process-local runtime resources exactly
+	// once. Every Runtime Snapshot, Provider compilation and Patch Instance
+	// receives the same registry/service handles; lower layers never allocate a
+	// replacement AliasStore during hot updates or request execution.
+	var registry patch.Registry
 	if options.Registry != nil && !options.Registry.Empty() {
+		// An injected registry is already a caller-owned runtime resource. It must
+		// carry its own shared services; do not supplement it with another store.
 		registry = *options.Registry
+	} else {
+		aliasStore := patch.NewAliasStore()
+		registry, err = patch.NewDefaultRegistry(patch.Services{AliasStore: aliasStore})
+		if err != nil {
+			return nil, err
+		}
 	}
-	startup, err := runtime.LoadStartup(store, registry)
+	runtimeContext, contextErr := provider.NewRuntimeContext(registry)
+	if contextErr != nil {
+		return nil, contextErr
+	}
+	startup, err := runtime.LoadStartup(store, runtimeContext)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +126,7 @@ func New(options Options) (*App, error) {
 
 	policy := scheduler.DefaultPolicy()
 	managerOptions := runtime.Options{
-		Registry:                &registry,
+		RuntimeContext:          runtimeContext,
 		AttemptPolicy:           scheduler.DefaultAttemptPolicy(),
 		ClassifierAttemptPolicy: scheduler.DefaultClassifierAttemptPolicy(),
 		RestartDelay:            options.RestartDelay,
@@ -212,7 +229,6 @@ func New(options Options) (*App, error) {
 		FlowDispatcher:   flow.NewDispatcher(flowRegistry),
 	})
 	app.management = management.NewWithOptions(manager, management.Options{
-		Registry:       &registry,
 		Health:         healthStore,
 		Selector:       selector,
 		Sync:           app.syncRuntime,

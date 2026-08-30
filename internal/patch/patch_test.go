@@ -46,7 +46,7 @@ func patchContext(typ RequestType) PatchContext {
 
 func executeRequest(t *testing.T, id string, context PatchContext, input string, headers http.Header) (*MutableRequest, error) {
 	t.Helper()
-	registry := DefaultRegistry()
+	registry := DefaultRegistry(Services{AliasStore: NewAliasStore()})
 	plan, err := registry.Compile([]string{id})
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func executeRequest(t *testing.T, id string, context PatchContext, input string,
 }
 
 func TestDefaultRegistryMetadataOrderAndFiltering(t *testing.T) {
-	registry := DefaultRegistry()
+	registry := DefaultRegistry(Services{AliasStore: NewAliasStore()})
 	list := registry.List()
 	want := []string{
 		AnyRouterSubagentThinkingID,
@@ -86,6 +86,20 @@ func TestDefaultRegistryMetadataOrderAndFiltering(t *testing.T) {
 	}
 	if _, err := registry.Compile([]string{AnyRouterSubagentThinkingID, AnyRouterSubagentThinkingID}); !errors.Is(err, ErrDuplicatePatch) {
 		t.Fatalf("duplicate = %v", err)
+	}
+}
+
+func TestDefaultRegistryRequiresCallerOwnedAliasStore(t *testing.T) {
+	if _, err := NewDefaultRegistry(Services{}); err == nil || !strings.Contains(err.Error(), "alias store service is required") {
+		t.Fatalf("missing AliasStore error = %v", err)
+	}
+	store := NewAliasStore()
+	registry, err := NewDefaultRegistry(Services{AliasStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registry.AliasStore() != store || !registry.RequiresAliasStore() {
+		t.Fatal("default registry did not retain the caller-owned AliasStore")
 	}
 }
 
@@ -511,7 +525,7 @@ func TestCLIProxyAPISessionStreamsLargeUserID(t *testing.T) {
 }
 
 func TestGPTClassifierResponseReassembly(t *testing.T) {
-	registry := DefaultRegistry()
+	registry := DefaultRegistry(Services{AliasStore: NewAliasStore()})
 	plan, err := registry.Compile([]string{GPTClassifierResponseReassemblyID})
 	if err != nil {
 		t.Fatal(err)
@@ -559,7 +573,7 @@ func TestGPTStopSequenceSameStartUsesRequestOrderAndResponseNeedsNoModel(t *test
 		{name: "shorter configured first", sequences: []string{"ab", "abc"}, want: "ab"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			registry := DefaultRegistry()
+			registry := DefaultRegistry(Services{AliasStore: NewAliasStore()})
 			plan, err := registry.Compile([]string{GPTClassifierResponseReassemblyID})
 			if err != nil {
 				t.Fatal(err)
@@ -610,7 +624,7 @@ func TestGPTResponseRejectsDuplicateOrInvalidStopFieldsWithoutMatch(t *testing.T
 		`{"type":"message","content":[{"type":"text","text":"no match"}],"stop_reason":"end_turn","stop_reason":"again"}`,
 	} {
 		t.Run(responseBody, func(t *testing.T) {
-			registry := DefaultRegistry()
+			registry := DefaultRegistry(Services{AliasStore: NewAliasStore()})
 			plan, err := registry.Compile([]string{GPTClassifierResponseReassemblyID})
 			if err != nil {
 				t.Fatal(err)
