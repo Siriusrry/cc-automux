@@ -2,8 +2,11 @@ package bodyfile
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+
+	"github.com/Siriusrry/cc-automux/internal/modelname"
 )
 
 // ByteRange is a half-open byte range [Start, End) in a Body.
@@ -100,6 +103,7 @@ var (
 	ErrModelRepeated     = errors.New("bodyfile: model must not be repeated")
 	ErrModelNotString    = errors.New("bodyfile: model must be a string")
 	ErrModelEmpty        = errors.New("bodyfile: model must not be empty")
+	ErrModelTooLong      = fmt.Errorf("bodyfile: model must not exceed %d decoded UTF-8 bytes", modelname.MaxBytes)
 	ErrIndexBodyMismatch = errors.New("bodyfile: JSON index belongs to another body")
 )
 

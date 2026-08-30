@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Siriusrry/cc-automux/internal/modelname"
 )
 
 func validConfig() Config {
@@ -101,6 +103,28 @@ func TestProviderPriorityModelsAndKeyRules(t *testing.T) {
 	cfg.Providers[0].Enabled = false
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("disabled provider without key rejected: %v", err)
+	}
+}
+
+func TestProviderModelNamesUseDecodedUTF8ByteLimit(t *testing.T) {
+	cfg := validConfig()
+	for _, model := range []string{
+		strings.Repeat("a", modelname.MaxBytes),
+		strings.Repeat("界", 85) + "a",
+	} {
+		cfg.Providers[0].Models = []string{model}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("%d-byte model rejected: %v", len(model), err)
+		}
+	}
+	for _, model := range []string{
+		strings.Repeat("a", modelname.MaxBytes+1),
+		strings.Repeat("界", 86),
+	} {
+		cfg.Providers[0].Models = []string{model}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "256 UTF-8 bytes") {
+			t.Fatalf("%d-byte model error = %v", len(model), err)
+		}
 	}
 }
 

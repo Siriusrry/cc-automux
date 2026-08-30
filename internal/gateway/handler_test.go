@@ -286,6 +286,11 @@ func TestGatewayParsesModelBeforeSelection(t *testing.T) {
 			t.Fatalf("body %q status = %d %s", body, response.Code, response.Body.String())
 		}
 	}
+	overlong := httptest.NewRecorder()
+	handler.ServeHTTP(overlong, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway-key", `{"model":"`+strings.Repeat("a", 257)+`"}`))
+	if overlong.Code != http.StatusBadRequest || !strings.Contains(overlong.Body.String(), "invalid_model") || !strings.Contains(overlong.Body.String(), "256") {
+		t.Fatalf("overlong model = %d %s", overlong.Code, overlong.Body.String())
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway-key", `{"model":"unknown","future":true}`))
 	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), "model_not_configured") {

@@ -16,6 +16,10 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
+
+	"github.com/Siriusrry/cc-automux/internal/modelname"
 )
 
 // ScanSpec selects the JSON pointer paths retained by a scanner. Paths are
@@ -519,9 +523,15 @@ type scanToken struct {
 
 	escaped       bool
 	unicodeDigits int
+	unicodeValue  uint16
 	raw           []byte // object keys and the required model only
 	rawLimit      int
 	rawOverflow   bool
+
+	modelDecodedBytes  int
+	modelHighSurrogate uint16
+	modelUTF8Pending   [utf8.UTFMax]byte
+	modelUTF8Length    int
 
 	literal         string
 	literalPos      int
@@ -606,7 +616,14 @@ func (s *JSONScanner) consumeStringToken(value byte) (bool, error) {
 		if !isHexDigit(value) {
 			return true, errors.New("invalid unicode escape digit")
 		}
+		digit := hexDigitValue(value)
+		token.unicodeValue = token.unicodeValue<<4 | uint16(digit)
 		token.unicodeDigits--
+		if token.unicodeDigits == 0 {
+			if err := consumeModelUnicodeUnit(token, token.unicodeValue); err != nil {
+				return true, err
+			}
+		}
 		if token.kind == tokenKey || token.ctx.isModel {
 			token.appendRaw(value)
 		}
@@ -615,20 +632,30 @@ func (s *JSONScanner) consumeStringToken(value byte) (bool, error) {
 	}
 	if token.escaped {
 		token.escaped = false
-		if token.kind == tokenKey || token.ctx.isModel {
-			token.appendRaw(value)
-		}
 		switch value {
 		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			if err := flushModelHighSurrogate(token); err != nil {
+				return true, err
+			}
+			if err := addModelDecodedBytes(token, 1); err != nil {
+				return true, err
+			}
 		case 'u':
 			token.unicodeDigits = 4
+			token.unicodeValue = 0
 		default:
 			return true, errors.New("invalid string escape")
+		}
+		if token.kind == tokenKey || token.ctx.isModel {
+			token.appendRaw(value)
 		}
 		s.offset++
 		return true, nil
 	}
 	if value == '"' {
+		if err := finishModelDecodedString(token); err != nil {
+			return true, err
+		}
 		if token.kind == tokenKey || token.ctx.isModel {
 			token.appendRaw(value)
 		}
@@ -640,6 +667,9 @@ func (s *JSONScanner) consumeStringToken(value byte) (bool, error) {
 		return true, nil
 	}
 	if value == '\\' {
+		if err := finishModelRawRune(token); err != nil {
+			return true, err
+		}
 		token.escaped = true
 		if token.kind == tokenKey || token.ctx.isModel {
 			token.appendRaw(value)
@@ -650,11 +680,109 @@ func (s *JSONScanner) consumeStringToken(value byte) (bool, error) {
 	if value < 0x20 {
 		return true, errors.New("unescaped control character in string")
 	}
+	if err := consumeModelRawUTF8Byte(token, value); err != nil {
+		return true, err
+	}
 	if token.kind == tokenKey || token.ctx.isModel {
 		token.appendRaw(value)
 	}
 	s.offset++
 	return true, nil
+}
+
+func hexDigitValue(value byte) byte {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0'
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10
+	default:
+		return value - 'A' + 10
+	}
+}
+
+func addModelDecodedBytes(token *scanToken, count int) error {
+	if token == nil || !token.ctx.isModel {
+		return nil
+	}
+	if count < 0 || token.modelDecodedBytes > modelname.MaxBytes-count {
+		return ErrModelTooLong
+	}
+	token.modelDecodedBytes += count
+	return nil
+}
+
+func consumeModelRawUTF8Byte(token *scanToken, value byte) error {
+	if token == nil || !token.ctx.isModel {
+		return nil
+	}
+	if token.modelHighSurrogate != 0 {
+		if err := flushModelHighSurrogate(token); err != nil {
+			return err
+		}
+	}
+	if token.modelUTF8Length >= len(token.modelUTF8Pending) {
+		return errors.New("invalid UTF-8 in model")
+	}
+	token.modelUTF8Pending[token.modelUTF8Length] = value
+	token.modelUTF8Length++
+	pending := token.modelUTF8Pending[:token.modelUTF8Length]
+	if !utf8.FullRune(pending) {
+		return nil
+	}
+	runeValue, size := utf8.DecodeRune(pending)
+	if runeValue == utf8.RuneError && size == 1 || size != len(pending) {
+		return errors.New("invalid UTF-8 in model")
+	}
+	token.modelUTF8Length = 0
+	return addModelDecodedBytes(token, size)
+}
+
+func finishModelRawRune(token *scanToken) error {
+	if token != nil && token.ctx.isModel && token.modelUTF8Length != 0 {
+		return errors.New("invalid UTF-8 in model")
+	}
+	return nil
+}
+
+func consumeModelUnicodeUnit(token *scanToken, unit uint16) error {
+	if token == nil || !token.ctx.isModel {
+		return nil
+	}
+	if token.modelHighSurrogate != 0 {
+		if unit >= 0xdc00 && unit <= 0xdfff {
+			runeValue := utf16.DecodeRune(rune(token.modelHighSurrogate), rune(unit))
+			token.modelHighSurrogate = 0
+			return addModelDecodedBytes(token, utf8.RuneLen(runeValue))
+		}
+		if err := flushModelHighSurrogate(token); err != nil {
+			return err
+		}
+	}
+	switch {
+	case unit >= 0xd800 && unit <= 0xdbff:
+		token.modelHighSurrogate = unit
+		return nil
+	case unit >= 0xdc00 && unit <= 0xdfff:
+		return addModelDecodedBytes(token, utf8.RuneLen(utf8.RuneError))
+	default:
+		return addModelDecodedBytes(token, utf8.RuneLen(rune(unit)))
+	}
+}
+
+func flushModelHighSurrogate(token *scanToken) error {
+	if token == nil || !token.ctx.isModel || token.modelHighSurrogate == 0 {
+		return nil
+	}
+	token.modelHighSurrogate = 0
+	return addModelDecodedBytes(token, utf8.RuneLen(utf8.RuneError))
+}
+
+func finishModelDecodedString(token *scanToken) error {
+	if err := finishModelRawRune(token); err != nil {
+		return err
+	}
+	return flushModelHighSurrogate(token)
 }
 
 func (s *JSONScanner) consumeLiteralToken(value byte) (bool, error) {
@@ -722,6 +850,10 @@ func (s *JSONScanner) finishToken() {
 		if token.ctx.isModel {
 			if err := json.Unmarshal(token.raw, &stringValue); err != nil {
 				s.err = err
+				return
+			}
+			if len(stringValue) > modelname.MaxBytes {
+				s.err = ErrModelTooLong
 				return
 			}
 		}
@@ -1061,7 +1193,7 @@ func normalizeScanError(err error, offset int64) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, ErrModelMissing) || errors.Is(err, ErrModelRepeated) || errors.Is(err, ErrModelNotString) || errors.Is(err, ErrModelEmpty) || errors.Is(err, ErrTrailingJSON) {
+	if errors.Is(err, ErrModelMissing) || errors.Is(err, ErrModelRepeated) || errors.Is(err, ErrModelNotString) || errors.Is(err, ErrModelEmpty) || errors.Is(err, ErrModelTooLong) || errors.Is(err, ErrTrailingJSON) {
 		return err
 	}
 	if errors.Is(err, ErrInvalidJSON) {
@@ -1272,6 +1404,13 @@ func captureAndScanWithBuilder(source io.Reader, spec ScanSpec, create func() (B
 		n, readErr := source.Read(buffer)
 		var scanErr error
 		if n > 0 {
+			_, scanErr = scanner.Write(buffer[:n])
+			if scanErr != nil {
+				if readErr != nil && !errors.Is(readErr, io.EOF) {
+					return nil, JSONIndex{}, errors.Join(scanErr, &ReadError{Err: readErr})
+				}
+				return nil, JSONIndex{}, scanErr
+			}
 			written, writeErr := builder.Write(buffer[:n])
 			if writeErr != nil {
 				return nil, JSONIndex{}, &WriteError{Err: wrapLocalIO(LocalIOWrite, writeErr)}
@@ -1279,7 +1418,6 @@ func captureAndScanWithBuilder(source io.Reader, spec ScanSpec, create func() (B
 			if written != n {
 				return nil, JSONIndex{}, &WriteError{Err: wrapLocalIO(LocalIOWrite, io.ErrShortWrite)}
 			}
-			_, scanErr = scanner.Write(buffer[:n])
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) && scanErr == nil {

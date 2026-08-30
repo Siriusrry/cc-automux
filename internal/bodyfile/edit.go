@@ -243,13 +243,21 @@ func (b *scanningBuilder) Write(data []byte) (int, error) {
 	if b == nil || b.Builder == nil || b.scanner == nil {
 		return 0, ErrBuilderClosed
 	}
-	n, err := b.Builder.Write(data)
-	if n > 0 {
-		if _, scanErr := b.scanner.Write(data[:n]); scanErr != nil {
-			return n, &scanWriteError{Err: scanErr, writeErr: err}
+	if _, scanErr := b.scanner.Write(data); scanErr != nil {
+		return 0, &scanWriteError{Err: scanErr}
+	}
+	written := 0
+	for written < len(data) {
+		n, err := b.Builder.Write(data[written:])
+		written += n
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
 		}
 	}
-	return n, err
+	return written, nil
 }
 
 func validateEdits(size int64, edits []Edit) error {
@@ -285,9 +293,6 @@ func writeAll(builder Builder, data []byte) error {
 		if err != nil {
 			var scanErr *scanWriteError
 			if errors.As(err, &scanErr) {
-				if scanErr.writeErr != nil {
-					return errors.Join(scanErr.Err, scanErr.writeErr)
-				}
 				return scanErr.Err
 			}
 			return &WriteError{Err: wrapLocalIO(LocalIOWrite, err)}
@@ -303,8 +308,7 @@ func writeAll(builder Builder, data []byte) error {
 // Builder I/O failure. ApplyEditsAndScan uses it so malformed derived JSON is
 // reported as ErrInvalidJSON/patch_failed rather than replay_unavailable.
 type scanWriteError struct {
-	Err      error
-	writeErr error
+	Err error
 }
 
 func (e *scanWriteError) Error() string {
@@ -318,7 +322,7 @@ func (e *scanWriteError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
-	return errors.Join(e.Err, e.writeErr)
+	return e.Err
 }
 
 func copyBodyRange(builder Builder, reader io.Reader, count int64) error {

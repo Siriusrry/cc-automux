@@ -157,7 +157,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, bodyfile.ErrLocalIO) {
 			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
-		} else if errors.Is(err, bodyfile.ErrModelMissing) || errors.Is(err, bodyfile.ErrModelRepeated) || errors.Is(err, bodyfile.ErrModelNotString) || errors.Is(err, bodyfile.ErrModelEmpty) {
+		} else if errors.Is(err, bodyfile.ErrModelMissing) || errors.Is(err, bodyfile.ErrModelRepeated) || errors.Is(err, bodyfile.ErrModelNotString) || errors.Is(err, bodyfile.ErrModelEmpty) || errors.Is(err, bodyfile.ErrModelTooLong) {
 			writeError(w, http.StatusBadRequest, "invalid_model", err.Error())
 		} else {
 			writeError(w, http.StatusBadRequest, "invalid_json", "request body is not valid JSON")

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/Siriusrry/cc-automux/internal/modelname"
 )
 
 func TestCaptureAndScanSelectsOnlyRequiredPaths(t *testing.T) {
@@ -461,6 +463,80 @@ func TestCaptureAndScanPreservesReadErrorWhenSameChunkIsMalformed(t *testing.T) 
 	}
 }
 
+func TestModelLimitUsesDecodedUTF8Bytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		encoded string
+		decoded string
+		wantErr bool
+	}{
+		{name: "ASCII boundary", encoded: strings.Repeat("a", modelname.MaxBytes), decoded: strings.Repeat("a", modelname.MaxBytes)},
+		{name: "ASCII over", encoded: strings.Repeat("a", modelname.MaxBytes+1), wantErr: true},
+		{name: "raw UTF-8 boundary", encoded: strings.Repeat("界", 85) + "a", decoded: strings.Repeat("界", 85) + "a"},
+		{name: "raw UTF-8 over", encoded: strings.Repeat("界", 86), wantErr: true},
+		{name: "escaped ASCII boundary", encoded: strings.Repeat(`\u0061`, modelname.MaxBytes), decoded: strings.Repeat("a", modelname.MaxBytes)},
+		{name: "escaped ASCII over", encoded: strings.Repeat(`\u0061`, modelname.MaxBytes+1), wantErr: true},
+		{name: "escaped multibyte boundary", encoded: strings.Repeat(`\u00E9`, modelname.MaxBytes/2), decoded: strings.Repeat("é", modelname.MaxBytes/2)},
+		{name: "escaped multibyte over", encoded: strings.Repeat(`\u00E9`, modelname.MaxBytes/2+1), wantErr: true},
+		{name: "surrogate boundary", encoded: strings.Repeat(`\uD83D\uDE00`, modelname.MaxBytes/4), decoded: strings.Repeat("😀", modelname.MaxBytes/4)},
+		{name: "surrogate over", encoded: strings.Repeat(`\uD83D\uDE00`, modelname.MaxBytes/4+1), wantErr: true},
+		{name: "unpaired surrogate boundary", encoded: strings.Repeat(`\uD800`, 85) + "a", decoded: strings.Repeat("�", 85) + "a"},
+		{name: "unpaired surrogate over", encoded: strings.Repeat(`\uD800`, 86), wantErr: true},
+	}
+	spec, err := RequestScanSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte(`{"model":"` + test.encoded + `"}`)
+			body, index, scanErr := CaptureAndScan(&oneByteReader{data: input}, spec, t.TempDir())
+			if body != nil {
+				defer body.Close()
+			}
+			if test.wantErr {
+				if !errors.Is(scanErr, ErrModelTooLong) {
+					t.Fatalf("error = %v, want ErrModelTooLong", scanErr)
+				}
+				return
+			}
+			if scanErr != nil {
+				t.Fatal(scanErr)
+			}
+			if index.ModelValue() != test.decoded || len(index.ModelValue()) != modelname.MaxBytes {
+				t.Fatalf("decoded model bytes = %d, value mismatch=%v", len(index.ModelValue()), index.ModelValue() != test.decoded)
+			}
+		})
+	}
+}
+
+func TestCaptureRejectsOverlongModelBeforeWritingOverflowByte(t *testing.T) {
+	prefix := `{"model":"`
+	source := &oneByteReader{data: []byte(prefix + strings.Repeat("a", modelname.MaxBytes+1) + `"}`)}
+	builder := &recordingAbortBuilder{}
+	spec, err := RequestScanSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _, err := captureAndScanWithBuilder(source, spec, func() (Builder, error) { return builder, nil })
+	if body != nil {
+		_ = body.Close()
+	}
+	if !errors.Is(err, ErrModelTooLong) {
+		t.Fatalf("error = %v, want ErrModelTooLong", err)
+	}
+	want := prefix + strings.Repeat("a", modelname.MaxBytes)
+	if builder.buffer.String() != want {
+		t.Fatalf("stored bytes = %d, want %d", builder.buffer.Len(), len(want))
+	}
+	if source.pos != len(want)+1 {
+		t.Fatalf("source consumed = %d, want %d", source.pos, len(want)+1)
+	}
+	if builder.aborts.Load() != 1 {
+		t.Fatalf("abort count = %d", builder.aborts.Load())
+	}
+}
+
 func TestCaptureAndScanLargeUnselectedBody(t *testing.T) {
 	const large = 68 * 1024 * 1024
 	spec, err := RequestScanSpec("/thinking/type")
@@ -500,6 +576,11 @@ type abortErrorBuilder struct {
 	aborts   atomic.Int32
 }
 
+type recordingAbortBuilder struct {
+	buffer bytes.Buffer
+	aborts atomic.Int32
+}
+
 type terminalChunkReader struct {
 	data []byte
 	err  error
@@ -529,6 +610,13 @@ func (*abortErrorBuilder) Seal() (Body, error)            { return nil, errors.N
 func (b *abortErrorBuilder) Abort() error {
 	b.aborts.Add(1)
 	return b.abortErr
+}
+
+func (b *recordingAbortBuilder) Write(data []byte) (int, error) { return b.buffer.Write(data) }
+func (*recordingAbortBuilder) Seal() (Body, error)              { return nil, errors.New("unexpected seal") }
+func (b *recordingAbortBuilder) Abort() error {
+	b.aborts.Add(1)
+	return nil
 }
 
 func (r *singleCloseReader) Close() error {

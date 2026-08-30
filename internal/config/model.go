@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/Siriusrry/cc-automux/internal/modelname"
 )
 
 const (
@@ -169,6 +171,9 @@ func (c Config) Validate() error {
 		for j, model := range p.Models {
 			if model == "" {
 				return validation(fmt.Sprintf("%s.models[%d]", prefix, j), "must not be empty")
+			}
+			if len(model) > modelname.MaxBytes {
+				return validation(fmt.Sprintf("%s.models[%d]", prefix, j), fmt.Sprintf("must not exceed %d UTF-8 bytes", modelname.MaxBytes))
 			}
 			if containsControl(model) {
 				return validation(fmt.Sprintf("%s.models[%d]", prefix, j), "must not contain control characters")
