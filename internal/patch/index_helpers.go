@@ -36,6 +36,9 @@ func requestIndex(request *MutableRequest) (bodyfile.JSONIndex, error) {
 	if err := request.index.ValidateBody(request.Body); err == nil {
 		return request.index, nil
 	}
+	// The Gateway supplies a selective index at construction and every body
+	// replacement. Reopening the body here would reintroduce the SelectAll
+	// test/production split and can expose an unbounded field directory.
 	return bodyfile.JSONIndex{}, ErrIndexUnavailable
 }
 

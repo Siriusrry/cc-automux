@@ -107,8 +107,8 @@ type MutableRequest struct {
 }
 
 // NewMutableRequest binds the PreparedRequest index to the immutable BaseBody
-// for the first request hook. If a hook replaces Body, later hooks rebuild an
-// attempt-level index only when they actually need one.
+// for the first request hook. A hook that replaces Body must call SetBody with
+// the index produced for that exact body; later hooks never rescan implicitly.
 func NewMutableRequest(body bodyfile.Body, index bodyfile.JSONIndex, headers MutableHeaderSet) *MutableRequest {
 	return &MutableRequest{Body: body, Headers: headers, index: index}
 }
