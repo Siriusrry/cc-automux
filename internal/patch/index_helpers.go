@@ -57,32 +57,18 @@ func requestIndex(request *MutableRequest) (bodyfile.JSONIndex, error) {
 	return index, nil
 }
 
-func responseIndex(response *MutableResponse, fallbackPaths ...string) (bodyfile.JSONIndex, error) {
+func responseIndex(response *MutableResponse) (bodyfile.JSONIndex, error) {
 	if response == nil || response.Body == nil {
 		return bodyfile.JSONIndex{}, errors.New("nil mutable response/body")
 	}
 	if err := response.index.ValidateBody(response.Body); err == nil {
 		return response.index, nil
 	}
-	if response.strictIndex {
-		return bodyfile.JSONIndex{}, ErrIndexUnavailable
-	}
-	spec := response.index.Spec()
-	if !spec.SelectAll && spec.Paths == nil {
-		var err error
-		spec, err = bodyfile.ResponseScanSpec(fallbackPaths...)
-		if err != nil {
-			return bodyfile.JSONIndex{}, err
-		}
-	}
-	// This fallback is limited to bare test literals; Gateway always supplies a
-	// strict response index from CaptureAndScan.
-	index, err := bodyfile.IndexSelective(response.Body, spec)
-	if err != nil {
-		return bodyfile.JSONIndex{}, err
-	}
-	response.index = index
-	return index, nil
+	// Response field selection has one source of truth: the selected Plan's
+	// ResponsePaths, materialized by Gateway before this hook runs. A missing
+	// binding is a programming/contract error, never a reason to rescan with a
+	// second hard-coded path list.
+	return bodyfile.JSONIndex{}, ErrIndexUnavailable
 }
 
 func readFieldString(body bodyfile.Body, field bodyfile.Field) (string, error) {

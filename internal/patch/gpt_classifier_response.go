@@ -72,10 +72,7 @@ func (p *gptClassifierResponsePatch) ApplyResponse(_ PatchContext, response *Mut
 		// interpreted as classifier messages.
 		return nil
 	}
-	index, err := responseIndex(response,
-		"/type", "/content", "/content/*", "/content/*/type", "/content/*/text",
-		"/stop_reason", "/stop_sequence",
-	)
+	index, err := responseIndex(response)
 	if err != nil {
 		return err
 	}

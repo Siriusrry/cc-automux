@@ -909,6 +909,18 @@ func TestGPTResponseRejectsDuplicateOrInvalidStopFieldsWithoutMatch(t *testing.T
 	}
 }
 
+func TestGPTResponseRequiresPlanBoundResponseIndex(t *testing.T) {
+	patch := &gptClassifierResponsePatch{stopSequences: []string{"STOP"}}
+	response := &MutableResponse{
+		Status:  200,
+		Body:    bodyFromString(t, `{"type":"message","content":[{"type":"text","text":"ok"}]}`),
+		Headers: NewHTTPHeaderSet(nil),
+	}
+	if err := patch.ApplyResponse(PatchContext{}, response); !errors.Is(err, ErrIndexUnavailable) {
+		t.Fatalf("unbound response index error = %v, want ErrIndexUnavailable", err)
+	}
+}
+
 type trackingBody struct {
 	content    string
 	openCount  atomic.Int32
