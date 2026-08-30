@@ -525,10 +525,22 @@ func runtimeClassifierAlias(t *testing.T, compiled *provider.CompiledProvider, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := &patch.MutableRequest{
-		Body:    body,
-		Headers: patch.NewHTTPHeaderSet(make(http.Header)),
+	paths, err := compiled.PatchPlan.RequiredPaths(patch.StageRequest, patch.RequestTypeClassifier)
+	if err != nil {
+		_ = body.Close()
+		t.Fatal(err)
 	}
+	spec, err := bodyfile.RequestScanSpec(paths...)
+	if err != nil {
+		_ = body.Close()
+		t.Fatal(err)
+	}
+	index, err := bodyfile.IndexSelective(body, spec)
+	if err != nil {
+		_ = body.Close()
+		t.Fatal(err)
+	}
+	request := patch.NewMutableRequest(body, index, patch.NewHTTPHeaderSet(make(http.Header)))
 	context := patch.PatchContext{
 		RequestType:       patch.RequestTypeClassifier,
 		OriginalModel:     "model",
