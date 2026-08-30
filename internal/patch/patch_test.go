@@ -192,6 +192,142 @@ func TestExecutionRequestForwardResponseReverseAndAtMostOnce(t *testing.T) {
 	}
 }
 
+type concurrentInstancePatch struct {
+	id            int64
+	requestCalls  int
+	responseCalls int
+	closed        bool
+}
+
+func (p *concurrentInstancePatch) RequestPatch() RequestPatch   { return p }
+func (p *concurrentInstancePatch) ResponsePatch() ResponsePatch { return p }
+
+func (p *concurrentInstancePatch) ApplyRequest(_ PatchContext, request *MutableRequest) error {
+	if p == nil || request == nil || request.Headers == nil {
+		return errors.New("invalid concurrent request instance")
+	}
+	if p.requestCalls != 0 || p.responseCalls != 0 || p.closed {
+		return fmt.Errorf("request instance state is not fresh: request=%d response=%d closed=%t", p.requestCalls, p.responseCalls, p.closed)
+	}
+	p.requestCalls++
+	request.Headers.Set("X-Patch-Instance", fmt.Sprintf("%d", p.id))
+	return nil
+}
+
+func (p *concurrentInstancePatch) ApplyResponse(_ PatchContext, response *MutableResponse) error {
+	if p == nil || response == nil || response.Headers == nil {
+		return errors.New("invalid concurrent response instance")
+	}
+	if p.requestCalls != 1 || p.responseCalls != 0 || p.closed {
+		return fmt.Errorf("response instance state is not isolated: request=%d response=%d closed=%t", p.requestCalls, p.responseCalls, p.closed)
+	}
+	p.responseCalls++
+	response.Headers.Set("X-Patch-Instance", fmt.Sprintf("%d", p.id))
+	return nil
+}
+
+func (p *concurrentInstancePatch) Close() error {
+	if p == nil {
+		return nil
+	}
+	if p.closed {
+		return errors.New("patch instance closed more than once")
+	}
+	p.closed = true
+	return nil
+}
+
+func TestPlanNewInstanceAndExecutionAreConcurrentAndIsolated(t *testing.T) {
+	var nextID atomic.Int64
+	definition := PatchDefinition{
+		ID:           "concurrent-instance",
+		Name:         "concurrent-instance",
+		RequestTypes: []RequestType{RequestTypeNormal},
+		Stages:       []Stage{StageRequest, StageResponse},
+		Idempotence:  PerExecution,
+		Factory: func(FactoryContext) (PatchInstance, error) {
+			return concurrentPatchInstanceFactory(&nextID), nil
+		},
+	}
+	registry, err := NewRegistry([]PatchDefinition{definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := registry.Compile([]string{definition.ID}, RequestTypeNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 64
+	bodyDir := t.TempDir()
+	start := make(chan struct{})
+	errorsCh := make(chan error, workers)
+	ids := make(chan string, workers)
+	var group sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			execution, instanceErr := plan.NewInstance(patchContext(RequestTypeNormal))
+			if instanceErr != nil {
+				errorsCh <- instanceErr
+				return
+			}
+			defer execution.Close()
+			body, bodyErr := bodyfile.Capture(strings.NewReader(`{"model":"m"}`), bodyDir)
+			if bodyErr != nil {
+				errorsCh <- bodyErr
+				return
+			}
+			defer body.Close()
+			request := &MutableRequest{Body: body, Headers: NewHTTPHeaderSet(nil)}
+			response := &MutableResponse{Status: 200, Body: request.Body, Headers: NewHTTPHeaderSet(nil)}
+			if applyErr := execution.ApplyRequestOnly(request); applyErr != nil {
+				errorsCh <- applyErr
+				_ = execution.Close()
+				return
+			}
+			requestID := request.Headers.(*HTTPHeaderSet).Header.Get("X-Patch-Instance")
+			if applyErr := execution.ApplyResponseOnly(response); applyErr != nil {
+				errorsCh <- applyErr
+				_ = execution.Close()
+				return
+			}
+			responseID := response.Headers.(*HTTPHeaderSet).Header.Get("X-Patch-Instance")
+			if requestID == "" || requestID != responseID {
+				errorsCh <- fmt.Errorf("instance state leaked: request=%q response=%q", requestID, responseID)
+				_ = execution.Close()
+				return
+			}
+			ids <- requestID
+			if closeErr := execution.Close(); closeErr != nil {
+				errorsCh <- closeErr
+			}
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		t.Fatal(err)
+	}
+	seen := make(map[string]struct{}, workers)
+	for i := 0; i < workers; i++ {
+		id := <-ids
+		if _, duplicate := seen[id]; duplicate {
+			t.Fatalf("concurrent executions shared instance id %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	if got := nextID.Load(); got != workers+1 { // registry capability validation creates one instance
+		t.Fatalf("factory invocation count = %d, want %d", got, workers+1)
+	}
+}
+
+func concurrentPatchInstanceFactory(nextID *atomic.Int64) PatchInstance {
+	return &concurrentInstancePatch{id: nextID.Add(1)}
+}
+
 func TestAliasStoreConcurrentStableTTLAndLRU(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	random := bytes.NewReader(bytes.Repeat([]byte{0x42}, 16*16))
