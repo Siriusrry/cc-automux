@@ -510,6 +510,34 @@ func TestStickyTTLAndLRUEviction(t *testing.T) {
 	}
 }
 
+func TestStickyTTLRefreshesFromLastAccess(t *testing.T) {
+	now := time.Date(2026, 8, 29, 13, 0, 0, 0, time.UTC)
+	policy := DefaultPolicy()
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, policy, func() time.Time { return now })
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{
+		compileProvider(t, providerA, "a", []string{"m"}, 0),
+	}}
+	selector.Reconcile(snapshot)
+	if _, err := selector.Acquire(snapshot, normalKey("sliding", "m"), nil); err != nil {
+		t.Fatal(err)
+	}
+	// A hit just before the original deadline must move the deadline forward.
+	now = now.Add(policy.StickyTTL - time.Minute)
+	lease, err := selector.Acquire(snapshot, normalKey("sliding", "m"), nil)
+	if err != nil || !lease.FromSticky {
+		t.Fatalf("refreshing sticky lease = %#v, %v", lease, err)
+	}
+	now = now.Add(2 * time.Minute)
+	if got := selector.ActiveAssignmentCount(); got != 1 {
+		t.Fatalf("assignment expired despite recent access: %d", got)
+	}
+	now = now.Add(policy.StickyTTL)
+	if got := selector.ActiveAssignmentCount(); got != 0 {
+		t.Fatalf("assignment survived sliding TTL: %d", got)
+	}
+}
+
 func TestDefaultStickyCapacityIsEnforcedAt8192(t *testing.T) {
 	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	health := newFakeHealth()

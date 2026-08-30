@@ -236,6 +236,39 @@ func TestAliasStoreConcurrentStableTTLAndLRU(t *testing.T) {
 	}
 }
 
+func TestAliasStoreSlidingTTLRefreshesOnResolveAndGet(t *testing.T) {
+	now := time.Unix(2_000, 0)
+	const ttl = time.Hour
+	store := NewAliasStore(
+		WithAliasStoreTTL(ttl),
+		WithAliasStoreClock(func() time.Time { return now }),
+		WithAliasStoreRandomReader(bytes.NewReader(bytes.Repeat([]byte{0x23}, 64))),
+	)
+	key := AliasKey{TargetID: "target", TargetGeneration: "generation", OriginalSessionID: "session"}
+	first, err := store.Resolve(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resolve hit immediately before the original deadline extends the alias.
+	now = now.Add(ttl - time.Minute)
+	if got, err := store.Resolve(key); err != nil || got != first {
+		t.Fatalf("resolve refresh = %q, %v", got, err)
+	}
+	now = now.Add(2 * time.Minute)
+	if got, ok := store.Get(key); !ok || got != first {
+		t.Fatalf("get after refreshed deadline = %q, %v", got, ok)
+	}
+	// The Get hit also refreshes the deadline.
+	now = now.Add(ttl - time.Minute)
+	if _, ok := store.Get(key); !ok {
+		t.Fatal("alias expired before the last access deadline")
+	}
+	now = now.Add(ttl)
+	if _, ok := store.Get(key); ok {
+		t.Fatal("alias survived sliding TTL")
+	}
+}
+
 func TestAnyRouterSubagentThinking(t *testing.T) {
 	input := ` { "model":"m", "thinking" : { "budget": 1, "type" : "disabled" }, "messages":[] } `
 	request, err := executeRequest(t, AnyRouterSubagentThinkingID, patchContext(RequestTypeNormal), input, nil)

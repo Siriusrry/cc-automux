@@ -36,10 +36,9 @@ type AliasKey struct {
 type SessionAliasKey = AliasKey
 
 type aliasEntry struct {
-	key       AliasKey
-	alias     string
-	expiresAt time.Time
-	lastUsed  time.Time
+	key      AliasKey
+	alias    string
+	lastUsed time.Time
 }
 
 // AliasStore is a bounded, process-local, concurrency-safe TTL/LRU map. It
@@ -158,7 +157,7 @@ func (s *AliasStore) validateKey(key AliasKey) error {
 
 // GetOrCreate atomically resolves a key. A blank original session ID creates a
 // fresh request-scoped UUID and does not enter the global map. Non-blank keys
-// are stable until their fixed TTL expires or an LRU eviction removes them.
+// are stable until their sliding TTL expires or an LRU eviction removes them.
 func (s *AliasStore) GetOrCreate(targetID, generation, originalSessionID string) (string, error) {
 	return s.Resolve(AliasKey{
 		TargetID:          targetID,
@@ -190,10 +189,9 @@ func (s *AliasStore) Resolve(key AliasKey) (string, error) {
 		return "", err
 	}
 	entry := &aliasEntry{
-		key:       key,
-		alias:     alias,
-		expiresAt: now.Add(s.ttl),
-		lastUsed:  now,
+		key:      key,
+		alias:    alias,
+		lastUsed: now,
 	}
 	element := s.lru.PushFront(entry)
 	s.entries[key] = element
@@ -208,7 +206,8 @@ func (s *AliasStore) Resolve(key AliasKey) (string, error) {
 }
 
 // Get returns an existing, unexpired alias without creating one. Accessing an
-// entry updates its LRU position. The bool is false for misses/expired keys.
+// entry refreshes its sliding TTL and LRU position. The bool is false for
+// misses/expired keys.
 func (s *AliasStore) Get(key AliasKey) (string, bool) {
 	if s == nil || s.validateKey(key) != nil || key.OriginalSessionID == "" || strings.TrimSpace(key.OriginalSessionID) == "" {
 		return "", false
@@ -283,7 +282,7 @@ func (s *AliasStore) purgeExpiredLocked(now time.Time) int {
 	for element := s.lru.Back(); element != nil; {
 		previous := element.Prev()
 		entry := element.Value.(*aliasEntry)
-		if !now.Before(entry.expiresAt) {
+		if !now.Before(entry.lastUsed.Add(s.ttl)) {
 			s.removeElementLocked(element)
 			removed++
 		}
