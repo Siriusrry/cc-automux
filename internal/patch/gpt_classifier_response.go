@@ -182,7 +182,7 @@ func (p *gptClassifierResponsePatch) ApplyResponse(_ PatchContext, response *Mut
 			Start: match.rawStart,
 			End:   match.textField.StringRange.End - 1,
 		})
-		if err := appendStopFieldEdits(index, response.Body, &edits, match.sequence); err != nil {
+		if err := appendStopFieldEdits(index, &edits, match.sequence); err != nil {
 			return err
 		}
 	}
@@ -272,8 +272,7 @@ func arrayRemovalEdits(index bodyfile.JSONIndex, blocks []bodyfile.Field, remove
 	return result
 }
 
-func appendStopFieldEdits(index bodyfile.JSONIndex, body bodyfile.Body, edits *[]bodyfile.Edit, sequence string) error {
-	_ = body // retained in the signature for callers that already opened a body
+func appendStopFieldEdits(index bodyfile.JSONIndex, edits *[]bodyfile.Edit, sequence string) error {
 	reasonFields := index.Find("/stop_reason")
 	if len(reasonFields) > 1 {
 		return errors.New("stop_reason occurs more than once")
@@ -313,17 +312,14 @@ func appendStopFieldEdits(index bodyfile.JSONIndex, body bodyfile.Body, edits *[
 			members = append(members, member)
 		}
 		replacement := joinObjectMembers(members)
-		children := directObjectChildren(index, "")
-		var offset int64
-		if len(children) > 0 {
-			offset = children[0].MemberRange.Start
+		root, ok := index.ContainerAt("")
+		if !ok || root.Type != bodyfile.JSONObject {
+			return errors.New("response root object is unavailable")
+		}
+		offset := root.CloseOffset
+		if root.ChildCount > 0 {
+			offset = root.FirstChildStart
 			replacement = append(replacement, ',')
-		} else {
-			closeOffset, err := rootCloseOffset(index)
-			if err != nil {
-				return err
-			}
-			offset = closeOffset
 		}
 		*edits = append(*edits, bodyfile.Edit{Start: offset, End: offset, Replacement: replacement})
 	}

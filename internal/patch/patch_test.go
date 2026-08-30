@@ -921,6 +921,47 @@ func TestGPTResponseRequiresPlanBoundResponseIndex(t *testing.T) {
 	}
 }
 
+func TestAppendStopFieldsUsesActualRootMembership(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+	}{
+		{name: "empty object", input: `{ }`},
+		{name: "only unselected member", input: `{"unrelated":1}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec, err := bodyfile.ResponseScanSpec("/stop_reason", "/stop_sequence")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := bodyFromString(t, test.input)
+			index, err := bodyfile.IndexSelective(body, spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var edits []bodyfile.Edit
+			if err := appendStopFieldEdits(index, &edits, "STOP"); err != nil {
+				t.Fatal(err)
+			}
+			derived, _, err := bodyfile.ApplyEditsAndScan(body, edits, spec, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer derived.Close()
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(readBody(t, derived)), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded["stop_reason"] != "stop_sequence" || decoded["stop_sequence"] != "STOP" {
+				t.Fatalf("stop fields = %#v", decoded)
+			}
+			if test.name == "only unselected member" && decoded["unrelated"] != float64(1) {
+				t.Fatalf("unselected member lost: %#v", decoded)
+			}
+		})
+	}
+}
+
 type trackingBody struct {
 	content    string
 	openCount  atomic.Int32
