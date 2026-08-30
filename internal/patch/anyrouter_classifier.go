@@ -1,12 +1,10 @@
 package patch
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 )
@@ -69,6 +67,7 @@ func (anyRouterClassifierPatch) ApplyRequest(_ PatchContext, request *MutableReq
 	markerCount := 0
 	firstIsMarker := false
 	securityTargets := make([]classifierSecurityTarget, 0, 1)
+	textCandidates := make([]classifierTextCandidate, 0)
 	if len(systemFields) == 1 {
 		if systemFields[0].Type != bodyfile.JSONArray {
 			return errors.New("system must be an array")
@@ -78,21 +77,30 @@ func (anyRouterClassifierPatch) ApplyRequest(_ PatchContext, request *MutableReq
 			if child.Type != bodyfile.JSONObject {
 				continue
 			}
-			path := fmt.Sprintf("/system/%d/text", child.ArrayIndex)
-			texts := index.Find(path)
+			childPath := fmt.Sprintf("/system/%d", child.ArrayIndex)
+			childFields := directObjectChildren(index, childPath)
+			texts := directFieldsByKey(childFields, "text")
 			if len(texts) > 1 {
-				return fmt.Errorf("%s occurs %d times", path, len(texts))
+				return fmt.Errorf("%s/text occurs %d times", childPath, len(texts))
 			}
 			if len(texts) == 0 || texts[0].Type != bodyfile.JSONString {
 				continue
 			}
-			inspection, inspectErr := inspectClassifierSystemText(request.Body, texts[0])
+			textCandidates = append(textCandidates, classifierTextCandidate{index: child.ArrayIndex, field: texts[0]})
+		}
+		cursor, cursorErr := newBodyFieldCursor(request.Body)
+		if cursorErr != nil {
+			return cursorErr
+		}
+		defer cursor.Close()
+		for _, candidate := range textCandidates {
+			inspection, inspectErr := inspectClassifierSystemTextCursor(cursor, candidate.field)
 			if inspectErr != nil {
 				return inspectErr
 			}
 			if inspection.exactMarker {
 				markerCount++
-				if child.ArrayIndex == 0 {
+				if candidate.index == 0 {
 					firstIsMarker = true
 				}
 			}
@@ -104,7 +112,7 @@ func (anyRouterClassifierPatch) ApplyRequest(_ PatchContext, request *MutableReq
 					return errors.New("classifier correction marker is out of order")
 				}
 				securityTargets = append(securityTargets, classifierSecurityTarget{
-					field:     texts[0],
+					field:     candidate.field,
 					corrected: inspection.startsCorrection,
 				})
 			}
@@ -155,6 +163,11 @@ type classifierSecurityTarget struct {
 	corrected bool
 }
 
+type classifierTextCandidate struct {
+	index int
+	field bodyfile.Field
+}
+
 type classifierTextInspection struct {
 	exactMarker      bool
 	securityMonitor  bool
@@ -167,22 +180,15 @@ type classifierTextInspection struct {
 // caller-provided, arbitrarily large system block out of memory while still
 // validating marker/correction state exactly.
 func inspectClassifierSystemText(body bodyfile.Body, field bodyfile.Field) (classifierTextInspection, error) {
-	if field.Type != bodyfile.JSONString || field.StringRange.End <= field.StringRange.Start+1 {
-		return classifierTextInspection{}, errors.New("system text must be a JSON string")
-	}
-	reader, err := body.OpenReader()
+	cursor, err := newBodyFieldCursor(body)
 	if err != nil {
 		return classifierTextInspection{}, err
 	}
-	defer reader.Close()
-	if _, err := io.CopyN(io.Discard, reader, field.StringRange.Start+1); err != nil {
-		return classifierTextInspection{}, err
-	}
-	scanner := &jsonStringByteScanner{
-		reader: bufio.NewReaderSize(reader, 32*1024),
-		rawPos: field.StringRange.Start + 1,
-		rawEnd: field.StringRange.End - 1,
-	}
+	defer cursor.Close()
+	return inspectClassifierSystemTextCursor(cursor, field)
+}
+
+func inspectClassifierSystemTextCursor(cursor *bodyFieldCursor, field bodyfile.Field) (classifierTextInspection, error) {
 	probeLimit := len(AnyRouterCorrectionText) + len(classifierSecurityPrefix)
 	if markerLimit := len(AnyRouterMarkerText) + 1; markerLimit > probeLimit {
 		probeLimit = markerLimit
@@ -191,27 +197,33 @@ func inspectClassifierSystemText(body bodyfile.Body, field bodyfile.Field) (clas
 	window := make([]byte, 0, len(AnyRouterCorrectionText))
 	decodedLength := 0
 	correctionCount := 0
-	for {
-		mapped, done, scanErr := scanner.next()
-		if scanErr != nil {
-			return classifierTextInspection{}, scanErr
-		}
-		if done {
-			break
-		}
-		for _, item := range mapped {
-			decodedLength++
-			if len(prefix) < probeLimit {
-				prefix = append(prefix, item.value)
+	err := cursor.WithJSONString(field, func(scanner *jsonStringByteScanner) error {
+		for {
+			mapped, done, scanErr := scanner.next()
+			if scanErr != nil {
+				return scanErr
 			}
-			window = append(window, item.value)
-			if len(window) > len(AnyRouterCorrectionText) {
-				window = window[1:]
+			if done {
+				break
 			}
-			if len(window) == len(AnyRouterCorrectionText) && bytes.Equal(window, []byte(AnyRouterCorrectionText)) {
-				correctionCount++
+			for _, item := range mapped {
+				decodedLength++
+				if len(prefix) < probeLimit {
+					prefix = append(prefix, item.value)
+				}
+				window = append(window, item.value)
+				if len(window) > len(AnyRouterCorrectionText) {
+					window = window[1:]
+				}
+				if len(window) == len(AnyRouterCorrectionText) && bytes.Equal(window, []byte(AnyRouterCorrectionText)) {
+					correctionCount++
+				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return classifierTextInspection{}, err
 	}
 	startsCorrection := bytes.HasPrefix(prefix, []byte(AnyRouterCorrectionText))
 	securityOffset := 0

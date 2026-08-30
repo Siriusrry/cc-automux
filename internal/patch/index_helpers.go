@@ -1,13 +1,13 @@
 package patch
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 )
@@ -109,6 +109,103 @@ func readFieldString(body bodyfile.Body, field bodyfile.Field) (string, error) {
 	return value, nil
 }
 
+// bodyFieldCursor walks one immutable Body in ascending field-offset order.
+// Hooks that inspect several selected strings use one cursor instead of
+// opening a reader and seeking from byte zero for every content item.
+type bodyFieldCursor struct {
+	reader io.ReadCloser
+	offset int64
+}
+
+func newBodyFieldCursor(body bodyfile.Body) (*bodyFieldCursor, error) {
+	if body == nil {
+		return nil, errors.New("nil body")
+	}
+	reader, err := body.OpenReader()
+	if err != nil {
+		return nil, err
+	}
+	return &bodyFieldCursor{reader: reader}, nil
+}
+
+func (c *bodyFieldCursor) Close() error {
+	if c == nil || c.reader == nil {
+		return nil
+	}
+	return c.reader.Close()
+}
+
+func (c *bodyFieldCursor) moveTo(target int64) error {
+	if c == nil || c.reader == nil || target < c.offset {
+		return errors.New("selected fields are not in ascending byte order")
+	}
+	if target == c.offset {
+		return nil
+	}
+	n, err := io.CopyN(io.Discard, c.reader, target-c.offset)
+	c.offset += n
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *bodyFieldCursor) ReadString(field bodyfile.Field) (string, error) {
+	if field.Type != bodyfile.JSONString || field.StringRange.End < field.StringRange.Start+2 {
+		return "", errors.New("field is not a JSON string")
+	}
+	start := field.StringRange.Start
+	end := field.StringRange.End
+	if err := c.moveTo(start); err != nil {
+		return "", err
+	}
+	raw := make([]byte, end-start)
+	if _, err := io.ReadFull(c.reader, raw); err != nil {
+		return "", err
+	}
+	c.offset = end
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("decode JSON string: %w", err)
+	}
+	return value, nil
+}
+
+// WithJSONString exposes one selected string to a bounded decoder while
+// preserving the cursor position for the next field. The callback must not
+// retain the scanner after it returns.
+func (c *bodyFieldCursor) WithJSONString(field bodyfile.Field, callback func(*jsonStringByteScanner) error) error {
+	if c == nil || callback == nil {
+		return errors.New("nil body cursor/callback")
+	}
+	if field.Type != bodyfile.JSONString || field.StringRange.End < field.StringRange.Start+2 {
+		return errors.New("field is not a JSON string")
+	}
+	contentStart := field.StringRange.Start + 1
+	contentEnd := field.StringRange.End - 1
+	if err := c.moveTo(contentStart); err != nil {
+		return err
+	}
+	limited := &io.LimitedReader{R: c.reader, N: contentEnd - contentStart}
+	scanner := &jsonStringByteScanner{
+		reader: bufio.NewReaderSize(limited, 32*1024),
+		rawPos: contentStart,
+		rawEnd: contentEnd,
+	}
+	err := callback(scanner)
+	if err == nil && limited.N > 0 {
+		_, err = io.CopyN(io.Discard, limited, limited.N)
+	}
+	if err != nil {
+		return err
+	}
+	c.offset = contentEnd
+	if err := c.moveTo(field.StringRange.End); err != nil {
+		return err
+	}
+	return nil
+}
+
 func readFieldRaw(body bodyfile.Body, field bodyfile.Field) ([]byte, error) {
 	if field.ValueRange.End < field.ValueRange.Start {
 		return nil, errors.New("invalid field range")
@@ -129,65 +226,39 @@ func readFieldRaw(body bodyfile.Body, field bodyfile.Field) ([]byte, error) {
 }
 
 func directObjectChildren(index bodyfile.JSONIndex, parentPath string) []bodyfile.Field {
-	fields := index.Fields()
-	result := make([]bodyfile.Field, 0)
-	parentDepth := -1
-	if parentPath == "" {
-		parentDepth = -1
-	} else {
-		for _, field := range fields {
-			if field.Path == parentPath {
-				// JSONIndex records a member's depth as the depth of its
-				// containing object. A nested object's direct members are one
-				// level below the parent member's recorded depth.
-				parentDepth = field.Depth + 1
-				break
-			}
-		}
-	}
+	fields := index.DirectChildren(parentPath)
+	result := make([]bodyfile.Field, 0, len(fields))
 	for _, field := range fields {
-		if field.Key == "" {
+		if field.ArrayIndex >= 0 {
 			continue
 		}
-		if parentPath == "" {
-			if field.Depth == 0 {
-				result = append(result, field)
-			}
-			continue
-		}
-		if field.Depth != parentDepth {
-			continue
-		}
-		if fieldParentPath(field.Path) == parentPath {
-			result = append(result, field)
-		}
+		result = append(result, field)
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].MemberRange.Start < result[j].MemberRange.Start })
 	return result
 }
 
-func directArrayChildren(index bodyfile.JSONIndex, parentPath string) []bodyfile.Field {
-	fields := index.Fields()
-	result := make([]bodyfile.Field, 0)
+func directFieldsByKey(fields []bodyfile.Field, key string) []bodyfile.Field {
+	result := make([]bodyfile.Field, 0, 1)
 	for _, field := range fields {
-		if field.ArrayIndex < 0 || fieldParentPath(field.Path) != parentPath {
+		if field.Key == key {
+			result = append(result, field)
+		}
+	}
+	return result
+}
+
+func directArrayChildren(index bodyfile.JSONIndex, parentPath string) []bodyfile.Field {
+	fields := index.DirectChildren(parentPath)
+	result := make([]bodyfile.Field, 0, len(fields))
+	for _, field := range fields {
+		if field.ArrayIndex < 0 {
 			continue
 		}
 		result = append(result, field)
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].ArrayIndex < result[j].ArrayIndex })
 	return result
-}
-
-func fieldParentPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	index := strings.LastIndexByte(path, '/')
-	if index <= 0 {
-		return ""
-	}
-	return path[:index]
 }
 
 func memberDeleteEdit(index bodyfile.JSONIndex, field bodyfile.Field) (bodyfile.Edit, error) {

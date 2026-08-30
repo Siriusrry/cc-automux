@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -84,13 +83,7 @@ func (p *gptClassifierResponsePatch) ApplyResponse(_ PatchContext, response *Mut
 	if len(typeFields) != 1 || typeFields[0].Type != bodyfile.JSONString {
 		return errors.New("response type is missing or ambiguous")
 	}
-	typeValue, err := readFieldString(response.Body, typeFields[0])
-	if err != nil {
-		return err
-	}
-	if typeValue != "message" {
-		return errors.New("response type is not Anthropic message")
-	}
+	var typeValue string
 	contentFields := index.Find("/content")
 	if len(contentFields) != 1 || contentFields[0].Type != bodyfile.JSONArray {
 		return errors.New("response content is missing or ambiguous")
@@ -102,40 +95,74 @@ func (p *gptClassifierResponsePatch) ApplyResponse(_ PatchContext, response *Mut
 	if len(blocks) == 0 {
 		return errors.New("response content is empty")
 	}
-	removed := make([]bool, len(blocks))
-	match := stopMatch{}
+	blockInfo := make([]responseContentBlock, len(blocks))
+	stringReads := make([]responseStringRead, 0, 1+len(blocks)*2)
+	stringReads = append(stringReads, responseStringRead{field: typeFields[0], kind: responseStringTopType})
 	for i, block := range blocks {
 		if block.Type != bodyfile.JSONObject {
 			return errors.New("response content block must be an object")
 		}
-		path := fmt.Sprintf("/content/%d/type", block.ArrayIndex)
-		types := index.Find(path)
+		path := fmt.Sprintf("/content/%d", block.ArrayIndex)
+		children := directObjectChildren(index, path)
+		types := directFieldsByKey(children, "type")
 		if len(types) != 1 || types[0].Type != bodyfile.JSONString {
-			return fmt.Errorf("%s is missing or ambiguous", path)
+			return fmt.Errorf("%s/type is missing or ambiguous", path)
 		}
-		kind, readErr := readFieldString(response.Body, types[0])
-		if readErr != nil {
-			return readErr
+		texts := directFieldsByKey(children, "text")
+		blockInfo[i] = responseContentBlock{field: block, typeField: types[0], textFields: texts}
+		stringReads = append(stringReads, responseStringRead{field: types[0], kind: responseStringBlockType, block: i})
+		if len(texts) == 1 && texts[0].Type == bodyfile.JSONString {
+			stringReads = append(stringReads, responseStringRead{field: texts[0], kind: responseStringBlockText, block: i})
 		}
-		if kind == "thinking" || kind == "redacted_thinking" {
+	}
+	sort.SliceStable(stringReads, func(i, j int) bool {
+		return stringReads[i].field.StringRange.Start < stringReads[j].field.StringRange.Start
+	})
+	cursor, err := newBodyFieldCursor(response.Body)
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+	for _, read := range stringReads {
+		switch read.kind {
+		case responseStringTopType, responseStringBlockType:
+			value, readErr := cursor.ReadString(read.field)
+			if readErr != nil {
+				return readErr
+			}
+			if read.kind == responseStringTopType {
+				typeValue = value
+			} else {
+				blockInfo[read.block].kind = value
+			}
+		case responseStringBlockText:
+			rawStart, sequence, found, scanErr := findStopInStringCursor(cursor, read.field, p.stopSequences)
+			if scanErr != nil {
+				return scanErr
+			}
+			blockInfo[read.block].stop = stopMatch{found: found, rawStart: rawStart, sequence: sequence}
+		}
+	}
+	if typeValue != "message" {
+		return errors.New("response type is not Anthropic message")
+	}
+	removed := make([]bool, len(blocks))
+	match := stopMatch{}
+	for i, info := range blockInfo {
+		if info.kind == "thinking" || info.kind == "redacted_thinking" {
 			removed[i] = true
 			continue
 		}
-		if kind != "text" || match.found {
+		if info.kind != "text" || match.found {
 			continue
 		}
-		textPath := fmt.Sprintf("/content/%d/text", block.ArrayIndex)
-		texts := index.Find(textPath)
-		if len(texts) != 1 || texts[0].Type != bodyfile.JSONString {
+		textPath := fmt.Sprintf("/content/%d/text", info.field.ArrayIndex)
+		if len(info.textFields) != 1 || info.textFields[0].Type != bodyfile.JSONString {
 			return fmt.Errorf("%s is missing or ambiguous", textPath)
 		}
-		start, sequence, found, scanErr := findStopInString(response.Body, texts[0], p.stopSequences)
-		if scanErr != nil {
-			return scanErr
-		}
-		if found {
-			match = stopMatch{found: true, rawStart: start, sequence: sequence, textField: texts[0], blockIndex: i}
-			for j := i + 1; j < len(blocks); j++ {
+		if info.stop.found {
+			match = stopMatch{found: true, rawStart: info.stop.rawStart, sequence: info.stop.sequence, textField: info.textFields[0], blockIndex: i}
+			for j := i + 1; j < len(blockInfo); j++ {
 				removed[j] = true
 			}
 		}
@@ -182,6 +209,28 @@ func (p *gptClassifierResponsePatch) ApplyResponse(_ PatchContext, response *Mut
 	response.Headers.Delete("Content-Encoding")
 	response.Headers.Set("Content-Length", fmt.Sprintf("%d", body.Size()))
 	return nil
+}
+
+type responseContentBlock struct {
+	field      bodyfile.Field
+	typeField  bodyfile.Field
+	textFields []bodyfile.Field
+	kind       string
+	stop       stopMatch
+}
+
+type responseStringReadKind uint8
+
+const (
+	responseStringTopType responseStringReadKind = iota
+	responseStringBlockType
+	responseStringBlockText
+)
+
+type responseStringRead struct {
+	field bodyfile.Field
+	kind  responseStringReadKind
+	block int
 }
 
 type stopMatch struct {
@@ -339,62 +388,80 @@ func sortAndValidateEdits(edits []bodyfile.Edit) error {
 // keeps only a bounded suffix (the longest configured stop sequence), so a
 // multi-megabyte response text never becomes a []byte/string in memory.
 func findStopInString(body bodyfile.Body, field bodyfile.Field, sequences []string) (int64, string, bool, error) {
-	if len(sequences) == 0 {
-		return 0, "", false, nil
-	}
-	maxLen := 0
-	matchers := make([]stopSequenceMatcher, len(sequences))
-	for i, sequence := range sequences {
-		matchers[i] = newStopSequenceMatcher([]byte(sequence))
-		if len(matchers[i].pattern) > maxLen {
-			maxLen = len(matchers[i].pattern)
-		}
-	}
-	reader, err := body.OpenReader()
+	cursor, err := newBodyFieldCursor(body)
 	if err != nil {
 		return 0, "", false, err
 	}
-	defer reader.Close()
-	if _, err := io.CopyN(io.Discard, reader, field.StringRange.Start+1); err != nil {
-		return 0, "", false, err
+	defer cursor.Close()
+	return findStopInStringCursor(cursor, field, sequences)
+}
+
+// findStopInStringCursor scans the selected JSON string at the current body
+// cursor position. The cursor remains usable for the next selected field, so
+// a response with many content blocks is read in one forward pass.
+func findStopInStringCursor(cursor *bodyFieldCursor, field bodyfile.Field, sequences []string) (int64, string, bool, error) {
+	if cursor == nil {
+		return 0, "", false, errors.New("nil body cursor")
 	}
-	scanner := &jsonStringByteScanner{reader: bufio.NewReaderSize(reader, 32*1024), rawPos: field.StringRange.Start + 1, rawEnd: field.StringRange.End - 1}
+	maxLen := 0
+	matchers := make([]stopSequenceMatcher, 0, len(sequences))
+	sequenceIndexes := make([]int, 0, len(sequences))
+	for i, sequence := range sequences {
+		if sequence == "" {
+			continue
+		}
+		matchers = append(matchers, newStopSequenceMatcher([]byte(sequence)))
+		sequenceIndexes = append(sequenceIndexes, i)
+		if len(matchers[len(matchers)-1].pattern) > maxLen {
+			maxLen = len(matchers[len(matchers)-1].pattern)
+		}
+	}
+	if len(matchers) == 0 {
+		return 0, "", false, nil
+	}
 	window := make([]mappedByte, 0, maxLen)
 	decodedPosition := int64(-1)
 	bestStart := int64(-1)
 	bestSequence := -1
 	bestRawStart := int64(0)
-	for {
-		mapped, done, scanErr := scanner.next()
-		if scanErr != nil {
-			return 0, "", false, scanErr
-		}
-		if done {
-			if bestSequence < 0 {
-				return 0, "", false, nil
+	err := cursor.WithJSONString(field, func(scanner *jsonStringByteScanner) error {
+		for {
+			mapped, done, scanErr := scanner.next()
+			if scanErr != nil {
+				return scanErr
 			}
-			return bestRawStart, sequences[bestSequence], true, nil
-		}
-		for _, item := range mapped {
-			decodedPosition++
-			window = append(window, item)
-			if len(window) > maxLen {
-				window = window[len(window)-maxLen:]
+			if done {
+				return nil
 			}
-			for i := range matchers {
-				if !matchers[i].feed(item.value) {
-					continue
+			for _, item := range mapped {
+				decodedPosition++
+				window = append(window, item)
+				if len(window) > maxLen {
+					window = window[len(window)-maxLen:]
 				}
-				start := decodedPosition - int64(len(matchers[i].pattern)) + 1
-				rawStart := window[len(window)-len(matchers[i].pattern)].rawStart
-				if bestSequence < 0 || start < bestStart || start == bestStart && i < bestSequence {
-					bestStart = start
-					bestSequence = i
-					bestRawStart = rawStart
+				for i := range matchers {
+					if !matchers[i].feed(item.value) {
+						continue
+					}
+					start := decodedPosition - int64(len(matchers[i].pattern)) + 1
+					rawStart := window[len(window)-len(matchers[i].pattern)].rawStart
+					sequenceIndex := sequenceIndexes[i]
+					if bestSequence < 0 || start < bestStart || start == bestStart && sequenceIndex < bestSequence {
+						bestStart = start
+						bestSequence = sequenceIndex
+						bestRawStart = rawStart
+					}
 				}
 			}
 		}
+	})
+	if err != nil {
+		return 0, "", false, err
 	}
+	if bestSequence < 0 {
+		return 0, "", false, nil
+	}
+	return bestRawStart, sequences[bestSequence], true, nil
 }
 
 type stopSequenceMatcher struct {
