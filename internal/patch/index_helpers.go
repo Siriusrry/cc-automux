@@ -12,6 +12,8 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 )
 
+var ErrIndexUnavailable = errors.New("patch: bound JSON index is unavailable")
+
 func findFields(index bodyfile.JSONIndex, path string) []bodyfile.Field {
 	return index.Find(path)
 }
@@ -34,11 +36,52 @@ func requestIndex(request *MutableRequest) (bodyfile.JSONIndex, error) {
 	if err := request.index.ValidateBody(request.Body); err == nil {
 		return request.index, nil
 	}
-	index, err := bodyfile.Index(request.Body)
+	if request.strictIndex {
+		return bodyfile.JSONIndex{}, ErrIndexUnavailable
+	}
+	spec := request.index.Spec()
+	var index bodyfile.JSONIndex
+	var err error
+	if spec.RequireModel || spec.SelectAll || spec.Paths != nil {
+		index, err = bodyfile.IndexSelective(request.Body, spec)
+	} else {
+		// Explicit compatibility for focused callers that construct a bare
+		// MutableRequest literal. NewMutableRequest marks production requests
+		// strict, so this branch can never reopen a live Gateway body.
+		index, err = bodyfile.Index(request.Body)
+	}
 	if err != nil {
 		return bodyfile.JSONIndex{}, err
 	}
 	request.index = index
+	return index, nil
+}
+
+func responseIndex(response *MutableResponse, fallbackPaths ...string) (bodyfile.JSONIndex, error) {
+	if response == nil || response.Body == nil {
+		return bodyfile.JSONIndex{}, errors.New("nil mutable response/body")
+	}
+	if err := response.index.ValidateBody(response.Body); err == nil {
+		return response.index, nil
+	}
+	if response.strictIndex {
+		return bodyfile.JSONIndex{}, ErrIndexUnavailable
+	}
+	spec := response.index.Spec()
+	if !spec.SelectAll && spec.Paths == nil {
+		var err error
+		spec, err = bodyfile.ResponseScanSpec(fallbackPaths...)
+		if err != nil {
+			return bodyfile.JSONIndex{}, err
+		}
+	}
+	// This fallback is limited to bare test literals; Gateway always supplies a
+	// strict response index from CaptureAndScan.
+	index, err := bodyfile.IndexSelective(response.Body, spec)
+	if err != nil {
+		return bodyfile.JSONIndex{}, err
+	}
+	response.index = index
 	return index, nil
 }
 
@@ -148,72 +191,33 @@ func fieldParentPath(path string) string {
 }
 
 func memberDeleteEdit(index bodyfile.JSONIndex, field bodyfile.Field) (bodyfile.Edit, error) {
-	parent := fieldParentPath(field.Path)
-	children := directObjectChildren(index, parent)
-	position := -1
-	for i := range children {
-		if children[i].MemberRange == field.MemberRange {
-			position = i
-			break
-		}
+	// An empty object key is valid JSON; ArrayIndex is the unambiguous
+	// object-member/array-element discriminator.
+	if field.ArrayIndex >= 0 || field.DeleteRange.End <= field.DeleteRange.Start {
+		return bodyfile.Edit{}, errors.New("field has no comma-safe object delete range")
 	}
-	if position < 0 {
-		return bodyfile.Edit{}, errors.New("field is not a direct object member")
-	}
-	if position+1 < len(children) {
-		return bodyfile.Edit{Start: field.MemberRange.Start, End: children[position+1].MemberRange.Start}, nil
-	}
-	if position > 0 {
-		return bodyfile.Edit{Start: children[position-1].MemberRange.End, End: field.MemberRange.End}, nil
-	}
-	return bodyfile.Edit{Start: field.MemberRange.Start, End: field.MemberRange.End}, nil
+	return bodyfile.Edit{Start: field.DeleteRange.Start, End: field.DeleteRange.End}, nil
 }
 
 func arrayDeleteEdit(index bodyfile.JSONIndex, field bodyfile.Field) (bodyfile.Edit, error) {
-	parent := fieldParentPath(field.Path)
-	children := directArrayChildren(index, parent)
-	position := -1
-	for i := range children {
-		if children[i].ValueRange == field.ValueRange {
-			position = i
-			break
-		}
+	if field.ArrayIndex < 0 || field.DeleteRange.End <= field.DeleteRange.Start {
+		return bodyfile.Edit{}, errors.New("field has no comma-safe array delete range")
 	}
-	if position < 0 {
-		return bodyfile.Edit{}, errors.New("field is not a direct array element")
-	}
-	if position+1 < len(children) {
-		return bodyfile.Edit{Start: field.ValueRange.Start, End: children[position+1].ValueRange.Start}, nil
-	}
-	if position > 0 {
-		return bodyfile.Edit{Start: children[position-1].ValueRange.End, End: field.ValueRange.End}, nil
-	}
-	return bodyfile.Edit{Start: field.ValueRange.Start, End: field.ValueRange.End}, nil
+	return bodyfile.Edit{Start: field.DeleteRange.Start, End: field.DeleteRange.End}, nil
 }
 
 func insertionAtObjectStart(index bodyfile.JSONIndex, parentPath, key string, value []byte) (bodyfile.Edit, error) {
-	children := directObjectChildren(index, parentPath)
 	member := append(jsonStringBytes(key), ':')
 	member = append(member, value...)
-	if len(children) > 0 {
+	container, ok := index.ContainerAt(parentPath)
+	if !ok || container.Type != bodyfile.JSONObject {
+		return bodyfile.Edit{}, fmt.Errorf("object %s not found", parentPath)
+	}
+	if container.ChildCount > 0 {
 		member = append(member, ',')
-		return bodyfile.Edit{Start: children[0].MemberRange.Start, End: children[0].MemberRange.Start, Replacement: member}, nil
+		return bodyfile.Edit{Start: container.FirstChildStart, End: container.FirstChildStart, Replacement: member}, nil
 	}
-	var closeAt int64
-	if parentPath == "" {
-		var err error
-		closeAt, err = rootCloseOffset(index)
-		if err != nil {
-			return bodyfile.Edit{}, err
-		}
-	} else {
-		parent, ok := index.Lookup(parentPath)
-		if !ok || parent.Type != bodyfile.JSONObject || parent.ValueRange.End <= parent.ValueRange.Start {
-			return bodyfile.Edit{}, fmt.Errorf("object %s not found", parentPath)
-		}
-		closeAt = parent.ValueRange.End - 1
-	}
-	return bodyfile.Edit{Start: closeAt, End: closeAt, Replacement: member}, nil
+	return bodyfile.Edit{Start: container.CloseOffset, End: container.CloseOffset, Replacement: member}, nil
 }
 
 func insertionAtArrayStart(index bodyfile.JSONIndex, arrayPath string, value []byte) (bodyfile.Edit, error) {
@@ -221,54 +225,22 @@ func insertionAtArrayStart(index bodyfile.JSONIndex, arrayPath string, value []b
 	if !ok || array.Type != bodyfile.JSONArray || array.ValueRange.End <= array.ValueRange.Start {
 		return bodyfile.Edit{}, fmt.Errorf("array %s not found", arrayPath)
 	}
-	children := directArrayChildren(index, arrayPath)
-	if len(children) > 0 {
+	container, exists := index.ContainerAt(arrayPath)
+	if !exists || container.Type != bodyfile.JSONArray {
+		return bodyfile.Edit{}, fmt.Errorf("array %s not found", arrayPath)
+	}
+	if container.ChildCount > 0 {
 		value = append(append([]byte(nil), value...), ',')
 	}
 	return bodyfile.Edit{Start: array.ValueRange.Start + 1, End: array.ValueRange.Start + 1, Replacement: value}, nil
 }
 
 func rootCloseOffset(index bodyfile.JSONIndex) (int64, error) {
-	body := indexBody(index)
-	if body == nil {
-		return 0, errors.New("index does not expose body")
+	container, ok := index.ContainerAt("")
+	if !ok || container.Type != bodyfile.JSONObject || container.CloseOffset <= 0 {
+		return 0, errors.New("root JSON object is unavailable")
 	}
-	reader, err := body.OpenReader()
-	if err != nil {
-		return 0, err
-	}
-	defer reader.Close()
-	var offset, lastNonSpace int64
-	buffer := make([]byte, 32*1024)
-	for {
-		n, readErr := reader.Read(buffer)
-		for _, value := range buffer[:n] {
-			if value != ' ' && value != '\t' && value != '\r' && value != '\n' {
-				lastNonSpace = offset
-			}
-			offset++
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			return 0, readErr
-		}
-	}
-	if lastNonSpace <= 0 {
-		return 0, errors.New("empty JSON body")
-	}
-	return lastNonSpace, nil
-}
-
-// JSONIndex intentionally keeps its body private.  This helper uses the
-// optional interface implemented by the current bodyfile index; a fallback
-// scan is provided for foreign indexes in tests.
-func indexBody(index bodyfile.JSONIndex) bodyfile.Body {
-	if provider, ok := any(index).(interface{ Body() bodyfile.Body }); ok {
-		return provider.Body()
-	}
-	return nil
+	return container.CloseOffset, nil
 }
 
 func applyEdits(body bodyfile.Body, edits []bodyfile.Edit) (bodyfile.Body, error) {

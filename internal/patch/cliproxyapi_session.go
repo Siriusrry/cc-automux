@@ -386,14 +386,219 @@ type innerJSONParser struct {
 	buffer []mappedJSONByte
 }
 
+// innerFrame is one explicitly managed JSON container.  The user_id payload
+// is client-controlled and may be deeply nested; keeping parser state on the
+// heap avoids consuming the goroutine call stack while preserving streaming
+// validation and source-offset tracking.
+type innerFrame struct {
+	kind           byte
+	state          innerFrameState
+	root           bool
+	hasMembers     bool
+	pendingSession bool
+}
+
+type innerFrameState uint8
+
+const (
+	innerObjectMemberOrEnd innerFrameState = iota
+	innerObjectValue
+	innerObjectCommaOrEnd
+	innerArrayValueOrEnd
+	innerArrayCommaOrEnd
+)
+
 func (p *innerJSONParser) scanSessionObject() (innerSessionLocation, error) {
 	if err := p.skipSpace(); err != nil {
 		return innerSessionLocation{}, err
 	}
-	location, err := p.parseObject(true)
-	if err != nil {
-		return innerSessionLocation{}, err
+	open, err := p.next()
+	if err != nil || open.value != '{' {
+		return innerSessionLocation{}, errors.New("metadata.user_id must contain a JSON object")
 	}
+
+	var location innerSessionLocation
+	stack := []innerFrame{{
+		kind:  '{',
+		state: innerObjectMemberOrEnd,
+		root:  true,
+	}}
+
+	// This is a small hand-written JSON state machine.  Container frames are
+	// pushed and popped explicitly, so no nesting depth can overflow the Go
+	// call stack.  Primitive/string parsing remains incremental through p.next.
+	for len(stack) > 0 {
+		frameIndex := len(stack) - 1
+		frame := &stack[frameIndex]
+		switch frame.state {
+		case innerObjectMemberOrEnd:
+			if err := p.skipSpace(); err != nil {
+				return innerSessionLocation{}, err
+			}
+			next, peekErr := p.peek(1)
+			if peekErr != nil {
+				if errors.Is(peekErr, io.EOF) {
+					return innerSessionLocation{}, errors.New("unterminated metadata.user_id object")
+				}
+				return innerSessionLocation{}, peekErr
+			}
+			if next.value == '}' {
+				closeToken, _ := p.next()
+				if frame.root {
+					location.closeAt = closeToken.rawStart
+					location.hasMembers = frame.hasMembers
+				}
+				stack = stack[:frameIndex]
+				if len(stack) > 0 {
+					stack[len(stack)-1].state = innerFrameAfterChild(stack[len(stack)-1])
+				}
+				continue
+			}
+
+			purpose := innerStringIgnore
+			if frame.root {
+				purpose = innerStringKey
+			}
+			key, stringErr := p.parseString(purpose)
+			if stringErr != nil {
+				return innerSessionLocation{}, stringErr
+			}
+			frame.hasMembers = true
+			frame.pendingSession = frame.root && key.matchesSessionKey
+			if frame.pendingSession && location.present {
+				return innerSessionLocation{}, errors.New("metadata.user_id.session_id occurs more than once")
+			}
+			if err := p.skipSpace(); err != nil {
+				return innerSessionLocation{}, err
+			}
+			colon, colonErr := p.next()
+			if colonErr != nil || colon.value != ':' {
+				return innerSessionLocation{}, errors.New("metadata.user_id object member missing colon")
+			}
+			frame.state = innerObjectValue
+
+		case innerObjectValue:
+			if err := p.skipSpace(); err != nil {
+				return innerSessionLocation{}, err
+			}
+			if frame.pendingSession {
+				next, peekErr := p.peek(1)
+				if peekErr != nil || next.value != '"' {
+					return innerSessionLocation{}, errors.New("metadata.user_id.session_id must be a string")
+				}
+				value, valueErr := p.parseString(innerStringSession)
+				if valueErr != nil {
+					return innerSessionLocation{}, valueErr
+				}
+				if !value.validSession {
+					return innerSessionLocation{}, errors.New("metadata.user_id.session_id is invalid")
+				}
+				location.present = true
+				location.contentStart = value.contentStart
+				location.contentEnd = value.contentEnd
+				frame.pendingSession = false
+				frame.state = innerObjectCommaOrEnd
+				continue
+			}
+			if err := p.startInnerValue(&stack); err != nil {
+				return innerSessionLocation{}, err
+			}
+			// startInnerValue leaves a newly pushed child on top of the stack;
+			// primitive values instead advance this frame directly.
+			if len(stack) == frameIndex+1 {
+				frame.state = innerObjectCommaOrEnd
+			}
+
+		case innerObjectCommaOrEnd:
+			if err := p.skipSpace(); err != nil {
+				return innerSessionLocation{}, err
+			}
+			separator, separatorErr := p.next()
+			if separatorErr != nil {
+				return innerSessionLocation{}, errors.New("unterminated metadata.user_id object")
+			}
+			switch separator.value {
+			case '}':
+				if frame.root {
+					location.closeAt = separator.rawStart
+					location.hasMembers = frame.hasMembers
+				}
+				stack = stack[:frameIndex]
+				if len(stack) > 0 {
+					stack[len(stack)-1].state = innerFrameAfterChild(stack[len(stack)-1])
+				}
+			case ',':
+				frame.pendingSession = false
+				frame.state = innerObjectMemberOrEnd
+				if err := p.skipSpace(); err != nil {
+					return innerSessionLocation{}, err
+				}
+				next, peekErr := p.peek(1)
+				if peekErr != nil || next.value == '}' {
+					return innerSessionLocation{}, errors.New("invalid metadata.user_id object separator")
+				}
+			default:
+				return innerSessionLocation{}, errors.New("invalid metadata.user_id object separator")
+			}
+
+		case innerArrayValueOrEnd:
+			if err := p.skipSpace(); err != nil {
+				return innerSessionLocation{}, err
+			}
+			next, peekErr := p.peek(1)
+			if peekErr != nil {
+				if errors.Is(peekErr, io.EOF) {
+					return innerSessionLocation{}, errors.New("unterminated metadata.user_id array")
+				}
+				return innerSessionLocation{}, peekErr
+			}
+			if next.value == ']' {
+				_, _ = p.next()
+				stack = stack[:frameIndex]
+				if len(stack) > 0 {
+					stack[len(stack)-1].state = innerFrameAfterChild(stack[len(stack)-1])
+				}
+				continue
+			}
+			if err := p.startInnerValue(&stack); err != nil {
+				return innerSessionLocation{}, err
+			}
+			if len(stack) == frameIndex+1 {
+				frame.state = innerArrayCommaOrEnd
+			}
+
+		case innerArrayCommaOrEnd:
+			if err := p.skipSpace(); err != nil {
+				return innerSessionLocation{}, err
+			}
+			separator, separatorErr := p.next()
+			if separatorErr != nil {
+				return innerSessionLocation{}, errors.New("unterminated metadata.user_id array")
+			}
+			switch separator.value {
+			case ']':
+				stack = stack[:frameIndex]
+				if len(stack) > 0 {
+					stack[len(stack)-1].state = innerFrameAfterChild(stack[len(stack)-1])
+				}
+			case ',':
+				frame.state = innerArrayValueOrEnd
+				if err := p.skipSpace(); err != nil {
+					return innerSessionLocation{}, err
+				}
+				next, peekErr := p.peek(1)
+				if peekErr != nil || next.value == ']' {
+					return innerSessionLocation{}, errors.New("invalid metadata.user_id array separator")
+				}
+			default:
+				return innerSessionLocation{}, errors.New("invalid metadata.user_id array separator")
+			}
+
+		default:
+			return innerSessionLocation{}, errors.New("invalid metadata.user_id parser state")
+		}
+	}
+
 	if err := p.skipSpace(); err != nil {
 		return innerSessionLocation{}, err
 	}
@@ -405,129 +610,10 @@ func (p *innerJSONParser) scanSessionObject() (innerSessionLocation, error) {
 	return location, nil
 }
 
-func (p *innerJSONParser) parseObject(sessionRoot bool) (innerSessionLocation, error) {
-	open, err := p.next()
-	if err != nil || open.value != '{' {
-		return innerSessionLocation{}, errors.New("metadata.user_id must contain a JSON object")
-	}
-	var location innerSessionLocation
-	if err := p.skipSpace(); err != nil {
-		return innerSessionLocation{}, err
-	}
-	if next, peekErr := p.peek(1); peekErr == nil && next.value == '}' {
-		closeToken, _ := p.next()
-		location.closeAt = closeToken.rawStart
-		return location, nil
-	} else if peekErr != nil {
-		if errors.Is(peekErr, io.EOF) {
-			return innerSessionLocation{}, errors.New("unterminated metadata.user_id object")
-		}
-		return innerSessionLocation{}, peekErr
-	}
-
-	for {
-		key, stringErr := p.parseString(innerStringKey)
-		if stringErr != nil {
-			return innerSessionLocation{}, stringErr
-		}
-		location.hasMembers = true
-		if err := p.skipSpace(); err != nil {
-			return innerSessionLocation{}, err
-		}
-		colon, colonErr := p.next()
-		if colonErr != nil || colon.value != ':' {
-			return innerSessionLocation{}, errors.New("metadata.user_id object member missing colon")
-		}
-		if err := p.skipSpace(); err != nil {
-			return innerSessionLocation{}, err
-		}
-		if sessionRoot && key.matchesSessionKey {
-			if location.present {
-				return innerSessionLocation{}, errors.New("metadata.user_id.session_id occurs more than once")
-			}
-			next, peekErr := p.peek(1)
-			if peekErr != nil || next.value != '"' {
-				return innerSessionLocation{}, errors.New("metadata.user_id.session_id must be a string")
-			}
-			value, valueErr := p.parseString(innerStringSession)
-			if valueErr != nil {
-				return innerSessionLocation{}, valueErr
-			}
-			if !value.validSession {
-				return innerSessionLocation{}, errors.New("metadata.user_id.session_id is invalid")
-			}
-			location.present = true
-			location.contentStart = value.contentStart
-			location.contentEnd = value.contentEnd
-		} else if err := p.parseValue(); err != nil {
-			return innerSessionLocation{}, err
-		}
-		if err := p.skipSpace(); err != nil {
-			return innerSessionLocation{}, err
-		}
-		separator, separatorErr := p.next()
-		if separatorErr != nil {
-			return innerSessionLocation{}, errors.New("unterminated metadata.user_id object")
-		}
-		switch separator.value {
-		case '}':
-			location.closeAt = separator.rawStart
-			return location, nil
-		case ',':
-			if err := p.skipSpace(); err != nil {
-				return innerSessionLocation{}, err
-			}
-			if next, peekErr := p.peek(1); peekErr != nil || next.value == '}' {
-				return innerSessionLocation{}, errors.New("invalid metadata.user_id object separator")
-			}
-		default:
-			return innerSessionLocation{}, errors.New("invalid metadata.user_id object separator")
-		}
-	}
-}
-
-func (p *innerJSONParser) parseArray() error {
-	open, err := p.next()
-	if err != nil || open.value != '[' {
-		return errors.New("invalid metadata.user_id array")
-	}
-	if err := p.skipSpace(); err != nil {
-		return err
-	}
-	if next, peekErr := p.peek(1); peekErr == nil && next.value == ']' {
-		_, _ = p.next()
-		return nil
-	} else if peekErr != nil {
-		return errors.New("unterminated metadata.user_id array")
-	}
-	for {
-		if err := p.parseValue(); err != nil {
-			return err
-		}
-		if err := p.skipSpace(); err != nil {
-			return err
-		}
-		separator, err := p.next()
-		if err != nil {
-			return errors.New("unterminated metadata.user_id array")
-		}
-		switch separator.value {
-		case ']':
-			return nil
-		case ',':
-			if err := p.skipSpace(); err != nil {
-				return err
-			}
-			if next, peekErr := p.peek(1); peekErr != nil || next.value == ']' {
-				return errors.New("invalid metadata.user_id array separator")
-			}
-		default:
-			return errors.New("invalid metadata.user_id array separator")
-		}
-	}
-}
-
-func (p *innerJSONParser) parseValue() error {
+// startInnerValue consumes one JSON value.  Primitive values are consumed
+// immediately; object/array values push a frame and are completed by the
+// outer state machine.  No helper calls itself or another container parser.
+func (p *innerJSONParser) startInnerValue(stack *[]innerFrame) error {
 	next, err := p.peek(1)
 	if err != nil {
 		return errors.New("missing metadata.user_id JSON value")
@@ -537,10 +623,13 @@ func (p *innerJSONParser) parseValue() error {
 		_, err = p.parseString(innerStringIgnore)
 		return err
 	case '{':
-		_, err = p.parseObject(false)
-		return err
+		_, _ = p.next()
+		*stack = append(*stack, innerFrame{kind: '{', state: innerObjectMemberOrEnd})
+		return nil
 	case '[':
-		return p.parseArray()
+		_, _ = p.next()
+		*stack = append(*stack, innerFrame{kind: '[', state: innerArrayValueOrEnd})
+		return nil
 	case 't':
 		return p.consumeLiteral("true")
 	case 'f':
@@ -552,6 +641,13 @@ func (p *innerJSONParser) parseValue() error {
 	default:
 		return errors.New("invalid metadata.user_id JSON value")
 	}
+}
+
+func innerFrameAfterChild(frame innerFrame) innerFrameState {
+	if frame.kind == '[' {
+		return innerArrayCommaOrEnd
+	}
+	return innerObjectCommaOrEnd
 }
 
 type innerStringPurpose uint8
@@ -851,6 +947,7 @@ func newCLIProxyAPIClassifierDefinition() PatchDefinition {
 		Description:  "Isolates classifier sessions with a stable per-target UUID",
 		RequestTypes: []RequestType{RequestTypeClassifier},
 		Stages:       []Stage{StageRequest},
+		RequestPaths: []string{"/metadata", "/metadata/user_id"},
 		Conflicts:    []string{},
 		Idempotence:  PerExecution,
 		Factory: func(context FactoryContext) (PatchInstance, error) {

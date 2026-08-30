@@ -26,6 +26,53 @@ func (p Plan) Empty() bool { return len(p.definitions) == 0 }
 
 func (p Plan) Len() int { return len(p.definitions) }
 
+// RequiredPaths returns the stable union of selective JSON paths required by
+// applicable hooks at stage. The union follows configured patch order and
+// each definition's declared path order. It contains no duplicates.
+func (p Plan) RequiredPaths(stage Stage, requestType RequestType) ([]string, error) {
+	if !validStage(stage) {
+		return nil, fmt.Errorf("invalid patch stage %q", stage)
+	}
+	if !validRequestType(requestType) || requestType == RequestTypeAny {
+		return nil, fmt.Errorf("invalid patch request type %q", requestType)
+	}
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, definition := range p.definitions {
+		if !definitionApplies(definition, requestType) || !hasStage(definition.Stages, stage) {
+			continue
+		}
+		paths := definition.RequestPaths
+		if stage == StageResponse {
+			paths = definition.ResponsePaths
+		}
+		for _, path := range paths {
+			if _, duplicate := seen[path]; duplicate {
+				continue
+			}
+			seen[path] = struct{}{}
+			result = append(result, path)
+		}
+	}
+	if result == nil {
+		return []string{}, nil
+	}
+	return result, nil
+}
+
+// HasStage reports whether this Plan has an applicable hook at stage.
+func (p Plan) HasStage(stage Stage, requestType RequestType) bool {
+	if !validStage(stage) || !validRequestType(requestType) || requestType == RequestTypeAny {
+		return false
+	}
+	for _, definition := range p.definitions {
+		if definitionApplies(definition, requestType) && hasStage(definition.Stages, stage) {
+			return true
+		}
+	}
+	return false
+}
+
 // IDs returns the configured order of this plan.
 func (p Plan) IDs() []string {
 	ids := make([]string, len(p.definitions))

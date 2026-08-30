@@ -3,6 +3,8 @@ package traffic
 import (
 	"fmt"
 	"reflect"
+
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 )
 
 // Detector is a read-only classifier.  It must not mutate the RequestView or
@@ -10,6 +12,13 @@ import (
 type Detector interface {
 	Type() RequestType
 	Detect(RequestView) (matched bool, err error)
+}
+
+// ScanPathDetector is implemented by detectors that inspect JSON fields.
+// Gateway includes RequiredPaths in the single incremental ingress scan.
+type ScanPathDetector interface {
+	Detector
+	RequiredPaths() []string
 }
 
 // DetectorRegistry is the gateway-facing classification boundary.
@@ -21,7 +30,9 @@ type DetectorRegistry interface {
 // not a detector entry; an empty registry therefore classifies every request
 // as normal in production.
 type Registry struct {
-	detectors []Detector
+	detectors       []Detector
+	scanPaths       []string
+	scanPathsByType map[RequestType][]string
 }
 
 // NewRegistry validates and snapshots detectors.  Detector order is retained
@@ -30,6 +41,9 @@ type Registry struct {
 func NewRegistry(detectors ...Detector) (*Registry, error) {
 	entries := append([]Detector(nil), detectors...)
 	seen := make(map[RequestType]struct{}, len(entries))
+	seenPaths := make(map[string]struct{})
+	var scanPaths []string
+	scanPathsByType := make(map[RequestType][]string, len(entries))
 	for index, detector := range entries {
 		if isNilDetector(detector) {
 			return nil, fmt.Errorf("%w at index %d", ErrNilDetector, index)
@@ -48,8 +62,23 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 			return nil, fmt.Errorf("%w: %q", ErrDuplicateDetector, requestType)
 		}
 		seen[requestType] = struct{}{}
+		paths, pathErr := detectorPathsSafely(detector)
+		if pathErr != nil {
+			return nil, fmt.Errorf("detector %d: %w", index, pathErr)
+		}
+		if _, pathErr := bodyfile.NewScanSpec(paths...); pathErr != nil {
+			return nil, fmt.Errorf("detector %d: invalid required paths: %w", index, pathErr)
+		}
+		for _, path := range paths {
+			scanPathsByType[requestType] = append(scanPathsByType[requestType], path)
+			if _, duplicate := seenPaths[path]; duplicate {
+				continue
+			}
+			seenPaths[path] = struct{}{}
+			scanPaths = append(scanPaths, path)
+		}
 	}
-	return &Registry{detectors: entries}, nil
+	return &Registry{detectors: entries, scanPaths: scanPaths, scanPathsByType: scanPathsByType}, nil
 }
 
 // NewDetectorRegistry is an alias for NewRegistry.
@@ -148,6 +177,24 @@ func detectorTypeSafely(detector Detector) (requestType RequestType, err error) 
 	return requestType, nil
 }
 
+func detectorPathsSafely(detector Detector) (paths []string, err error) {
+	requirements, ok := detector.(interface{ RequiredPaths() []string })
+	if !ok {
+		return []string{}, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			paths = nil
+			err = fmt.Errorf("required paths panic: %v", recovered)
+		}
+	}()
+	paths = requirements.RequiredPaths()
+	if paths == nil {
+		return []string{}, nil
+	}
+	return append([]string(nil), paths...), nil
+}
+
 // ClassifyDetection is a convenience method for the canonical ingress fact
 // type.  It returns an IngressRequest only after successful classification.
 func (r *Registry) ClassifyDetection(request DetectionRequest) (IngressRequest, error) {
@@ -169,6 +216,29 @@ func (r *Registry) Detectors() []Detector {
 		return []Detector{}
 	}
 	return append([]Detector(nil), r.detectors...)
+}
+
+// RequiredPaths returns the stable union declared by specialised detectors.
+func (r *Registry) RequiredPaths() []string {
+	if r == nil || len(r.scanPaths) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), r.scanPaths...)
+}
+
+// RequiredPathsForType returns the paths frozen for the detector which can
+// produce requestType. Registry construction has already called Type and
+// RequiredPaths through panic-safe boundaries, so request handling never
+// invokes mutable detector metadata methods again.
+func (r *Registry) RequiredPathsForType(requestType RequestType) []string {
+	if r == nil {
+		return []string{}
+	}
+	paths := r.scanPathsByType[requestType]
+	if len(paths) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), paths...)
 }
 
 // Types returns registered specialised types in deterministic registration

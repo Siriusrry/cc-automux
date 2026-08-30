@@ -164,6 +164,41 @@ func testProviderRuntimeContext(t *testing.T) provider.RuntimeContext {
 	return context
 }
 
+func TestRequestScanSpecUsesOnlyReachableProviderPlans(t *testing.T) {
+	active := compileTestProviderWithPatches(t, "11111111-1111-4111-8111-111111111111", "active", "https://active.example", "key", "m", false, patch.AnyRouterSubagentThinkingID)
+	disabled := compileTestProviderWithPatches(t, "22222222-2222-4222-8222-222222222222", "disabled", "https://disabled.example", "key", "m", false, patch.AnyRouterSubagentThinkingID)
+	disabled.Enabled = false
+	noModels := compileTestProviderWithPatches(t, "33333333-3333-4333-8333-333333333333", "no-models", "https://empty.example", "key", "m", false, patch.AnyRouterSubagentThinkingID)
+	noModels.Models = nil
+	handler := NewWithOptions(nil, nil, Options{})
+	paths, err := handler.requestScanSpec(&fakeSnapshot{providers: []*provider.CompiledProvider{active, disabled, noModels}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(paths.Paths, "/thinking/type") {
+		t.Fatalf("active provider path missing: %#v", paths)
+	}
+	// The active provider still contributes the path; remove it and ensure the
+	// same disabled/no-model plans cannot do so on their own.
+	active.Enabled = false
+	paths, err = handler.requestScanSpec(&fakeSnapshot{providers: []*provider.CompiledProvider{active, disabled, noModels}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(paths.Paths, "/thinking/type") {
+		t.Fatalf("unreachable provider path retained: %#v", paths)
+	}
+}
+
+func containsPath(paths []string, target string) bool {
+	for _, path := range paths {
+		if path == target {
+			return true
+		}
+	}
+	return false
+}
+
 func leaseFor(item *provider.CompiledProvider, model string) scheduler.AttemptLease {
 	return scheduler.AttemptLease{
 		SnapshotRevision: 1,

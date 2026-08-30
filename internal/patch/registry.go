@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 )
 
 var (
@@ -37,14 +39,19 @@ type InstanceFactory func(FactoryContext) (PatchInstance, error)
 
 // PatchDefinition combines immutable metadata and an executable factory.
 type PatchDefinition struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Description  string          `json:"description"`
-	RequestTypes []RequestType   `json:"request_types"`
-	Stages       []Stage         `json:"stages"`
-	Conflicts    []string        `json:"conflicts"`
-	Idempotence  Idempotence     `json:"idempotence"`
-	Factory      InstanceFactory `json:"-"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Description  string        `json:"description"`
+	RequestTypes []RequestType `json:"request_types"`
+	Stages       []Stage       `json:"stages"`
+	Conflicts    []string      `json:"conflicts"`
+	Idempotence  Idempotence   `json:"idempotence"`
+	// RequestPaths and ResponsePaths are internal selective-scan contracts.
+	// They are not discovery/configuration fields: callers only need to know
+	// that the compiled Plan can prepare the minimal index required by hooks.
+	RequestPaths  []string        `json:"-"`
+	ResponsePaths []string        `json:"-"`
+	Factory       InstanceFactory `json:"-"`
 }
 
 // Definition is a concise alias used by callers that do not need the
@@ -70,6 +77,8 @@ func (d PatchDefinition) normalized() PatchDefinition {
 	d.Stages = append([]Stage(nil), m.Stages...)
 	d.Conflicts = append([]string(nil), m.Conflicts...)
 	d.Idempotence = m.Idempotence
+	d.RequestPaths = append([]string(nil), d.RequestPaths...)
+	d.ResponsePaths = append([]string(nil), d.ResponsePaths...)
 	return d
 }
 
@@ -118,6 +127,9 @@ func newRegistry(definitions []PatchDefinition, services Services) (Registry, er
 	for i, raw := range definitions {
 		d := raw.normalized()
 		if err := validateMetadata(d.metadata()); err != nil {
+			return Registry{}, fmt.Errorf("definition[%d]: %w", i, err)
+		}
+		if err := validateScanPaths(d); err != nil {
 			return Registry{}, fmt.Errorf("definition[%d]: %w", i, err)
 		}
 		if d.Factory == nil {
@@ -365,6 +377,53 @@ func (r Registry) CompileForTypes(ids []string, requestTypes []RequestType) (Pla
 	return r.compile(ids, requestTypes)
 }
 
+// RequiredPaths returns the union declared by definitions applicable to any
+// requested type and stage. It is used before request-type classification to
+// prepare one ingress scan that is sufficient for every reachable flow.
+func (r Registry) RequiredPaths(stage Stage, requestTypes ...RequestType) ([]string, error) {
+	if !validStage(stage) {
+		return nil, fmt.Errorf("invalid patch stage %q", stage)
+	}
+	if len(requestTypes) == 0 {
+		requestTypes = []RequestType{RequestTypeNormal, RequestTypeClassifier}
+	}
+	for _, requestType := range requestTypes {
+		if !validRequestType(requestType) || requestType == RequestTypeAny {
+			return nil, fmt.Errorf("invalid patch request type %q", requestType)
+		}
+	}
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	for _, id := range r.order {
+		definition := r.entries[id]
+		applies := false
+		for _, requestType := range requestTypes {
+			if definitionApplies(definition, requestType) {
+				applies = true
+				break
+			}
+		}
+		if !applies || !hasStage(definition.Stages, stage) {
+			continue
+		}
+		paths := definition.RequestPaths
+		if stage == StageResponse {
+			paths = definition.ResponsePaths
+		}
+		for _, path := range paths {
+			if _, exists := seen[path]; exists {
+				continue
+			}
+			seen[path] = struct{}{}
+			result = append(result, path)
+		}
+	}
+	if result == nil {
+		return []string{}, nil
+	}
+	return result, nil
+}
+
 func validateMetadata(m PatchMetadata) error {
 	if strings.TrimSpace(m.ID) == "" || strings.ContainsAny(m.ID, " \t\r\n") {
 		return fmt.Errorf("%w: id must be non-empty and contain no whitespace", ErrInvalidDefinition)
@@ -400,6 +459,22 @@ func validateMetadata(m PatchMetadata) error {
 	}
 	if m.Idempotence != Idempotent && m.Idempotence != PerExecution {
 		return fmt.Errorf("%w: idempotence must be %q or %q", ErrInvalidDefinition, Idempotent, PerExecution)
+	}
+	return nil
+}
+
+func validateScanPaths(definition PatchDefinition) error {
+	if len(definition.RequestPaths) > 0 && !hasStage(definition.Stages, StageRequest) {
+		return fmt.Errorf("%w: request paths declared without request stage", ErrInvalidDefinition)
+	}
+	if len(definition.ResponsePaths) > 0 && !hasStage(definition.Stages, StageResponse) {
+		return fmt.Errorf("%w: response paths declared without response stage", ErrInvalidDefinition)
+	}
+	if _, err := bodyfile.NewScanSpec(definition.RequestPaths...); err != nil {
+		return fmt.Errorf("%w: invalid request paths: %v", ErrInvalidDefinition, err)
+	}
+	if _, err := bodyfile.NewScanSpec(definition.ResponsePaths...); err != nil {
+		return fmt.Errorf("%w: invalid response paths: %v", ErrInvalidDefinition, err)
 	}
 	return nil
 }
@@ -499,6 +574,8 @@ func cloneDefinition(d PatchDefinition) PatchDefinition {
 	d.RequestTypes = append([]RequestType(nil), d.RequestTypes...)
 	d.Stages = append([]Stage(nil), d.Stages...)
 	d.Conflicts = append([]string(nil), d.Conflicts...)
+	d.RequestPaths = append([]string(nil), d.RequestPaths...)
+	d.ResponsePaths = append([]string(nil), d.ResponsePaths...)
 	return d
 }
 

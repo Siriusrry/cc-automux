@@ -57,12 +57,15 @@ func (anyRouterSubagentPatch) ApplyRequest(_ PatchContext, request *MutableReque
 }
 
 func replaceBody(request *MutableRequest, edits []bodyfile.Edit) error {
-	body, err := applyEdits(request.Body, edits)
+	if len(edits) == 0 {
+		return nil
+	}
+	spec := request.index.Spec()
+	body, index, err := bodyfile.ApplyEditsAndScan(request.Body, edits, spec)
 	if err != nil {
 		return err
 	}
-	request.Body = body
-	return nil
+	return request.SetBody(body, index)
 }
 
 func newAnyRouterSubagentDefinition() PatchDefinition {
@@ -72,6 +75,7 @@ func newAnyRouterSubagentDefinition() PatchDefinition {
 		Description:  "Promotes disabled thinking on normal requests sent to compatible AnyRouter targets",
 		RequestTypes: []RequestType{RequestTypeNormal},
 		Stages:       []Stage{StageRequest},
+		RequestPaths: []string{"/thinking", "/thinking/type"},
 		Conflicts:    []string{},
 		Idempotence:  Idempotent,
 		Factory: func(FactoryContext) (PatchInstance, error) {

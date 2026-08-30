@@ -5,6 +5,7 @@
 package patch
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -102,14 +103,40 @@ type MutableRequest struct {
 	Body    bodyfile.Body
 	Headers MutableHeaderSet
 
-	index bodyfile.JSONIndex
+	index       bodyfile.JSONIndex
+	strictIndex bool
 }
 
 // NewMutableRequest binds the PreparedRequest index to the immutable BaseBody
 // for the first request hook. If a hook replaces Body, later hooks rebuild an
 // attempt-level index only when they actually need one.
 func NewMutableRequest(body bodyfile.Body, index bodyfile.JSONIndex, headers MutableHeaderSet) *MutableRequest {
-	return &MutableRequest{Body: body, Headers: headers, index: index}
+	return &MutableRequest{Body: body, Headers: headers, index: index, strictIndex: true}
+}
+
+// SetBody replaces the current request body together with the index produced
+// for that exact body. Production hooks must use this pair; assigning Body
+// alone would make the next hook fail closed instead of triggering a rescan.
+func (r *MutableRequest) SetBody(body bodyfile.Body, index bodyfile.JSONIndex) error {
+	if r == nil || body == nil {
+		return errors.New("nil mutable request/body")
+	}
+	if err := index.ValidateBody(body); err != nil {
+		return err
+	}
+	r.Body = body
+	r.index = index
+	r.strictIndex = true
+	return nil
+}
+
+// Index returns the selective index currently bound to Body. Hooks that need
+// to inspect fields should use this snapshot instead of reparsing the body.
+func (r *MutableRequest) Index() bodyfile.JSONIndex {
+	if r == nil {
+		return bodyfile.JSONIndex{}
+	}
+	return r.index
 }
 
 // MutableResponse is the only mutable response surface exposed to hooks.
@@ -117,6 +144,38 @@ type MutableResponse struct {
 	Status  int
 	Body    bodyfile.Body
 	Headers MutableHeaderSet
+
+	index       bodyfile.JSONIndex
+	strictIndex bool
+}
+
+// NewMutableResponse binds the selective index produced while the terminal
+// response was captured. If a response hook derives a new body, later hooks
+// rebuild the same selective index while writing that derived body.
+func NewMutableResponse(status int, body bodyfile.Body, index bodyfile.JSONIndex, headers MutableHeaderSet) *MutableResponse {
+	return &MutableResponse{Status: status, Body: body, Headers: headers, index: index, strictIndex: true}
+}
+
+// SetBody replaces the current response body and its already-built index.
+func (r *MutableResponse) SetBody(body bodyfile.Body, index bodyfile.JSONIndex) error {
+	if r == nil || body == nil {
+		return errors.New("nil mutable response/body")
+	}
+	if err := index.ValidateBody(body); err != nil {
+		return err
+	}
+	r.Body = body
+	r.index = index
+	r.strictIndex = true
+	return nil
+}
+
+// Index returns the selective response index captured with Body.
+func (r *MutableResponse) Index() bodyfile.JSONIndex {
+	if r == nil {
+		return bodyfile.JSONIndex{}
+	}
+	return r.index
 }
 
 // HeaderView and MutableHeaderSet intentionally mirror the traffic contracts,

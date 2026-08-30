@@ -73,7 +73,10 @@ func (p *gptClassifierResponsePatch) ApplyResponse(_ PatchContext, response *Mut
 		// interpreted as classifier messages.
 		return nil
 	}
-	index, err := bodyfile.IndexObject(response.Body)
+	index, err := responseIndex(response,
+		"/type", "/content", "/content/*", "/content/*/type", "/content/*/text",
+		"/stop_reason", "/stop_sequence",
+	)
 	if err != nil {
 		return err
 	}
@@ -165,11 +168,14 @@ func (p *gptClassifierResponsePatch) ApplyResponse(_ PatchContext, response *Mut
 	if err := sortAndValidateEdits(edits); err != nil {
 		return err
 	}
-	body, err := bodyfile.ApplyEdits(response.Body, edits)
+	body, nextIndex, err := bodyfile.ApplyEditsAndScan(response.Body, edits, index.Spec())
 	if err != nil {
 		return err
 	}
-	response.Body = body
+	if err := response.SetBody(body, nextIndex); err != nil {
+		_ = body.Close()
+		return err
+	}
 	if response.Headers == nil {
 		response.Headers = NewHTTPHeaderSet(nil)
 	}
@@ -568,8 +574,13 @@ func newGPTClassifierResponseDefinition() PatchDefinition {
 		Description:  "Reassembles successful classifier responses into the expected Anthropic message shape",
 		RequestTypes: []RequestType{RequestTypeClassifier},
 		Stages:       []Stage{StageRequest, StageResponse},
-		Conflicts:    []string{},
-		Idempotence:  PerExecution,
+		RequestPaths: []string{"/stop_sequences", "/stop_sequences/*"},
+		ResponsePaths: []string{
+			"/type", "/content", "/content/*", "/content/*/type", "/content/*/text",
+			"/stop_reason", "/stop_sequence",
+		},
+		Conflicts:   []string{},
+		Idempotence: PerExecution,
 		Factory: func(FactoryContext) (PatchInstance, error) {
 			instance := &gptClassifierResponsePatch{}
 			return newHooksInstance(Hooks{Request: instance, Response: instance}), nil

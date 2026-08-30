@@ -557,6 +557,34 @@ func TestCLIProxyAPISessionStreamsLargeUserID(t *testing.T) {
 	}
 }
 
+func TestCLIProxyAPISessionHandlesDeeplyNestedUserIDWithoutCallStackGrowth(t *testing.T) {
+	// The inner user_id value is untrusted JSON.  A recursive descent parser
+	// would overflow a goroutine stack at this depth; the production parser must
+	// keep container state in an explicit heap-backed stack instead.
+	const depth = 100_000
+	context := patchContext(RequestTypeClassifier)
+	context.OriginalSessionID = "original-session"
+	nested := strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth)
+	inner := `{"nested":` + nested + `,"session_id":"old"}`
+	encodedInner, err := json.Marshal(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := `{"model":"m","metadata":{"user_id":` + string(encodedInner) + `},"messages":[]}`
+	request, err := executeRequest(t, CLIProxyAPIClassifierSessionID, context, input, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias, ok := request.Headers.Get("X-Claude-Code-Session-Id")
+	if !ok || alias == "" {
+		t.Fatal("missing isolated session alias")
+	}
+	want := strings.Replace(input, "old", alias, 1)
+	if got := readBody(t, request.Body); got != want {
+		t.Fatalf("deeply nested metadata.user_id output differs: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
 func TestGPTClassifierResponseReassembly(t *testing.T) {
 	registry := DefaultRegistry(Services{AliasStore: NewAliasStore()})
 	plan, err := registry.Compile([]string{GPTClassifierResponseReassemblyID})
@@ -714,7 +742,13 @@ func TestMutableRequestReusesBaseIndexAndReindexesOnlyAfterBodyChange(t *testing
 	}
 
 	derived := &trackingBody{content: `{"model":"m","derived":true}`}
-	request.Body = derived
+	derivedIndex, err := bodyfile.Index(derived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := request.SetBody(derived, derivedIndex); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := requestIndex(request); err != nil {
 		t.Fatal(err)
 	}

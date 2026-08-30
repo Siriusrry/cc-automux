@@ -242,6 +242,7 @@ func newAnyRouterClassifierDefinition() PatchDefinition {
 		Description:  "Adds Claude Code identity and correction markers for classifier requests",
 		RequestTypes: []RequestType{RequestTypeClassifier},
 		Stages:       []Stage{StageRequest},
+		RequestPaths: []string{"/thinking", "/thinking/type", "/system", "/system/*", "/system/*/text"},
 		Conflicts:    []string{},
 		Idempotence:  Idempotent,
 		Factory: func(FactoryContext) (PatchInstance, error) {

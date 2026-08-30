@@ -139,7 +139,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	captured, err := bodyfile.Capture(r.Body, h.replayDirectory)
+	requestSpec, specErr := h.requestScanSpec(snapshot)
+	if specErr != nil {
+		writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request scan could not be prepared")
+		return
+	}
+	// Capture and JSON scanning consume exactly the same ingress chunks.  The
+	// sealed body is never reopened merely to build the index.
+	captured, index, err := bodyfile.CaptureAndScan(r.Body, requestSpec, h.replayDirectory)
 	if err != nil {
 		if requestCanceled(r.Context()) {
 			return
@@ -148,12 +155,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_body", "could not read request body")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
-		return
-	}
-	defer captured.Close()
-	index, err := bodyfile.Index(captured)
-	if err != nil {
 		if errors.Is(err, bodyfile.ErrLocalIO) {
 			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
 		} else if errors.Is(err, bodyfile.ErrModelMissing) || errors.Is(err, bodyfile.ErrModelRepeated) || errors.Is(err, bodyfile.ErrModelNotString) || errors.Is(err, bodyfile.ErrModelEmpty) {
@@ -163,6 +164,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	defer captured.Close()
 	ingress, err := h.prepareIngress(captured, index, r)
 	if err != nil {
 		if errors.Is(err, traffic.ErrAmbiguousRequestType) {
@@ -174,6 +176,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// The ingress scan may have covered several possible request types and
+	// Provider plans so that classification required no second pass.  Once the
+	// type is known, project that already-built index down to the detector and
+	// request-patch paths relevant to this request; Project only filters in
+	// memory and remains bound to the same immutable body.
+	projected, projectErr := h.projectRequestIndex(snapshot, ingress)
+	if projectErr != nil {
+		if errors.Is(projectErr, bodyfile.ErrLocalIO) {
+			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
+		} else {
+			writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request index could not be prepared")
+		}
+		return
+	}
+	ingress.CapturedIndex = projected
 	plan, err := h.dispatchIngress(r.Context(), plannerSnapshot, ingress)
 	if err != nil {
 		if errors.Is(err, bodyfile.ErrLocalIO) {

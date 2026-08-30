@@ -69,6 +69,81 @@ func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, r
 	return h.detectors.ClassifyDetection(detection)
 }
 
+// requestScanSpec computes the single ingress scan contract before the model
+// and request type are known.  Normal fallback and every specialised detector
+// type are possible at this point, so the scanner retains the union of their
+// request-patch paths (plus detector-declared paths).  The union is deliberately
+// assembled from immutable plans already present in the captured Snapshot; it
+// does not compile or publish runtime state on the request path.
+func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpec, error) {
+	types := []traffic.RequestType{traffic.RequestTypeNormal}
+	paths := make([]string, 0)
+	if h != nil && h.detectors != nil {
+		paths = appendUniquePaths(paths, h.detectors.RequiredPaths()...)
+		types = append(types, h.detectors.Types()...)
+	}
+	if snapshot != nil {
+		for _, item := range snapshot.Providers() {
+			// Only providers that can be selected in this immutable snapshot
+			// contribute to the ingress union. Disabled/no-model entries are not
+			// reachable and must not force unrelated patch fields into every index.
+			if item == nil || !item.Enabled || len(item.Models) == 0 {
+				continue
+			}
+			for _, requestType := range types {
+				required, err := item.PatchPlan.RequiredPaths(patch.StageRequest, requestType)
+				if err != nil {
+					return bodyfile.ScanSpec{}, err
+				}
+				paths = appendUniquePaths(paths, required...)
+			}
+		}
+	}
+	return bodyfile.RequestScanSpec(paths...)
+}
+
+// projectRequestIndex narrows the already-built ingress index after type
+// detection.  No body bytes are read: JSONIndex.Project filters the retained
+// descriptors and preserves the body binding.
+func (h *Handler) projectRequestIndex(snapshot scheduler.Snapshot, ingress traffic.IngressRequest) (bodyfile.JSONIndex, error) {
+	paths := make([]string, 0)
+	if h != nil && h.detectors != nil {
+		paths = appendUniquePaths(paths, h.detectors.RequiredPathsForType(ingress.RequestType)...)
+	}
+	if snapshot != nil {
+		for _, item := range snapshot.Providers() {
+			if item == nil || !item.Enabled || len(item.Models) == 0 {
+				continue
+			}
+			required, err := item.PatchPlan.RequiredPaths(patch.StageRequest, ingress.RequestType)
+			if err != nil {
+				return bodyfile.JSONIndex{}, err
+			}
+			paths = appendUniquePaths(paths, required...)
+		}
+	}
+	spec, err := bodyfile.RequestScanSpec(paths...)
+	if err != nil {
+		return bodyfile.JSONIndex{}, err
+	}
+	return ingress.CapturedIndex.Project(spec)
+}
+
+func appendUniquePaths(paths []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(paths)+len(additions))
+	for _, path := range paths {
+		seen[path] = struct{}{}
+	}
+	for _, path := range additions {
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
 func (h *Handler) dispatchIngress(ctx context.Context, snapshot flow.SnapshotView, ingress traffic.IngressRequest) (flow.ExecutionPlan, error) {
 	if h.flows == nil {
 		return flow.ExecutionPlan{}, flow.ErrMissingPlanner
@@ -289,8 +364,14 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		_ = response.Body.Close()
 		return nil, h.terminalReplayFailure(w, nil, lease, sessionID, attempt, url.String(), errors.Join(err, execution.Close()), "", "")
 	}
-	if hasResponseHooks(item.PatchPlan, prepared.Plan.RequestType) && response.StatusCode >= 200 && response.StatusCode < 300 {
-		return h.executeBufferedResponse(w, incoming, lease, sessionID, attempt, response, execution, url.String())
+	if item.PatchPlan.HasStage(patch.StageResponse, prepared.Plan.RequestType) && response.StatusCode >= 200 && response.StatusCode < 300 {
+		responseSpec, specErr := responseScanSpec(item.PatchPlan, prepared.Plan.RequestType)
+		if specErr != nil {
+			_ = response.Body.Close()
+			_ = execution.Close()
+			return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, url.String(), specErr, "", patch.StageResponse)
+		}
+		return h.executeBufferedResponse(w, incoming, lease, sessionID, attempt, response, execution, url.String(), responseSpec)
 	}
 	if err := execution.Close(); err != nil {
 		_ = response.Body.Close()
@@ -332,8 +413,8 @@ func (h *Handler) handlePlanTransportError(w http.ResponseWriter, ctx context.Co
 	return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, transport: true}, false
 }
 
-func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.Request, lease scheduler.AttemptLease, sessionID string, attempt int, response *http.Response, execution *patch.Execution, upstream string) (*capturedFailure, bool) {
-	body, err := bodyfile.Capture(response.Body, h.replayDirectory)
+func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.Request, lease scheduler.AttemptLease, sessionID string, attempt int, response *http.Response, execution *patch.Execution, upstream string, spec bodyfile.ScanSpec) (*capturedFailure, bool) {
+	body, index, err := bodyfile.CaptureAndScan(response.Body, spec, h.replayDirectory)
 	closeErr := response.Body.Close()
 	if requestCanceled(incoming.Context()) {
 		if body != nil {
@@ -370,7 +451,7 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 		return nil, true
 	}
 
-	mutable := &patch.MutableResponse{Status: response.StatusCode, Body: body, Headers: patch.NewHTTPHeaderSet(response.Header.Clone())}
+	mutable := patch.NewMutableResponse(response.StatusCode, body, index, patch.NewHTTPHeaderSet(response.Header.Clone()))
 	if err := execution.ApplyResponseOnly(mutable); err != nil {
 		patchID, stage := patchErrorDetails(err, patch.StageResponse)
 		cleanupErr := closeResponseBodies(body, mutable.Body)
@@ -432,25 +513,12 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 	return nil, true
 }
 
-func hasResponseHooks(plan patch.Plan, requestType traffic.RequestType) bool {
-	for _, metadata := range plan.List() {
-		applies := false
-		for _, typ := range metadata.RequestTypes {
-			if typ == patch.RequestTypeAny || typ == requestType {
-				applies = true
-				break
-			}
-		}
-		if !applies {
-			continue
-		}
-		for _, stage := range metadata.Stages {
-			if stage == patch.StageResponse {
-				return true
-			}
-		}
+func responseScanSpec(plan patch.Plan, requestType traffic.RequestType) (bodyfile.ScanSpec, error) {
+	paths, err := plan.RequiredPaths(patch.StageResponse, requestType)
+	if err != nil {
+		return bodyfile.ScanSpec{}, err
 	}
-	return false
+	return bodyfile.ResponseScanSpec(paths...)
 }
 
 func cleanUpstreamHeaders(source http.Header) (http.Header, error) {

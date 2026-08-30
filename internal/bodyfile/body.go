@@ -128,16 +128,18 @@ func IsWriteError(err error) bool { return errors.Is(err, ErrWrite) }
 // fileBody is intentionally kept private.  In particular, no path is
 // retained in a public value and no operation exposes the underlying writer.
 type fileBody struct {
-	file *os.File
-	size int64
+	file    *os.File
+	size    int64
+	binding *scanBinding
 
 	mu     sync.RWMutex
 	closed bool
 }
 
 type fileBuilder struct {
-	file *os.File
-	size int64
+	file    *os.File
+	size    int64
+	binding *scanBinding
 
 	mu      sync.Mutex
 	sealed  bool
@@ -157,7 +159,7 @@ func NewBuilder(directory ...string) (Builder, error) {
 	if err != nil {
 		return nil, wrapLocalIO(LocalIOCreate, err)
 	}
-	return &fileBuilder{file: file}, nil
+	return &fileBuilder{file: file, binding: &scanBinding{}}, nil
 }
 
 // NewFileBuilder is an explicit-name alias for NewBuilder.
@@ -267,7 +269,7 @@ func (b *fileBuilder) Seal() (Body, error) {
 	size := b.size
 	b.file = nil
 	b.sealed = true
-	return &fileBody{file: file, size: size}, nil
+	return &fileBody{file: file, size: size, binding: b.binding}, nil
 }
 
 func (b *fileBuilder) Abort() error {
@@ -366,3 +368,22 @@ func (r *classifiedReader) Close() error {
 // bodyIdentity is used by JSONIndex to make accidental cross-body reuse
 // detectable without exposing the backing file or path publicly.
 func (b *fileBody) bodyIdentity() *fileBody { return b }
+
+// scanBinding is an in-process identity token shared by a Builder and the
+// Body produced by its Seal. It lets the incremental scanner bind its result
+// without reopening the sealed file merely to compare bytes.
+type scanBinding struct{}
+
+func (b *fileBuilder) scanBinding() *scanBinding {
+	if b == nil {
+		return nil
+	}
+	return b.binding
+}
+
+func (b *fileBody) scanBinding() *scanBinding {
+	if b == nil {
+		return nil
+	}
+	return b.binding
+}
