@@ -214,54 +214,6 @@ func (i JSONIndex) Spec() ScanSpec {
 	return result
 }
 
-// Project derives a narrower index from already scanned fields without
-// reading body again. It is available for explicit downstream scan-contract
-// changes; ingress request classification deliberately retains its union.
-func (i JSONIndex) Project(spec ScanSpec) (JSONIndex, error) {
-	if err := i.ValidateBody(i.body); err != nil {
-		return JSONIndex{}, err
-	}
-	spec.RequireObject = true
-	if err := spec.Validate(); err != nil {
-		return JSONIndex{}, err
-	}
-	if spec.RequireModel && !i.modelSeen {
-		return JSONIndex{}, ErrModelMissing
-	}
-	selector := newSelectorTrie(spec.Paths, spec.SelectAll)
-	fields := make([]Field, 0, len(i.fields))
-	for _, field := range i.fields {
-		if spec.SelectAll || spec.RequireModel && field.Path == "/model" || selectorRetainsPath(selector, field.Path) {
-			fields = append(fields, field)
-		}
-	}
-	containers := make([]ContainerInfo, 0)
-	for path, entries := range i.containers {
-		if path == "" || spec.SelectAll || selectorRetainsPath(selector, path) {
-			containers = append(containers, entries...)
-		}
-	}
-	return makeJSONIndex(i.body, spec, i.Model, i.ModelRange, i.modelSeen, fields, containers), nil
-}
-
-func selectorRetainsPath(selector *selectorTrie, path string) bool {
-	if selector == nil || path == "" {
-		return false
-	}
-	segments, err := splitPointer(path)
-	if err != nil {
-		return false
-	}
-	states := []*selectorNode{selector.root}
-	for _, segment := range segments {
-		states = transitionStates(states, segment)
-		if len(states) == 0 {
-			return false
-		}
-	}
-	return len(states) > 0
-}
-
 // ModelValue returns the decoded top-level model scalar.
 func (i JSONIndex) ModelValue() string { return i.Model }
 
