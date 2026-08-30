@@ -13,16 +13,22 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
+	"github.com/Siriusrry/cc-automux/internal/flow"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 type SnapshotFunc func() scheduler.Snapshot
 
 type Options struct {
-	ClientPool      *ClientPool
-	Recorder        EventRecorder
-	ReplayDirectory string
-	Now             func() time.Time
+	ClientPool       *ClientPool
+	Recorder         EventRecorder
+	ReplayDirectory  string
+	Now              func() time.Time
+	DetectorRegistry *traffic.Registry
+	FlowDispatcher   *flow.Dispatcher
 }
 
 type Handler struct {
@@ -32,6 +38,8 @@ type Handler struct {
 	recorder         EventRecorder
 	replayDirectory  string
 	now              func() time.Time
+	detectors        *traffic.Registry
+	flows            *flow.Dispatcher
 	active           atomic.Int64
 	clientRevisionMu sync.Mutex
 	clientRevision   uint64
@@ -54,6 +62,22 @@ func NewWithOptions(snapshot SnapshotFunc, selector scheduler.Selector, options 
 	if now == nil {
 		now = time.Now
 	}
+	detectors := options.DetectorRegistry
+	if detectors == nil {
+		detectors = traffic.DefaultRegistry()
+	}
+	flows := options.FlowDispatcher
+	if flows == nil {
+		normal, err := flow.NewRegistry(flow.NewNormalPlanner())
+		if err != nil {
+			// The built-in normal planner is static and cannot fail in normal
+			// operation; retain a nil dispatcher so requests fail closed if a
+			// future constructor change introduces an error.
+			flows = nil
+		} else {
+			flows = flow.NewDispatcher(normal)
+		}
+	}
 	return &Handler{
 		snapshot:        snapshot,
 		selector:        selector,
@@ -61,6 +85,8 @@ func NewWithOptions(snapshot SnapshotFunc, selector scheduler.Selector, options 
 		recorder:        recorder,
 		replayDirectory: options.ReplayDirectory,
 		now:             now,
+		detectors:       detectors,
+		flows:           flows,
 	}
 }
 
@@ -80,17 +106,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
-	snapshot := h.snapshot()
-	if snapshot == nil {
+	runtimeSnapshot := h.snapshot()
+	if runtimeSnapshot == nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
-	capturedSnapshot, attemptPolicy, err := scheduler.CaptureAttemptPolicy(snapshot)
+	snapshot, attemptPolicy, err := scheduler.CaptureAttemptPolicy(runtimeSnapshot)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
-	snapshot = capturedSnapshot
+	plannerSnapshot := capturedFlowView(runtimeSnapshot, snapshot, attemptPolicy)
 	key := snapshot.GatewayKey()
 	if key == "" {
 		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured", "gateway key is not configured")
@@ -113,48 +139,58 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	replay, err := spoolRequestBody(r.Body, h.replayDirectory)
+	captured, err := bodyfile.Capture(r.Body, h.replayDirectory)
 	if err != nil {
 		if requestCanceled(r.Context()) {
 			return
 		}
-		if isRequestBodyReadError(err) {
+		if bodyfile.IsReadError(err) {
 			writeError(w, http.StatusBadRequest, "invalid_body", "could not read request body")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
 		return
 	}
-	defer replay.Close()
-
-	reader, err := replay.Reader()
+	defer captured.Close()
+	index, err := bodyfile.Index(captured)
 	if err != nil {
-		h.writeAfterReplayClose(w, replay, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
-		return
-	}
-	fields, parseErr := parseMessagesRequest(reader)
-	_ = reader.Close()
-	if parseErr != nil {
-		var requestErr *requestParseError
-		if errors.As(parseErr, &requestErr) {
-			h.writeAfterReplayClose(w, replay, http.StatusBadRequest, requestErr.code, requestErr.message)
-			return
+		if errors.Is(err, bodyfile.ErrLocalIO) {
+			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
+		} else if errors.Is(err, bodyfile.ErrModelMissing) || errors.Is(err, bodyfile.ErrModelRepeated) || errors.Is(err, bodyfile.ErrModelNotString) || errors.Is(err, bodyfile.ErrModelEmpty) {
+			writeError(w, http.StatusBadRequest, "invalid_model", err.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_json", "request body is not valid JSON")
 		}
-		h.writeAfterReplayClose(w, replay, http.StatusBadRequest, "invalid_json", "request body is not valid JSON")
 		return
 	}
-
-	sessionID := singleSessionHeader(r.Header)
-	if len(snapshot.Candidates(fields.model)) == 0 {
-		h.writeAfterReplayClose(w, replay, http.StatusNotFound, "model_not_configured", "model is not configured")
+	ingress, err := h.prepareIngress(captured, index, r)
+	if err != nil {
+		if errors.Is(err, traffic.ErrAmbiguousRequestType) {
+			writeError(w, http.StatusBadRequest, "ambiguous_request_type", "request type is ambiguous")
+		} else if errors.Is(err, traffic.ErrDetectionFailed) {
+			writeError(w, http.StatusInternalServerError, "request_detection_failed", "request type detection failed")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid_body", "request body could not be prepared")
+		}
+		return
+	}
+	plan, err := h.dispatchIngress(r.Context(), plannerSnapshot, ingress)
+	if err != nil {
+		if errors.Is(err, bodyfile.ErrLocalIO) {
+			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
+		} else if errors.Is(err, flow.ErrMissingPlanner) {
+			writeError(w, http.StatusServiceUnavailable, "request_flow_unavailable", "request flow is unavailable")
+		} else {
+			writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request could not be prepared")
+		}
+		return
+	}
+	if plan.TargetMode == flow.TargetModeProviderPool && len(snapshot.Candidates(plan.PreparedRequest.Plan.EffectiveModel)) == 0 {
+		writeError(w, http.StatusNotFound, "model_not_configured", "model is not configured")
 		return
 	}
 	h.reconcileClients(snapshot)
-	h.forward(w, r, snapshot, replay, attemptPolicy, scheduler.StickyKey{
-		SessionID:    sessionID,
-		Model:        fields.model,
-		TrafficClass: scheduler.TrafficClassNormal,
-	})
+	h.forwardExecution(w, r, snapshot, plan)
 }
 
 func (h *Handler) reconcileClients(snapshot scheduler.Snapshot) {
@@ -179,228 +215,16 @@ func (h *Handler) ActiveRequests() int64 {
 }
 
 type capturedFailure struct {
-	lease     scheduler.AttemptLease
-	outcome   scheduler.Outcome
-	update    scheduler.HealthUpdate
-	attempt   int
-	headers   http.Header
-	body      []byte
-	transport bool
-}
-
-func (h *Handler) forward(w http.ResponseWriter, incoming *http.Request, snapshot scheduler.Snapshot, replay *replayBody, attemptPolicy scheduler.AttemptPolicy, sticky scheduler.StickyKey) {
-	excluded := make(map[string]struct{})
-	var last *capturedFailure
-	for attempt := 1; attempt <= attemptPolicy.MaxAttempts; attempt++ {
-		lease, err := h.selector.Acquire(snapshot, sticky, excluded)
-		if err != nil {
-			if last != nil {
-				h.recordCapturedFailure(last)
-			}
-			if closeErr := replay.Close(); closeErr != nil {
-				writeError(w, http.StatusInternalServerError, "replay_unavailable", "request replay cleanup failed")
-				return
-			}
-			if last != nil {
-				h.writeCapturedFailure(w, last)
-				return
-			}
-			h.writeUnavailable(w, err)
-			return
-		}
-		if lease.Provider == nil {
-			if last != nil {
-				h.recordCapturedFailure(last)
-			}
-			h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sticky.SessionID})
-			h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "selected provider is unavailable")
-			return
-		}
-		if _, duplicate := excluded[lease.Provider.ID]; duplicate {
-			if last != nil {
-				h.recordCapturedFailure(last)
-			}
-			h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sticky.SessionID})
-			h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider selection repeated an attempt")
-			return
-		}
-		if last != nil {
-			h.recordFailover(last, lease, attempt, incoming)
-			last = nil
-		}
-		failure, done := h.attempt(w, incoming, replay, lease, sticky.SessionID, attempt)
-		if done {
-			return
-		}
-		last = failure
-		excluded[lease.Provider.ID] = struct{}{}
-	}
-	if last != nil {
-		h.recordCapturedFailure(last)
-	}
-	if closeErr := replay.Close(); closeErr != nil {
-		writeError(w, http.StatusInternalServerError, "replay_unavailable", "request replay cleanup failed")
-		return
-	}
-	if last != nil {
-		h.writeCapturedFailure(w, last)
-		return
-	}
-	writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "no provider is available")
-}
-
-func (h *Handler) attempt(w http.ResponseWriter, incoming *http.Request, replay *replayBody, lease scheduler.AttemptLease, sessionID string, attempt int) (*capturedFailure, bool) {
-	item := lease.Provider
-	if err := item.ValidateApplication(); err != nil {
-		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, RawError: err.Error()}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider cannot process this request")
-		return nil, true
-	}
-	url, err := upstreamURL(item, incoming.URL)
-	if err != nil {
-		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, RawError: err.Error()}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider request could not be built")
-		return nil, true
-	}
-	headers, err := prepareUpstreamHeaders(incoming.Header, item)
-	if err != nil {
-		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider request could not be authenticated")
-		return nil, true
-	}
-	body, err := replay.Reader()
-	if err != nil {
-		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusInternalServerError, "replay_unavailable", "request could not be replayed")
-		return nil, true
-	}
-	request, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, url.String(), body)
-	if err != nil {
-		_ = body.Close()
-		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider request could not be built")
-		return nil, true
-	}
-	request.Header = headers
-	request.ContentLength = replay.Size()
-	request.Host = ""
-	request.GetBody = nil
-
-	h.record(Event{
-		Kind:         EventForward,
-		Time:         h.now().UTC(),
-		ProviderID:   item.ID,
-		ProviderName: item.Name,
-		SessionID:    sessionID,
-		Model:        lease.Model,
-		TrafficClass: lease.TrafficClass,
-		Attempt:      attempt,
-		UpstreamURL:  url.String(),
-	})
-	client, err := h.clients.Client(item)
-	if err != nil {
-		closeRequestBody(request)
-		outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: url.String(), RawError: err.Error()}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusInternalServerError, "gateway_unavailable", "provider client is unavailable")
-		return nil, true
-	}
-	response, requestErr := client.Do(request)
-	closeRequestBody(request)
-	if requestErr != nil {
-		return h.handleTransportError(w, incoming.Context(), replay, lease, sessionID, attempt, url.String(), requestErr)
-	}
-	class := scheduler.ClassifyHTTPStatus(response.StatusCode)
-	outcome := scheduler.Outcome{
-		Class:         class,
-		HTTPStatus:    response.StatusCode,
-		UpstreamURL:   url.String(),
-		SessionID:     sessionID,
-		RetryAfter:    parseRetryAfter(response.Header, h.now()),
-		HasRetryAfter: hasValidRetryAfter(response.Header),
-	}
-	if !outcome.ShouldFailover() {
-		if closeErr := replay.Close(); closeErr != nil {
-			_ = response.Body.Close()
-			outcome.Class = scheduler.FailureNeutral
-			outcome.RawError = closeErr.Error()
-			update := h.selector.Report(lease, outcome)
-			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request replay cleanup failed")
-			return nil, true
-		}
-		h.streamResponse(w, incoming.Context(), response, lease, outcome, attempt)
-		return nil, true
-	}
-	bodyBytes, readErr := io.ReadAll(response.Body)
-	closeErr := response.Body.Close()
-	if requestCanceled(incoming.Context()) {
-		outcome.Class = scheduler.FailureClientCanceled
-		outcome.ClientCanceled = true
-		outcome.RawError = contextError(incoming.Context(), readErr).Error()
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		_ = replay.Close()
-		return nil, true
-	}
-	if readErr != nil || closeErr != nil {
-		if readErr == nil {
-			readErr = closeErr
-		}
-		outcome.Class = scheduler.FailureChannelStream
-		outcome.RawError = readErr.Error()
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusBadGateway, "bad_gateway", "provider response ended unexpectedly")
-		return nil, true
-	}
-	outcome.RawError = string(bodyBytes)
-	update := h.selector.Report(lease, outcome)
-	return &capturedFailure{
-		lease:   lease,
-		outcome: outcome,
-		update:  update,
-		attempt: attempt,
-		headers: response.Header.Clone(),
-		body:    bodyBytes,
-	}, false
-}
-
-func (h *Handler) handleTransportError(w http.ResponseWriter, ctx context.Context, replay *replayBody, lease scheduler.AttemptLease, sessionID string, attempt int, upstream string, err error) (*capturedFailure, bool) {
-	outcome := scheduler.Outcome{
-		Class:       scheduler.FailureGlobalTransient,
-		UpstreamURL: upstream,
-		RawError:    err.Error(),
-		SessionID:   sessionID,
-	}
-	if requestCanceled(ctx) {
-		outcome.Class = scheduler.FailureClientCanceled
-		outcome.ClientCanceled = true
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		_ = replay.Close()
-		return nil, true
-	}
-	if requestBodyReadFailed(err) {
-		outcome.Class = scheduler.FailureNeutral
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		h.writeAfterReplayClose(w, replay, http.StatusInternalServerError, "replay_unavailable", "request could not be replayed")
-		return nil, true
-	}
-	update := h.selector.Report(lease, outcome)
-	return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, transport: true}, false
+	lease        scheduler.AttemptLease
+	outcome      scheduler.Outcome
+	update       scheduler.HealthUpdate
+	attempt      int
+	headers      http.Header
+	body         []byte
+	transport    bool
+	patchFailure bool
+	patchID      string
+	patchStage   string
 }
 
 func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, response *http.Response, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int) {
@@ -472,6 +296,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 }
 
 func (h *Handler) writeCapturedFailure(w http.ResponseWriter, failure *capturedFailure) {
+	if failure != nil && (failure.patchFailure || failure.patchID != "") {
+		writeError(w, http.StatusBadGateway, "patch_failed", "provider request patch failed")
+		return
+	}
 	if failure == nil || failure.transport {
 		writeError(w, http.StatusBadGateway, "bad_gateway", "provider request failed")
 		return
@@ -499,17 +327,6 @@ func (h *Handler) writeUnavailable(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "no provider is available")
 }
 
-func (h *Handler) writeAfterReplayClose(w http.ResponseWriter, replay *replayBody, status int, code, message string) {
-	if replay != nil {
-		if err := replay.Close(); err != nil {
-			status = http.StatusInternalServerError
-			code = "replay_unavailable"
-			message = "request replay cleanup failed"
-		}
-	}
-	writeError(w, status, code, message)
-}
-
 func (h *Handler) record(event Event) {
 	if h != nil && h.recorder != nil {
 		h.recorder.RecordGatewayEvent(event)
@@ -518,6 +335,13 @@ func (h *Handler) record(event Event) {
 
 func (h *Handler) recordOutcome(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) {
 	h.record(h.outcomeEvent(kind, lease, outcome, attempt, update))
+}
+
+func (h *Handler) recordOutcomeWithPatch(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate, patchID string, stage patch.Stage) {
+	event := h.outcomeEvent(kind, lease, outcome, attempt, update)
+	event.PatchID = patchID
+	event.PatchStage = string(stage)
+	h.record(event)
 }
 
 func (h *Handler) outcomeEvent(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) Event {
@@ -549,7 +373,10 @@ func (h *Handler) recordCapturedFailure(failure *capturedFailure) {
 	if failure == nil {
 		return
 	}
-	h.recordOutcome(EventFailure, failure.lease, failure.outcome, failure.attempt, failure.update)
+	event := h.outcomeEvent(EventFailure, failure.lease, failure.outcome, failure.attempt, failure.update)
+	event.PatchID = failure.patchID
+	event.PatchStage = failure.patchStage
+	h.record(event)
 }
 
 func (h *Handler) recordFailover(failure *capturedFailure, next scheduler.AttemptLease, nextAttempt int, incoming *http.Request) {
@@ -557,6 +384,8 @@ func (h *Handler) recordFailover(failure *capturedFailure, next scheduler.Attemp
 		return
 	}
 	event := h.outcomeEvent(EventFailover, failure.lease, failure.outcome, failure.attempt, failure.update)
+	event.PatchID = failure.patchID
+	event.PatchStage = failure.patchStage
 	event.NextProviderID = next.Provider.ID
 	event.NextProviderName = next.Provider.Name
 	event.NextAttempt = nextAttempt

@@ -145,6 +145,38 @@ func TestProviderDisableHealthStrictDecoding(t *testing.T) {
 	}
 }
 
+func TestProviderPatchOrderRoundTripAndExactDuplicateValidation(t *testing.T) {
+	cfg := validConfig()
+	want := []string{"patch-z", "patch-a", "Patch-A"}
+	cfg.Providers[0].Patches = append([]string(nil), want...)
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := roundTrip.Providers[0].Patches
+	if len(got) != len(want) {
+		t.Fatalf("round-trip patches = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("round-trip patches = %#v, want ordered %#v", got, want)
+		}
+	}
+
+	cfg.Providers[0].Patches = []string{"same", "same"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "patches[1]") {
+		t.Fatalf("exact duplicate patch validation error = %v", err)
+	}
+	cfg.Providers[0].Patches = []string{"same", "Same"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("case-distinct patch IDs rejected at schema layer: %v", err)
+	}
+}
+
 func TestValidateRejectsConflictingKeysAndListenAddresses(t *testing.T) {
 	cfg := validConfig()
 	cfg.Auth.GatewayKey = cfg.Auth.ManagementKey

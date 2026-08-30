@@ -9,39 +9,48 @@ import (
 	"os"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 )
+
+// CompiledTarget contains the immutable request-affecting part shared by pool
+// providers and a fixed classifier target. Pool providers use it today, and
+// compiling this boundary prevents a second patch/transport implementation.
+type CompiledTarget struct {
+	ID          string
+	BaseURL     *url.URL
+	APIKey      string
+	UseXAPIKey  bool
+	TLS         *tls.Config
+	TLSSettings config.TLSConfig
+	PatchPlan   patch.Plan
+	Generation  ProviderGeneration
+}
 
 // CompiledProvider is the immutable, runtime-ready form of one configured
 // provider. It contains only static data; health and scheduling state are not
 // stored here.
 type CompiledProvider struct {
-	ID            string
+	CompiledTarget
 	Name          string
-	BaseURL       *url.URL
-	APIKey        string
 	Models        []string
 	Priority      int64
 	Enabled       bool
-	UseXAPIKey    bool
-	TLS           *tls.Config
-	TLSSettings   config.TLSConfig
-	Patches       []PatchMetadata
+	Patches       []patch.PatchMetadata
 	DisableHealth bool
-	Generation    ProviderGeneration
 
 	modelSet map[string]struct{}
 }
 
-// Compile validates and compiles one provider using the default preset
-// registry. Known but unimplemented presets are retained as metadata so the
-// configuration entry point can round-trip them; ApplyPatches fails closed.
+// Compile validates and compiles one provider using the single built-in patch
+// registry. Every discoverable patch is executable; unknown IDs fail before a
+// runtime snapshot can be published.
 func Compile(input config.ProviderConfig) (*CompiledProvider, error) {
-	return CompileWithRegistry(input, DefaultRegistry())
+	return CompileWithRegistry(input, patch.DefaultRegistry())
 }
 
-func CompileWithRegistry(input config.ProviderConfig, registry Registry) (*CompiledProvider, error) {
+func CompileWithRegistry(input config.ProviderConfig, registry patch.Registry) (*CompiledProvider, error) {
 	if registry.Empty() {
-		registry = DefaultRegistry()
+		registry = patch.DefaultRegistry()
 	}
 	// The config package owns the schema-level provider rules. Wrapping this one
 	// provider in a complete configuration keeps the two packages from duplicating
@@ -61,33 +70,34 @@ func CompileWithRegistry(input config.ProviderConfig, registry Registry) (*Compi
 	if err != nil {
 		return nil, fmt.Errorf("tls: %w", err)
 	}
-	if err := registry.Validate(input.Patches); err != nil {
+	plan, err := registry.Compile(input.Patches)
+	if err != nil {
 		return nil, err
 	}
-	patches := make([]PatchMetadata, 0, len(input.Patches))
-	for _, id := range input.Patches {
-		entry, _ := registry.Lookup(id)
-		patches = append(patches, entry)
-	}
+	patches := plan.List()
 	models := append([]string(nil), input.Models...)
 	modelSet := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		modelSet[model] = struct{}{}
 	}
+	generation := generationFor(input)
 	return &CompiledProvider{
-		ID:            input.ID,
+		CompiledTarget: CompiledTarget{
+			ID:          input.ID,
+			BaseURL:     parsed,
+			APIKey:      input.APIKey,
+			UseXAPIKey:  input.UseXAPIKey,
+			TLS:         tlsConfig,
+			TLSSettings: input.TLS,
+			Generation:  generation,
+			PatchPlan:   plan,
+		},
 		Name:          input.Name,
-		BaseURL:       parsed,
-		APIKey:        input.APIKey,
 		Models:        models,
 		Priority:      input.Priority,
 		Enabled:       input.Enabled,
-		UseXAPIKey:    input.UseXAPIKey,
-		TLS:           tlsConfig,
-		TLSSettings:   input.TLS,
 		Patches:       patches,
 		DisableHealth: input.DisableHealth,
-		Generation:    generationFor(input),
 		modelSet:      modelSet,
 	}, nil
 }
@@ -95,12 +105,12 @@ func CompileWithRegistry(input config.ProviderConfig, registry Registry) (*Compi
 // CompileCatalog compiles every provider and builds an exact, case-sensitive
 // model index. The returned catalog owns all slices and maps.
 func CompileCatalog(inputs []config.ProviderConfig) (*Catalog, error) {
-	return CompileCatalogWithRegistry(inputs, DefaultRegistry())
+	return CompileCatalogWithRegistry(inputs, patch.DefaultRegistry())
 }
 
-func CompileCatalogWithRegistry(inputs []config.ProviderConfig, registry Registry) (*Catalog, error) {
+func CompileCatalogWithRegistry(inputs []config.ProviderConfig, registry patch.Registry) (*Catalog, error) {
 	if registry.Empty() {
-		registry = DefaultRegistry()
+		registry = patch.DefaultRegistry()
 	}
 	// Validate root-level duplicate IDs/names and auth-independent schema rules
 	// before compiling. A complete config also catches duplicate models.
@@ -169,26 +179,6 @@ func compileTLS(input config.TLSConfig) (*tls.Config, error) {
 	return &tls.Config{RootCAs: pool}, nil
 }
 
-// ValidateApplication returns an error if a configured preset cannot actually
-// be executed. It is intentionally separate from Compile: known
-// presets may be stored and displayed, but no request path may silently ignore
-// them.
-func (p *CompiledProvider) ValidateApplication() error {
-	for _, patch := range p.Patches {
-		if !patch.Implemented {
-			return fmt.Errorf("%w: %q", ErrPatchNotImplemented, patch.ID)
-		}
-	}
-	return nil
-}
-
-// ApplyPatches is the explicit fail-closed hook for request processing. Any
-// configured preset without an implementation returns an error rather than
-// being silently ignored.
-func (p *CompiledProvider) ApplyPatches() error {
-	return p.ValidateApplication()
-}
-
 // Clone returns a defensive copy suitable for an API or snapshot boundary.
 func (p *CompiledProvider) Clone() *CompiledProvider {
 	if p == nil {
@@ -196,13 +186,14 @@ func (p *CompiledProvider) Clone() *CompiledProvider {
 	}
 	out := *p
 	out.Models = append([]string(nil), p.Models...)
-	out.Patches = append([]PatchMetadata(nil), p.Patches...)
-	if p.BaseURL != nil {
-		urlCopy := *p.BaseURL
-		out.BaseURL = &urlCopy
+	out.Patches = p.PatchPlan.List()
+	out.CompiledTarget = p.CompiledTarget
+	if p.CompiledTarget.BaseURL != nil {
+		urlCopy := *p.CompiledTarget.BaseURL
+		out.CompiledTarget.BaseURL = &urlCopy
 	}
-	if p.TLS != nil {
-		out.TLS = p.TLS.Clone()
+	if p.CompiledTarget.TLS != nil {
+		out.CompiledTarget.TLS = p.CompiledTarget.TLS.Clone()
 	}
 	// TLSSettings contains only strings and a bool, so the value copy is enough.
 	out.modelSet = make(map[string]struct{}, len(p.modelSet))
@@ -220,19 +211,19 @@ func (p *CompiledProvider) SupportsModel(model string) bool {
 	return ok
 }
 
-func (p *CompiledProvider) URLString() string {
-	if p == nil || p.BaseURL == nil {
+func (t *CompiledTarget) URLString() string {
+	if t == nil || t.BaseURL == nil {
 		return ""
 	}
-	return p.BaseURL.String()
+	return t.BaseURL.String()
 }
 
 // TLSClone returns a client-safe copy. A nil result means system roots.
-func (p *CompiledProvider) TLSClone() *tls.Config {
-	if p == nil || p.TLS == nil {
+func (t *CompiledTarget) TLSClone() *tls.Config {
+	if t == nil || t.TLS == nil {
 		return nil
 	}
-	return p.TLS.Clone()
+	return t.TLS.Clone()
 }
 
 // Config returns a defensive config representation of the compiled provider.

@@ -29,6 +29,8 @@ type Event struct {
 	UpstreamURL            string
 	HTTPStatus             int
 	RawError               string
+	PatchID                string
+	PatchStage             string
 	NextProviderID         string
 	NextProviderName       string
 	NextAttempt            int

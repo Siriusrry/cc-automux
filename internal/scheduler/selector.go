@@ -130,9 +130,6 @@ func StaticAvailabilityOf(item *provider.CompiledProvider) StaticAvailability {
 	if item.APIKey == "" {
 		return StaticDisabledProvider
 	}
-	if err := item.ValidateApplication(); err != nil {
-		return StaticPatchUnavailable
-	}
 	return StaticActive
 }
 

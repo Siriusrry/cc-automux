@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/health"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
@@ -190,9 +192,83 @@ func TestManagementErrorsAndMethodContracts(t *testing.T) {
 	if rec := request(handler, http.MethodGet, "/api/v1/providers/nope", auth, ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("missing provider = %d", rec.Code)
 	}
-	patches := request(handler, http.MethodGet, "/api/v1/provider-patches", auth, "")
-	if patches.Code != http.StatusOK || !strings.Contains(patches.Body.String(), `"implemented":false`) {
-		t.Fatalf("provider patches = %d %s", patches.Code, patches.Body.String())
+}
+
+func TestProviderPatchDiscoveryContract(t *testing.T) {
+	handler := New(testManager(t, nil))
+	response := request(handler, http.MethodGet, "/api/v1/provider-patches", "Bearer management-key", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("provider patches = %d %s", response.Code, response.Body.String())
+	}
+
+	var rawItems []map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &rawItems); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := map[string]struct{}{
+		"id": {}, "name": {}, "description": {}, "request_types": {},
+		"stages": {}, "conflicts": {}, "idempotence": {},
+	}
+	for index, item := range rawItems {
+		if len(item) != len(wantKeys) {
+			t.Fatalf("patch[%d] fields = %#v", index, item)
+		}
+		for key := range wantKeys {
+			if _, ok := item[key]; !ok {
+				t.Fatalf("patch[%d] missing %q: %#v", index, key, item)
+			}
+		}
+		for _, arrayField := range []string{"request_types", "stages", "conflicts"} {
+			if string(item[arrayField]) == "null" {
+				t.Fatalf("patch[%d].%s is null", index, arrayField)
+			}
+		}
+	}
+
+	var got []patch.PatchMetadata
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []patch.PatchMetadata{
+		{
+			ID:           "anyrouter-subagent-thinking",
+			Name:         "AnyRouter Subagent Thinking Compatibility",
+			Description:  "Promotes disabled thinking on normal requests sent to compatible AnyRouter targets",
+			RequestTypes: []patch.RequestType{patch.RequestTypeNormal},
+			Stages:       []patch.Stage{patch.StageRequest},
+			Conflicts:    []string{},
+			Idempotence:  patch.Idempotent,
+		},
+		{
+			ID:           "anyrouter-classifier-request-compat",
+			Name:         "AnyRouter Classifier Request Compatibility",
+			Description:  "Adds Claude Code identity and correction markers for classifier requests",
+			RequestTypes: []patch.RequestType{patch.RequestTypeClassifier},
+			Stages:       []patch.Stage{patch.StageRequest},
+			Conflicts:    []string{},
+			Idempotence:  patch.Idempotent,
+		},
+		{
+			ID:           "cliproxyapi-classifier-session-isolation",
+			Name:         "CLIProxyAPI Classifier Session Isolation",
+			Description:  "Isolates classifier sessions with a stable per-target UUID",
+			RequestTypes: []patch.RequestType{patch.RequestTypeClassifier},
+			Stages:       []patch.Stage{patch.StageRequest},
+			Conflicts:    []string{},
+			Idempotence:  patch.PerExecution,
+		},
+		{
+			ID:           "gpt-classifier-response-reassembly",
+			Name:         "GPT Classifier Response Reassembly",
+			Description:  "Reassembles successful classifier responses into the expected Anthropic message shape",
+			RequestTypes: []patch.RequestType{patch.RequestTypeClassifier},
+			Stages:       []patch.Stage{patch.StageRequest, patch.StageResponse},
+			Conflicts:    []string{},
+			Idempotence:  patch.PerExecution,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("provider patches = %#v, want %#v", got, want)
 	}
 }
 

@@ -4,28 +4,49 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 // Snapshot is one immutable, fully compiled runtime state.
 type Snapshot struct {
-	revision uint64
-	config   config.Config
-	catalog  *provider.Catalog
-	attempts scheduler.AttemptPolicy
-	created  time.Time
+	revision           uint64
+	config             config.Config
+	catalog            *provider.Catalog
+	attempts           scheduler.AttemptPolicy
+	classifierAttempts scheduler.AttemptPolicy
+	created            time.Time
 }
 
-func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, attempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
+func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
 	return &Snapshot{
-		revision: revision,
-		config:   cfg.Clone(),
-		catalog:  catalog,
-		attempts: attempts,
-		created:  now,
+		revision:           revision,
+		config:             cfg.Clone(),
+		catalog:            catalog,
+		attempts:           attempts,
+		classifierAttempts: classifierAttempts,
+		created:            now,
 	}
 }
+
+// NormalAttemptPolicy and ClassifierAttemptPolicy implement flow.SnapshotView
+// without exposing mutable runtime state to planners.
+func (s *Snapshot) NormalAttemptPolicy() scheduler.AttemptPolicy {
+	if s == nil {
+		return scheduler.AttemptPolicy{}
+	}
+	return s.attempts
+}
+
+func (s *Snapshot) ClassifierAttemptPolicy() scheduler.AttemptPolicy {
+	if s == nil {
+		return scheduler.AttemptPolicy{}
+	}
+	return s.classifierAttempts
+}
+
+func (s *Snapshot) AutoMode() flow.AutoModeSnapshot { return flow.AutoModeSnapshot{} }
 
 func (s *Snapshot) Revision() uint64 {
 	if s == nil {

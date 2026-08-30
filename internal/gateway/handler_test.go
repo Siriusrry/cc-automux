@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
@@ -131,6 +132,10 @@ func (c *eventCollector) snapshot() []Event {
 }
 
 func compileTestProvider(t *testing.T, id, name, baseURL, key, model string, useXAPIKey bool) *provider.CompiledProvider {
+	return compileTestProviderWithPatches(t, id, name, baseURL, key, model, useXAPIKey)
+}
+
+func compileTestProviderWithPatches(t *testing.T, id, name, baseURL, key, model string, useXAPIKey bool, patchIDs ...string) *provider.CompiledProvider {
 	t.Helper()
 	item, err := provider.Compile(config.ProviderConfig{
 		ID:         id,
@@ -140,6 +145,7 @@ func compileTestProvider(t *testing.T, id, name, baseURL, key, model string, use
 		Models:     []string{model},
 		Enabled:    true,
 		UseXAPIKey: useXAPIKey,
+		Patches:    append([]string(nil), patchIDs...),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -718,7 +724,7 @@ func TestRetryAfterParsing(t *testing.T) {
 func TestUpstreamURLPreservesEscapedPrefix(t *testing.T) {
 	base, _ := url.Parse("https://example.test/prefix%2Ffixed/")
 	requestURL, _ := url.Parse(MessagesPath + "?x=1")
-	result, err := upstreamURL(&provider.CompiledProvider{BaseURL: base}, requestURL)
+	result, err := upstreamURL(&provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{BaseURL: base}}, requestURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -846,9 +852,13 @@ func TestGatewayReplaysMoreThan64MiBByteForByteAcrossThreeProviders(t *testing.T
 			_, _ = io.WriteString(w, "complete")
 		}))
 		servers = append(servers, server)
-		providers = append(providers, compileTestProvider(t,
+		var patchIDs []string
+		if index != 1 {
+			patchIDs = []string{patch.AnyRouterSubagentThinkingID}
+		}
+		providers = append(providers, compileTestProviderWithPatches(t,
 			fmt.Sprintf("%08d-1111-4111-8111-111111111111", index+1),
-			fmt.Sprintf("provider-%d", index+1), server.URL, fmt.Sprintf("key-%d", index+1), "large-model", false))
+			fmt.Sprintf("provider-%d", index+1), server.URL, fmt.Sprintf("key-%d", index+1), "large-model", false, patchIDs...))
 	}
 	for _, server := range servers {
 		server := server
@@ -856,12 +866,21 @@ func TestGatewayReplaysMoreThan64MiBByteForByteAcrossThreeProviders(t *testing.T
 	}
 
 	largeBody := func() io.Reader { return &largeJSONReader{payloadRemaining: bodySize - largeJSONOverhead} }
-	expected := sha256.New()
-	if _, err := io.Copy(expected, largeBody()); err != nil {
+	expectedOriginal := sha256.New()
+	if _, err := io.Copy(expectedOriginal, largeBody()); err != nil {
 		t.Fatal(err)
 	}
-	var expectedSum [sha256.Size]byte
-	copy(expectedSum[:], expected.Sum(nil))
+	var expectedOriginalSum [sha256.Size]byte
+	copy(expectedOriginalSum[:], expectedOriginal.Sum(nil))
+	expectedPatched := sha256.New()
+	if _, err := io.Copy(expectedPatched, &largeJSONReader{
+		prefix:           strings.Replace(largeJSONPrefix, `"disabled"`, `"adaptive"`, 1),
+		payloadRemaining: bodySize - largeJSONOverhead,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var expectedPatchedSum [sha256.Size]byte
+	copy(expectedPatchedSum[:], expectedPatched.Sum(nil))
 	leases := make([]scheduler.AttemptLease, 3)
 	for index, item := range providers {
 		leases[index] = leaseFor(item, "large-model")
@@ -881,8 +900,12 @@ func TestGatewayReplaysMoreThan64MiBByteForByteAcrossThreeProviders(t *testing.T
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
 	for index, got := range observations {
-		if got.size != bodySize || got.sum != expectedSum {
-			t.Fatalf("provider %d observation = size %d hash %x, want size %d hash %x", index+1, got.size, got.sum, bodySize, expectedSum)
+		want := expectedPatchedSum
+		if index == 1 {
+			want = expectedOriginalSum
+		}
+		if got.size != bodySize || got.sum != want {
+			t.Fatalf("provider %d observation = size %d hash %x, want size %d hash %x", index+1, got.size, got.sum, bodySize, want)
 		}
 	}
 	entries, err := os.ReadDir(tempDir)
@@ -894,11 +917,12 @@ func TestGatewayReplaysMoreThan64MiBByteForByteAcrossThreeProviders(t *testing.T
 	}
 }
 
-const largeJSONPrefix = `{"model":"large-model","messages":[{"role":"user","content":"`
+const largeJSONPrefix = `{"model":"large-model","thinking":{"type":"disabled"},"messages":[{"role":"user","content":"`
 const largeJSONSuffix = `"}]}`
 const largeJSONOverhead = int64(len(largeJSONPrefix) + len(largeJSONSuffix))
 
 type largeJSONReader struct {
+	prefix           string
 	prefixPosition   int
 	payloadRemaining int64
 	payloadPosition  int64
@@ -906,8 +930,12 @@ type largeJSONReader struct {
 }
 
 func (r *largeJSONReader) Read(p []byte) (int, error) {
-	if r.prefixPosition < len(largeJSONPrefix) {
-		n := copy(p, largeJSONPrefix[r.prefixPosition:])
+	prefix := r.prefix
+	if prefix == "" {
+		prefix = largeJSONPrefix
+	}
+	if r.prefixPosition < len(prefix) {
+		n := copy(p, prefix[r.prefixPosition:])
 		r.prefixPosition += n
 		return n, nil
 	}

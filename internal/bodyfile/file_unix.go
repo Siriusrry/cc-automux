@@ -1,11 +1,11 @@
 //go:build !windows
 
-package gateway
+package bodyfile
 
 import "os"
 
-func createReplayFile(directory string) (*os.File, error) {
-	file, err := os.CreateTemp(directory, "cc-automux-request-*")
+func createBodyFile(directory string) (*os.File, error) {
+	file, err := os.CreateTemp(directory, "cc-automux-body-*")
 	if err != nil {
 		return nil, err
 	}
@@ -14,8 +14,8 @@ func createReplayFile(directory string) (*os.File, error) {
 		_ = os.Remove(file.Name())
 		return nil, err
 	}
-	// An open-but-unlinked file is removed by the kernel even if the process
-	// exits without running request cleanup.
+	// Keep the descriptor alive only for this request.  This also ensures a
+	// process crash cannot leave a body file in the temporary directory.
 	if err := os.Remove(file.Name()); err != nil {
 		_ = file.Close()
 		_ = os.Remove(file.Name())

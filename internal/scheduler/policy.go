@@ -52,6 +52,11 @@ func DefaultPolicy() Policy {
 // It is intentionally independent from the health and affinity policy.
 func DefaultAttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: defaultMaxAttempts} }
 
+// DefaultClassifierAttemptPolicy is the immutable one-attempt classifier
+// budget carried by runtime snapshots. Classifier traffic uses it independently
+// from the normal request budget.
+func DefaultClassifierAttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: 1} }
+
 // ResolveAttemptPolicy reads and validates the immutable request budget from a
 // runtime snapshot. It never supplies a request-path default.
 func ResolveAttemptPolicy(snapshot Snapshot) (AttemptPolicy, error) {

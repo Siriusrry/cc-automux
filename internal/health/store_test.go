@@ -52,10 +52,9 @@ func TestReconcileCreatesUnknownTwoLayerSnapshot(t *testing.T) {
 
 func testProvider(id, generation string, disableHealth bool, models ...string) *provider.CompiledProvider {
 	return &provider.CompiledProvider{
-		ID:            id,
-		Generation:    provider.ProviderGeneration(generation),
-		DisableHealth: disableHealth,
-		Models:        append([]string(nil), models...),
-		Enabled:       true,
+		CompiledTarget: provider.CompiledTarget{ID: id, Generation: provider.ProviderGeneration(generation)},
+		DisableHealth:  disableHealth,
+		Models:         append([]string(nil), models...),
+		Enabled:        true,
 	}
 }

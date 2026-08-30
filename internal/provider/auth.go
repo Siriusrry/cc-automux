@@ -12,8 +12,8 @@ var ErrProviderKeyEmpty = errors.New("provider api key is empty")
 // provider credential. It never forwards gateway/client Authorization or
 // x-api-key values. An empty key fails closed even for a provider that was
 // compiled while disabled or model-less.
-func (p *CompiledProvider) ApplyAuthHeaders(headers http.Header) error {
-	if p == nil || p.APIKey == "" {
+func (t *CompiledTarget) ApplyAuthHeaders(headers http.Header) error {
+	if t == nil || t.APIKey == "" {
 		return ErrProviderKeyEmpty
 	}
 	if headers == nil {
@@ -24,10 +24,10 @@ func (p *CompiledProvider) ApplyAuthHeaders(headers http.Header) error {
 			delete(headers, key)
 		}
 	}
-	if p.UseXAPIKey {
-		headers.Set("X-Api-Key", p.APIKey)
+	if t.UseXAPIKey {
+		headers.Set("X-Api-Key", t.APIKey)
 		return nil
 	}
-	headers.Set("Authorization", "Bearer "+p.APIKey)
+	headers.Set("Authorization", "Bearer "+t.APIKey)
 	return nil
 }

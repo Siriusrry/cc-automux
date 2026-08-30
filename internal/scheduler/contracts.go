@@ -4,15 +4,16 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 type ProviderGeneration = provider.ProviderGeneration
 
-type TrafficClass string
+type TrafficClass = traffic.RequestType
 
 const (
-	TrafficClassNormal     TrafficClass = "normal"
-	TrafficClassClassifier TrafficClass = "classifier"
+	TrafficClassNormal     = traffic.RequestTypeNormal
+	TrafficClassClassifier = traffic.RequestTypeClassifier
 )
 
 type StickyKey struct {
@@ -27,7 +28,6 @@ const (
 	StaticActive           StaticAvailability = "active"
 	StaticDisabledProvider StaticAvailability = "disabled_provider"
 	StaticNoModels         StaticAvailability = "no_models"
-	StaticPatchUnavailable StaticAvailability = "patch_unavailable"
 )
 
 type GlobalHealthState string

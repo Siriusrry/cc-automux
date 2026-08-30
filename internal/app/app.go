@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/gateway"
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/management"
-	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 type Options struct {
@@ -26,7 +28,7 @@ type Options struct {
 	Stdout       io.Writer
 	Stderr       io.Writer
 	LogOpener    LogOpener
-	Registry     *provider.Registry
+	Registry     *patch.Registry
 	Restart      func() error
 	Exec         func() error
 	RestartDelay time.Duration
@@ -69,7 +71,7 @@ func New(options Options) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry := provider.DefaultRegistry()
+	registry := patch.DefaultRegistry()
 	if options.Registry != nil && !options.Registry.Empty() {
 		registry = *options.Registry
 	}
@@ -107,11 +109,12 @@ func New(options Options) (*App, error) {
 
 	policy := scheduler.DefaultPolicy()
 	managerOptions := runtime.Options{
-		Registry:      &registry,
-		AttemptPolicy: scheduler.DefaultAttemptPolicy(),
-		RestartDelay:  options.RestartDelay,
-		Now:           options.Now,
-		Preflight:     options.Preflight,
+		Registry:                &registry,
+		AttemptPolicy:           scheduler.DefaultAttemptPolicy(),
+		ClassifierAttemptPolicy: scheduler.DefaultClassifierAttemptPolicy(),
+		RestartDelay:            options.RestartDelay,
+		Now:                     options.Now,
+		Preflight:               options.Preflight,
 	}
 	if managerOptions.RestartDelay == 0 {
 		managerOptions.RestartDelay = 250 * time.Millisecond
@@ -198,10 +201,18 @@ func New(options Options) (*App, error) {
 	}
 	app.health = healthStore
 	app.selector = selector
+	flowRegistry, flowErr := flow.NewRegistry(flow.NewNormalPlanner())
+	if flowErr != nil {
+		closeResources(app.logs, app.listener)
+		return nil, fmt.Errorf("initialize flow registry: %w", flowErr)
+	}
 	app.gateway = gateway.NewWithOptions(app.snapshotForGateway, selector, gateway.Options{
-		Recorder: gateway.EventRecorderFunc(app.recordGatewayEvent),
+		Recorder:         gateway.EventRecorderFunc(app.recordGatewayEvent),
+		DetectorRegistry: traffic.DefaultRegistry(),
+		FlowDispatcher:   flow.NewDispatcher(flowRegistry),
 	})
 	app.management = management.NewWithOptions(manager, management.Options{
+		Registry:       &registry,
 		Health:         healthStore,
 		Selector:       selector,
 		Sync:           app.syncRuntime,

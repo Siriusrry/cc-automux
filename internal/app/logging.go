@@ -216,7 +216,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		cooldownUntil = event.CooldownUntil.UTC().Format(time.RFC3339Nano)
 	}
 	target.Printf(
-		"gateway kind=%s provider_id=%q provider_name=%q session_id=%q model=%q traffic_class=%q attempt=%d upstream_url=%q http_status=%d raw_error=%q next_provider_id=%q next_provider_name=%q next_attempt=%d next_upstream_url=%q global_health=%q channel_health=%q global_entered_cooldown=%t channel_entered_cooldown=%t cooldown_until=%q",
+		"gateway kind=%s provider_id=%q provider_name=%q session_id=%q model=%q traffic_class=%q attempt=%d upstream_url=%q http_status=%d raw_error=%q patch_id=%q patch_stage=%q next_provider_id=%q next_provider_name=%q next_attempt=%d next_upstream_url=%q global_health=%q channel_health=%q global_entered_cooldown=%t channel_entered_cooldown=%t cooldown_until=%q",
 		event.Kind,
 		event.ProviderID,
 		event.ProviderName,
@@ -227,6 +227,8 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		event.UpstreamURL,
 		event.HTTPStatus,
 		event.RawError,
+		event.PatchID,
+		event.PatchStage,
 		event.NextProviderID,
 		event.NextProviderName,
 		event.NextAttempt,

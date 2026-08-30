@@ -1,14 +1,18 @@
 package runtime
 
 import (
+	"bytes"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
@@ -86,9 +90,13 @@ func TestHotApplyPublishesOnlyAfterPersist(t *testing.T) {
 
 func TestSnapshotCarriesAttemptPolicyAcrossRevisions(t *testing.T) {
 	attempts := scheduler.AttemptPolicy{MaxAttempts: 2}
-	manager, _, cfg := newRuntimeManager(t, Options{AttemptPolicy: attempts})
+	classifierAttempts := scheduler.AttemptPolicy{MaxAttempts: 1}
+	manager, _, cfg := newRuntimeManager(t, Options{AttemptPolicy: attempts, ClassifierAttemptPolicy: classifierAttempts})
 	if got := manager.Snapshot().AttemptPolicy(); got != attempts {
 		t.Fatalf("initial attempt policy = %#v", got)
+	}
+	if got := manager.Snapshot().ClassifierAttemptPolicy(); got != classifierAttempts {
+		t.Fatalf("initial classifier attempt policy = %#v", got)
 	}
 	next := cfg.Clone()
 	next.Auth.GatewayKey = "gateway-key"
@@ -98,10 +106,16 @@ func TestSnapshotCarriesAttemptPolicyAcrossRevisions(t *testing.T) {
 	if got := manager.Snapshot().AttemptPolicy(); got != attempts {
 		t.Fatalf("hot-applied attempt policy = %#v", got)
 	}
+	if got := manager.Snapshot().ClassifierAttemptPolicy(); got != classifierAttempts {
+		t.Fatalf("hot-applied classifier attempt policy = %#v", got)
+	}
 
 	defaultManager, _, _ := newRuntimeManager(t, Options{})
 	if got := defaultManager.Snapshot().AttemptPolicy(); got != scheduler.DefaultAttemptPolicy() {
 		t.Fatalf("default attempt policy = %#v", got)
+	}
+	if got := defaultManager.Snapshot().ClassifierAttemptPolicy(); got != scheduler.DefaultClassifierAttemptPolicy() {
+		t.Fatalf("default classifier attempt policy = %#v", got)
 	}
 }
 
@@ -115,6 +129,11 @@ func TestNewManagerRejectsInvalidAttemptPolicy(t *testing.T) {
 		AttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: -1},
 	}); err == nil || !strings.Contains(err.Error(), "attempt policy") {
 		t.Fatalf("invalid attempt policy error = %v", err)
+	}
+	if _, err := NewManager(store, runtimeConfig(), Options{
+		ClassifierAttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: -1},
+	}); err == nil || !strings.Contains(err.Error(), "classifier attempt policy") {
+		t.Fatalf("invalid classifier attempt policy error = %v", err)
 	}
 }
 
@@ -136,6 +155,84 @@ func (s *failingConfigStore) SavePending(cfg config.Config) error {
 		return errors.New("pending save failed")
 	}
 	return s.Store.SavePending(cfg)
+}
+
+func TestPatchPlanHotApplyAndAliasGenerationIsolation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := runtimeConfig()
+	cfg.Providers[0].Patches = []string{patch.CLIProxyAPIClassifierSessionID}
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	failing := &failingConfigStore{Store: store}
+	manager, err := NewManager(failing, cfg, Options{Preflight: func(config.Config, config.Config) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldSnapshot := manager.Snapshot()
+	oldProvider := onlyRuntimeProvider(t, oldSnapshot)
+	if got := oldProvider.PatchPlan.IDs(); len(got) != 1 || got[0] != patch.CLIProxyAPIClassifierSessionID {
+		t.Fatalf("old patch plan = %#v", got)
+	}
+	oldAlias := runtimeClassifierAlias(t, oldProvider, "session-a")
+	if again := runtimeClassifierAlias(t, oldProvider, "session-a"); again != oldAlias {
+		t.Fatalf("alias changed within old generation: %q != %q", again, oldAlias)
+	}
+
+	next := cfg.Clone()
+	next.Providers[0].Patches = []string{
+		patch.CLIProxyAPIClassifierSessionID,
+		patch.GPTClassifierResponseReassemblyID,
+	}
+	failing.failSave = true
+	if _, err := manager.Apply(next); err == nil || !strings.Contains(err.Error(), "disk save failed") {
+		t.Fatalf("failed hot apply error = %v", err)
+	}
+	failedSnapshot := manager.Snapshot()
+	failedProvider := onlyRuntimeProvider(t, failedSnapshot)
+	if failedSnapshot.Revision() != oldSnapshot.Revision() || failedProvider.Generation != oldProvider.Generation {
+		t.Fatalf("failed apply published revision/generation: revision %d, generation %s", failedSnapshot.Revision(), failedProvider.Generation)
+	}
+	if got := failedProvider.PatchPlan.IDs(); len(got) != 1 || got[0] != patch.CLIProxyAPIClassifierSessionID {
+		t.Fatalf("failed apply published patch plan = %#v", got)
+	}
+
+	failing.failSave = false
+	result, err := manager.Apply(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSnapshot := manager.Snapshot()
+	newProvider := onlyRuntimeProvider(t, newSnapshot)
+	if !result.Applied || result.Revision != oldSnapshot.Revision()+1 || newSnapshot.Revision() != result.Revision {
+		t.Fatalf("successful hot apply = %#v, snapshot revision %d", result, newSnapshot.Revision())
+	}
+	if got := newProvider.PatchPlan.IDs(); len(got) != 2 || got[0] != patch.CLIProxyAPIClassifierSessionID || got[1] != patch.GPTClassifierResponseReassemblyID {
+		t.Fatalf("new patch plan = %#v", got)
+	}
+	if newProvider.Generation == oldProvider.Generation {
+		t.Fatalf("patch plan change retained generation %s", newProvider.Generation)
+	}
+
+	oldAfterApply := onlyRuntimeProvider(t, oldSnapshot)
+	if oldAfterApply.Generation != oldProvider.Generation {
+		t.Fatalf("old snapshot generation changed: %s != %s", oldAfterApply.Generation, oldProvider.Generation)
+	}
+	if got := oldAfterApply.PatchPlan.IDs(); len(got) != 1 || got[0] != patch.CLIProxyAPIClassifierSessionID {
+		t.Fatalf("old snapshot patch plan changed = %#v", got)
+	}
+	newAlias := runtimeClassifierAlias(t, newProvider, "session-a")
+	if newAlias == oldAlias {
+		t.Fatalf("alias was reused across generations: %q", newAlias)
+	}
+	if oldAgain := runtimeClassifierAlias(t, oldAfterApply, "session-a"); oldAgain != oldAlias {
+		t.Fatalf("old-generation alias changed after hot apply: %q != %q", oldAgain, oldAlias)
+	}
 }
 
 func TestPersistenceFailureLeavesDiskAndSnapshotUnchanged(t *testing.T) {
@@ -334,4 +431,58 @@ func TestNewManagerBlocksSubmissionsWhenPendingCleanupSurvives(t *testing.T) {
 	}
 }
 
-func providerRegistry() provider.Registry { return provider.DefaultRegistry() }
+func providerRegistry() patch.Registry { return patch.DefaultRegistry() }
+
+func onlyRuntimeProvider(t *testing.T, snapshot *Snapshot) *provider.CompiledProvider {
+	t.Helper()
+	providers := snapshot.Providers()
+	if len(providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(providers))
+	}
+	return providers[0]
+}
+
+func runtimeClassifierAlias(t *testing.T, compiled *provider.CompiledProvider, sessionID string) string {
+	t.Helper()
+	body, err := bodyfile.Capture(bytes.NewBufferString(`{"model":"model"}`), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &patch.MutableRequest{
+		Body:    body,
+		Headers: patch.NewHTTPHeaderSet(make(http.Header)),
+	}
+	context := patch.PatchContext{
+		RequestType:       patch.RequestTypeClassifier,
+		OriginalModel:     "model",
+		EffectiveModel:    "model",
+		OriginalSessionID: sessionID,
+		TargetID:          compiled.ID,
+		Generation:        compiled.Generation.String(),
+	}
+	execution, err := compiled.PatchPlan.NewInstance(context)
+	if err != nil {
+		_ = body.Close()
+		t.Fatal(err)
+	}
+	if err := execution.ApplyRequestOnly(request); err != nil {
+		_ = execution.Close()
+		_ = request.Body.Close()
+		_ = body.Close()
+		t.Fatal(err)
+	}
+	alias, ok := request.Headers.Get("X-Claude-Code-Session-Id")
+	if !ok || alias == "" {
+		t.Fatalf("isolated session header = %q, present %v", alias, ok)
+	}
+	if err := execution.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := request.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return alias
+}

@@ -181,6 +181,7 @@ func (c Config) Validate() error {
 		if p.TLS.CAFile != "" && p.TLS.InsecureSkipVerify {
 			return validation(prefix+".tls", "ca_file and insecure_skip_verify are mutually exclusive")
 		}
+		seenPatches := make(map[string]struct{}, len(p.Patches))
 		for j, patch := range p.Patches {
 			if patch == "" || strings.TrimSpace(patch) == "" {
 				return validation(fmt.Sprintf("%s.patches[%d]", prefix, j), "must not be empty")
@@ -188,6 +189,10 @@ func (c Config) Validate() error {
 			if containsControl(patch) {
 				return validation(fmt.Sprintf("%s.patches[%d]", prefix, j), "must not contain control characters")
 			}
+			if _, exists := seenPatches[patch]; exists {
+				return validation(fmt.Sprintf("%s.patches[%d]", prefix, j), "duplicates an earlier patch id")
+			}
+			seenPatches[patch] = struct{}{}
 		}
 	}
 	return nil

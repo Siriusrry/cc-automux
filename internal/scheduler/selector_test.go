@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 )
 
@@ -205,10 +206,10 @@ func TestStaticAvailabilityOf(t *testing.T) {
 
 	patched := compileProviderConfig(t, config.ProviderConfig{
 		ID: providerC, Name: "patched", BaseURL: "https://patched.example", APIKey: "key",
-		Enabled: true, Models: []string{"Model"}, Patches: []string{provider.PatchAnyRouter},
+		Enabled: true, Models: []string{"Model"}, Patches: []string{patch.AnyRouterSubagentThinkingID},
 	})
-	if got := StaticAvailabilityOf(patched); got != StaticPatchUnavailable {
-		t.Fatalf("unimplemented-patch availability = %q", got)
+	if got := StaticAvailabilityOf(patched); got != StaticActive {
+		t.Fatalf("executable-patch availability = %q", got)
 	}
 }
 
@@ -260,23 +261,23 @@ func TestPriorityRoundRobinStickyAndExactModel(t *testing.T) {
 	}
 }
 
-func TestStaticUnavailableCandidatesNeverReachHealth(t *testing.T) {
+func TestExecutablePatchCandidatesRemainEligible(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, Policy{}, nil)
 	patched := compileProviderConfig(t, config.ProviderConfig{
 		ID: providerA, Name: "patched", BaseURL: "https://patched.example", APIKey: "key",
-		Enabled: true, Models: []string{"m"}, Priority: 100, Patches: []string{provider.PatchAnyRouter},
+		Enabled: true, Models: []string{"m"}, Priority: 100, Patches: []string{patch.AnyRouterSubagentThinkingID},
 	})
 	active := compileProvider(t, providerB, "active", []string{"m"}, 0)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{patched, active}}
 	selector.Reconcile(snapshot)
 	lease, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
-	if got := providerID(t, lease, err); got != providerB {
+	if got := providerID(t, lease, err); got != providerA {
 		t.Fatalf("selected provider = %s", got)
 	}
 	health.mu.Lock()
 	defer health.mu.Unlock()
-	if len(health.acquired) != 1 || health.acquired[0].ProviderID != providerB {
+	if len(health.acquired) != 1 || health.acquired[0].ProviderID != providerA {
 		t.Fatalf("health acquisitions = %#v", health.acquired)
 	}
 }

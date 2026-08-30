@@ -1,6 +1,6 @@
 //go:build windows
 
-package gateway
+package bodyfile
 
 import (
 	"crypto/rand"
@@ -16,7 +16,7 @@ const (
 	fileFlagDeleteOnClose  = 0x04000000
 )
 
-func createReplayFile(directory string) (*os.File, error) {
+func createBodyFile(directory string) (*os.File, error) {
 	if directory == "" {
 		directory = os.TempDir()
 	}
@@ -25,7 +25,7 @@ func createReplayFile(directory string) (*os.File, error) {
 		if _, err := rand.Read(random[:]); err != nil {
 			return nil, err
 		}
-		name := filepath.Join(directory, "cc-automux-request-"+hex.EncodeToString(random[:]))
+		name := filepath.Join(directory, "cc-automux-body-"+hex.EncodeToString(random[:]))
 		name16, err := syscall.UTF16PtrFromString(name)
 		if err != nil {
 			return nil, err
@@ -48,7 +48,7 @@ func createReplayFile(directory string) (*os.File, error) {
 		file := os.NewFile(uintptr(handle), name)
 		if file == nil {
 			_ = syscall.CloseHandle(handle)
-			return nil, errors.New("could not wrap request replay handle")
+			return nil, errors.New("could not wrap body file handle")
 		}
 		if err := file.Chmod(0o600); err != nil {
 			_ = file.Close()
@@ -56,5 +56,5 @@ func createReplayFile(directory string) (*os.File, error) {
 		}
 		return file, nil
 	}
-	return nil, errors.New("could not create a unique request replay file")
+	return nil, errors.New("could not create a unique body file")
 }

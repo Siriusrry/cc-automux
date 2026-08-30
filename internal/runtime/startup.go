@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 )
 
@@ -22,12 +23,12 @@ type StartupCandidate struct {
 	warning        error
 }
 
-func LoadStartup(store *config.Store, registry provider.Registry) (*StartupCandidate, error) {
+func LoadStartup(store *config.Store, registry patch.Registry) (*StartupCandidate, error) {
 	if store == nil {
 		return nil, errors.New("configuration store is required")
 	}
 	if registry.Empty() {
-		registry = provider.DefaultRegistry()
+		registry = patch.DefaultRegistry()
 	}
 	active, err := store.Load()
 	if err != nil {

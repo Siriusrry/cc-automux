@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
@@ -44,8 +45,9 @@ type RestartStatus struct {
 }
 
 type Options struct {
-	Registry      *provider.Registry
-	AttemptPolicy scheduler.AttemptPolicy
+	Registry                *patch.Registry
+	AttemptPolicy           scheduler.AttemptPolicy
+	ClassifierAttemptPolicy scheduler.AttemptPolicy
 	// Preflight runs after full schema/provider compilation but before the
 	// pending file is written. Nil uses a loopback listener probe when the
 	// address changes and relies on config validation for the log limit.
@@ -70,12 +72,13 @@ type ConfigStore interface {
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	store    ConfigStore
-	registry provider.Registry
-	current  atomic.Pointer[Snapshot]
-	revision uint64
-	attempts scheduler.AttemptPolicy
+	mu                 sync.Mutex
+	store              ConfigStore
+	registry           patch.Registry
+	current            atomic.Pointer[Snapshot]
+	revision           uint64
+	attempts           scheduler.AttemptPolicy
+	classifierAttempts scheduler.AttemptPolicy
 
 	preflight    func(current, next config.Config) error
 	restart      func() error
@@ -95,7 +98,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	if err := initial.Validate(); err != nil {
 		return nil, err
 	}
-	registry := provider.DefaultRegistry()
+	registry := patch.DefaultRegistry()
 	if options.Registry != nil && !options.Registry.Empty() {
 		registry = *options.Registry
 	}
@@ -110,6 +113,13 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	if err := attempts.Validate(); err != nil {
 		return nil, fmt.Errorf("attempt policy: %w", err)
 	}
+	classifierAttempts := options.ClassifierAttemptPolicy
+	if classifierAttempts == (scheduler.AttemptPolicy{}) {
+		classifierAttempts = scheduler.DefaultClassifierAttemptPolicy()
+	}
+	if err := classifierAttempts.Validate(); err != nil {
+		return nil, fmt.Errorf("classifier attempt policy: %w", err)
+	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
@@ -120,16 +130,17 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	}
 	startedAt := now()
 	m := &Manager{
-		store:         store,
-		registry:      registry,
-		revision:      1,
-		attempts:      attempts,
-		preflight:     preflight,
-		restart:       options.Restart,
-		restartDelay:  options.RestartDelay,
-		now:           now,
-		startedAt:     startedAt,
-		restartStatus: RestartStatus{State: "idle"},
+		store:              store,
+		registry:           registry,
+		revision:           1,
+		attempts:           attempts,
+		classifierAttempts: classifierAttempts,
+		preflight:          preflight,
+		restart:            options.Restart,
+		restartDelay:       options.RestartDelay,
+		now:                now,
+		startedAt:          startedAt,
+		restartStatus:      RestartStatus{State: "idle"},
 	}
 	if options.InitialRestartError != nil {
 		m.restartStatus.State = "failed"
@@ -147,7 +158,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	m.current.Store(newSnapshot(m.revision, initial, catalog, m.attempts, startedAt))
+	m.current.Store(newSnapshot(m.revision, initial, catalog, m.attempts, m.classifierAttempts, startedAt))
 	return m, nil
 }
 
@@ -161,7 +172,7 @@ func (m *Manager) Snapshot() *Snapshot {
 	return current
 }
 
-func (m *Manager) Registry() provider.Registry { return m.registry }
+func (m *Manager) Registry() patch.Registry { return m.registry }
 
 func (m *Manager) StartedAt() time.Time {
 	if m == nil {
@@ -229,7 +240,7 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 			return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
 		}
 		m.revision++
-		m.current.Store(newSnapshot(m.revision, next, catalog, m.attempts, m.now()))
+		m.current.Store(newSnapshot(m.revision, next, catalog, m.attempts, m.classifierAttempts, m.now()))
 		m.restartStatus = RestartStatus{State: "idle"}
 		return ApplyResult{
 			Revision:   m.revision,
@@ -345,7 +356,7 @@ func (m *Manager) RestartSucceeded() error {
 		return err
 	}
 	m.revision++
-	m.current.Store(newSnapshot(m.revision, pending, catalog, m.attempts, m.now()))
+	m.current.Store(newSnapshot(m.revision, pending, catalog, m.attempts, m.classifierAttempts, m.now()))
 	m.restartTriggered = false
 	m.restartStatus = RestartStatus{State: "idle"}
 	return nil

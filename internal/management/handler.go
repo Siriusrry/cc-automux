@@ -13,7 +13,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/health"
-	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	productversion "github.com/Siriusrry/cc-automux/internal/version"
@@ -29,7 +29,7 @@ var errProviderNotFound = errors.New("provider not found")
 type Options struct {
 	MaxBodyBytes   int64
 	Version        string
-	Registry       *provider.Registry
+	Registry       *patch.Registry
 	Health         *health.Store
 	Selector       scheduler.Selector
 	Sync           func()
@@ -40,7 +40,7 @@ type Handler struct {
 	manager        *runtime.Manager
 	maxBodyBytes   int64
 	version        string
-	registry       provider.Registry
+	registry       patch.Registry
 	health         *health.Store
 	selector       scheduler.Selector
 	syncRuntime    func()
@@ -52,7 +52,7 @@ func New(manager *runtime.Manager) *Handler {
 }
 
 func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
-	registry := provider.DefaultRegistry()
+	registry := patch.DefaultRegistry()
 	if manager != nil {
 		registry = manager.Registry()
 	}
@@ -308,7 +308,7 @@ func (h *Handler) handlePatches(w http.ResponseWriter, r *http.Request) {
 	}
 	items := h.registry.List()
 	if items == nil {
-		items = []provider.PatchMetadata{}
+		items = []patch.PatchMetadata{}
 	}
 	writeJSON(w, http.StatusOK, items)
 }
@@ -657,7 +657,7 @@ func (h *Handler) writeApplyError(w http.ResponseWriter, err error) {
 		return
 	}
 	var validationErr *config.ValidationError
-	if errors.As(err, &validationErr) || errors.Is(err, provider.ErrUnknownPatch) || errors.Is(err, provider.ErrPatchNotImplemented) {
+	if errors.As(err, &validationErr) || errors.Is(err, patch.ErrUnknownPatch) || errors.Is(err, patch.ErrDuplicatePatch) || errors.Is(err, patch.ErrPatchConflict) || errors.Is(err, patch.ErrInvalidDefinition) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
 		return
 	}
