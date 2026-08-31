@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -35,6 +36,17 @@ const (
 	AutoModeFixedProvider = "fixed_provider"
 )
 
+// Claude Code path modes are intentionally closed schema values. The empty
+// path value is meaningful only with PathModeDefault.
+const (
+	PathModeDefault = "default"
+	PathModeCustom  = "custom"
+)
+
+// ErrActiveProfileReadOnly identifies an attempt to supply the server-owned
+// active profile state through a client configuration update.
+var ErrActiveProfileReadOnly = errors.New("active_profile_id is server-managed and read-only")
+
 // Fixed provider protocol identifiers are schema values, not an indication
 // that a protocol adapter is currently available at runtime.  Adapters are
 // looked up by the execution layer and a missing implementation fails closed.
@@ -51,6 +63,7 @@ type Config struct {
 	Service       ServiceConfig    `json:"service"`
 	Auth          AuthConfig       `json:"auth"`
 	AutoMode      AutoModeConfig   `json:"auto_mode"`
+	Harnesses     HarnessesConfig  `json:"harnesses"`
 	Providers     []ProviderConfig `json:"providers"`
 }
 
@@ -62,6 +75,99 @@ type ServiceConfig struct {
 type AuthConfig struct {
 	GatewayKey    string `json:"gateway_key"`
 	ManagementKey string `json:"management_key"`
+}
+
+// HarnessesConfig contains the persisted configuration for the supported
+// harness adapters. The value form deliberately keeps the Claude Code object
+// present in every normalized v1 configuration, even before activation.
+type HarnessesConfig struct {
+	ClaudeCode ClaudeCodeConfig `json:"claude_code"`
+}
+
+// ClaudeCodeConfig is the persistent, file-independent portion of the Claude
+// Code harness configuration. External settings.json semantics belong to the
+// harnessconfig package; this type only describes durable CC AutoMux state.
+type ClaudeCodeConfig struct {
+	PathMode         string    `json:"path_mode"`
+	SettingsPath     string    `json:"settings_path"`
+	DisableTelemetry bool      `json:"disable_telemetry"`
+	ActiveProfileID  string    `json:"active_profile_id"`
+	Profiles         []Profile `json:"profiles"`
+}
+
+// Profile stores one immutable-by-ID model mapping. Empty optional model
+// fields mean that the corresponding Claude Code setting is unset.
+type Profile struct {
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	HaikuModel           string `json:"haiku_model"`
+	SonnetModel          string `json:"sonnet_model"`
+	OpusModel            string `json:"opus_model"`
+	FableModel           string `json:"fable_model"`
+	SubagentModel        string `json:"subagent_model"`
+	TeammateDefaultModel string `json:"teammate_default_model"`
+}
+
+func DefaultClaudeCodeConfig() ClaudeCodeConfig {
+	return ClaudeCodeConfig{
+		PathMode:         PathModeDefault,
+		SettingsPath:     "",
+		DisableTelemetry: true,
+		ActiveProfileID:  "",
+		Profiles:         []Profile{},
+	}
+}
+
+func DefaultHarnesses() HarnessesConfig {
+	return HarnessesConfig{ClaudeCode: DefaultClaudeCodeConfig()}
+}
+
+func (p Profile) Clone() Profile { return p }
+
+// Normalize is intentionally a no-op for Profile. It is present so callers
+// can normalize a complete schema recursively without special cases.
+func (p Profile) Normalize() Profile { return p.Clone() }
+
+func (p Profile) Validate() error { return validateProfile("profile", p.Normalize()) }
+
+func (c ClaudeCodeConfig) Clone() ClaudeCodeConfig {
+	out := c
+	out.Profiles = cloneProfiles(c.Profiles)
+	return out
+}
+
+func (c ClaudeCodeConfig) Normalize() ClaudeCodeConfig {
+	out := c.Clone()
+	if out.PathMode == "" {
+		out.PathMode = PathModeDefault
+	}
+	if out.Profiles == nil {
+		out.Profiles = []Profile{}
+	}
+	for i := range out.Profiles {
+		out.Profiles[i] = out.Profiles[i].Normalize()
+	}
+	return out
+}
+
+func (c ClaudeCodeConfig) Validate() error {
+	return validateClaudeCode("harnesses.claude_code", c.Normalize())
+}
+
+func (h HarnessesConfig) Clone() HarnessesConfig {
+	out := h
+	out.ClaudeCode = h.ClaudeCode.Clone()
+	return out
+}
+
+func (h HarnessesConfig) Normalize() HarnessesConfig {
+	out := h.Clone()
+	out.ClaudeCode = out.ClaudeCode.Normalize()
+	return out
+}
+
+func (h HarnessesConfig) Validate() error {
+	return h.ClaudeCode.Validate()
 }
 
 // AutoModeConfig is the persisted classifier routing configuration.  The
@@ -137,6 +243,7 @@ func Default() Config {
 			Model:         "",
 			FixedProvider: nil,
 		},
+		Harnesses: DefaultHarnesses(),
 		Providers: []ProviderConfig{},
 	}
 }
@@ -145,6 +252,7 @@ func Default() Config {
 // boundary and must never share mutable slices with an active snapshot.
 func (c Config) Clone() Config {
 	out := c
+	out.Harnesses = c.Harnesses.Clone()
 	if c.AutoMode.FixedProvider != nil {
 		fixed := *c.AutoMode.FixedProvider
 		fixed.Patches = cloneStrings(c.AutoMode.FixedProvider.Patches)
@@ -170,6 +278,7 @@ func (c Config) Normalize() Config {
 	if out.AutoMode.FixedProvider != nil && out.AutoMode.FixedProvider.Patches == nil {
 		out.AutoMode.FixedProvider.Patches = []string{}
 	}
+	out.Harnesses = out.Harnesses.Normalize()
 	if out.Providers == nil {
 		out.Providers = []ProviderConfig{}
 	}
@@ -213,6 +322,9 @@ func (c Config) Validate() error {
 		}
 	}
 	if err := validateAutoMode(c.AutoMode); err != nil {
+		return err
+	}
+	if err := c.Harnesses.Validate(); err != nil {
 		return err
 	}
 
@@ -278,6 +390,113 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// ApplyClientUpdate prepares a complete configuration received from a client.
+// The active profile ID is server-owned: a non-empty value is never accepted
+// from the client, while an omitted value inherits the current server state
+// unless an active-profile input changed and therefore invalidates it.
+func (current Config) ApplyClientUpdate(next Config) (Config, error) {
+	current = current.Normalize()
+	next = next.Normalize()
+	if next.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		return Config{}, ErrActiveProfileReadOnly
+	}
+	next = current.prepareServerUpdate(next)
+	if err := next.Validate(); err != nil {
+		return Config{}, err
+	}
+	return next, nil
+}
+
+// ValidateClientUpdate checks the same server-owned-state rules as
+// ApplyClientUpdate without returning the normalized candidate.
+func ValidateClientUpdate(current, next Config) error {
+	_, err := current.ApplyClientUpdate(next)
+	return err
+}
+
+// ApplyServerUpdate prepares a trusted read-modify-write candidate. A server
+// mutator may omit the active ID or leave its current value in place; it may
+// not replace a non-empty ID with another profile. Relevant active inputs are
+// reconciled before the candidate is validated.
+func (current Config) ApplyServerUpdate(next Config) (Config, error) {
+	current = current.Normalize()
+	next = next.Normalize()
+	currentID := current.Harnesses.ClaudeCode.ActiveProfileID
+	nextID := next.Harnesses.ClaudeCode.ActiveProfileID
+	if nextID != "" && nextID != currentID {
+		return Config{}, ErrActiveProfileReadOnly
+	}
+	next = current.prepareServerUpdate(next)
+	if err := next.Validate(); err != nil {
+		return Config{}, err
+	}
+	return next, nil
+}
+
+// ActiveProfileInputsEqual reports whether the inputs that can make a
+// previously verified active profile stale are unchanged. Unrelated Provider
+// and non-active Profile changes do not invalidate the active record.
+func (current Config) ActiveProfileInputsEqual(next Config) bool {
+	current = current.Normalize()
+	next = next.Normalize()
+	activeID := current.Harnesses.ClaudeCode.ActiveProfileID
+	if activeID == "" || next.Harnesses.ClaudeCode.ActiveProfileID != "" && next.Harnesses.ClaudeCode.ActiveProfileID != activeID {
+		return false
+	}
+	if current.Service.ListenAddr != next.Service.ListenAddr || current.Auth.GatewayKey != next.Auth.GatewayKey {
+		return false
+	}
+	left := current.Harnesses.ClaudeCode
+	right := next.Harnesses.ClaudeCode
+	if left.PathMode != right.PathMode || left.SettingsPath != right.SettingsPath || left.DisableTelemetry != right.DisableTelemetry {
+		return false
+	}
+	leftProfile, leftOK := findProfile(left.Profiles, activeID)
+	rightProfile, rightOK := findProfile(right.Profiles, activeID)
+	return leftOK && rightOK && leftProfile == rightProfile
+}
+
+func (current Config) prepareServerUpdate(next Config) Config {
+	current = current.Normalize()
+	next = next.Normalize()
+	activeID := current.Harnesses.ClaudeCode.ActiveProfileID
+	if activeID == "" || !current.ActiveProfileInputsEqual(next) {
+		next.Harnesses.ClaudeCode.ActiveProfileID = ""
+	} else {
+		next.Harnesses.ClaudeCode.ActiveProfileID = activeID
+	}
+	return next
+}
+
+// WithActiveProfileID creates a server-side candidate for the active profile
+// transition. It is intentionally separate from client update handling so only
+// trusted runtime code can record a selected profile.
+func (c Config) WithActiveProfileID(id string) (Config, error) {
+	out := c.Normalize()
+	if id != "" {
+		if !isUUID(id) {
+			return Config{}, validation("harnesses.claude_code.active_profile_id", "must be a canonical UUID")
+		}
+		if _, ok := findProfile(out.Harnesses.ClaudeCode.Profiles, id); !ok {
+			return Config{}, validation("harnesses.claude_code.active_profile_id", "must reference an existing profile")
+		}
+	}
+	out.Harnesses.ClaudeCode.ActiveProfileID = id
+	if err := out.Validate(); err != nil {
+		return Config{}, err
+	}
+	return out, nil
+}
+
+func findProfile(profiles []Profile, id string) (Profile, bool) {
+	for _, profile := range profiles {
+		if profile.ID == id {
+			return profile, true
+		}
+	}
+	return Profile{}, false
 }
 
 // ValidateAutoMode validates an Auto Mode object independently of the root
@@ -349,6 +568,110 @@ func validateAutoMode(a AutoModeConfig) error {
 func validateClassifierModel(field, model string) error {
 	if model == "" {
 		return validation(field, "must not be empty")
+	}
+	if !utf8.ValidString(model) {
+		return validation(field, "must be valid UTF-8")
+	}
+	if len(model) > modelname.MaxBytes {
+		return validation(field, fmt.Sprintf("must not exceed %d UTF-8 bytes", modelname.MaxBytes))
+	}
+	if containsControl(model) {
+		return validation(field, "must not contain control characters")
+	}
+	return nil
+}
+
+func validateClaudeCode(prefix string, value ClaudeCodeConfig) error {
+	switch value.PathMode {
+	case PathModeDefault:
+		if value.SettingsPath != "" {
+			return validation(prefix+".settings_path", "must be empty in default path mode")
+		}
+	case PathModeCustom:
+		if value.SettingsPath == "" {
+			return validation(prefix+".settings_path", "must be a non-empty absolute path in custom mode")
+		}
+		if !filepath.IsAbs(value.SettingsPath) {
+			return validation(prefix+".settings_path", "must be an absolute path in custom mode")
+		}
+		if !utf8.ValidString(value.SettingsPath) {
+			return validation(prefix+".settings_path", "must be valid UTF-8")
+		}
+		if containsControl(value.SettingsPath) {
+			return validation(prefix+".settings_path", "must not contain control characters")
+		}
+	default:
+		return validation(prefix+".path_mode", fmt.Sprintf("unsupported mode %q", value.PathMode))
+	}
+
+	seenIDs := make(map[string]int, len(value.Profiles))
+	seenNames := make(map[string]int, len(value.Profiles))
+	for i, profile := range value.Profiles {
+		profilePrefix := fmt.Sprintf("%s.profiles[%d]", prefix, i)
+		if err := validateProfile(profilePrefix, profile); err != nil {
+			return err
+		}
+		if previous, exists := seenIDs[profile.ID]; exists {
+			return conflict(profilePrefix+".id", fmt.Sprintf("duplicates %s.profiles[%d].id", prefix, previous))
+		}
+		seenIDs[profile.ID] = i
+		if previous, exists := seenNames[profile.Name]; exists {
+			return conflict(profilePrefix+".name", fmt.Sprintf("duplicates %s.profiles[%d].name", prefix, previous))
+		}
+		seenNames[profile.Name] = i
+	}
+	if value.ActiveProfileID != "" {
+		if !isUUID(value.ActiveProfileID) {
+			return validation(prefix+".active_profile_id", "must be a canonical UUID")
+		}
+		if _, exists := seenIDs[value.ActiveProfileID]; !exists {
+			return validation(prefix+".active_profile_id", "must reference an existing profile")
+		}
+	}
+	return nil
+}
+
+func validateProfile(prefix string, profile Profile) error {
+	if !isUUID(profile.ID) {
+		return validation(prefix+".id", "must be a canonical UUID")
+	}
+	if profile.Name == "" {
+		return validation(prefix+".name", "must not be empty")
+	}
+	if strings.TrimSpace(profile.Name) != profile.Name {
+		return validation(prefix+".name", "must not have leading or trailing whitespace")
+	}
+	if !utf8.ValidString(profile.Name) {
+		return validation(prefix+".name", "must be valid UTF-8")
+	}
+	if containsControl(profile.Name) {
+		return validation(prefix+".name", "must not contain control characters")
+	}
+	for _, item := range []struct {
+		field    string
+		model    string
+		required bool
+	}{
+		{field: "haiku_model", model: profile.HaikuModel, required: true},
+		{field: "sonnet_model", model: profile.SonnetModel, required: true},
+		{field: "opus_model", model: profile.OpusModel, required: true},
+		{field: "fable_model", model: profile.FableModel, required: true},
+		{field: "subagent_model", model: profile.SubagentModel},
+		{field: "teammate_default_model", model: profile.TeammateDefaultModel},
+	} {
+		if err := validateProfileModel(prefix+"."+item.field, item.model, item.required); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateProfileModel(field, model string, required bool) error {
+	if model == "" {
+		if required {
+			return validation(field, "must not be empty")
+		}
+		return nil
 	}
 	if !utf8.ValidString(model) {
 		return validation(field, "must be valid UTF-8")
@@ -480,6 +803,15 @@ func cloneStrings(in []string) []string {
 		return nil
 	}
 	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneProfiles(in []Profile) []Profile {
+	if in == nil {
+		return nil
+	}
+	out := make([]Profile, len(in))
 	copy(out, in)
 	return out
 }

@@ -32,7 +32,10 @@ func Decode(data []byte) (Config, error) {
 	if _, ok := raw["auto_mode"]; !ok {
 		return Config{}, validation("auto_mode", "is required and must be a JSON object")
 	}
-	for _, requiredObject := range []string{"service", "auth", "auto_mode", "providers"} {
+	if _, ok := raw["harnesses"]; !ok {
+		return Config{}, validation("harnesses", "is required and must be a JSON object")
+	}
+	for _, requiredObject := range []string{"service", "auth", "auto_mode", "harnesses", "providers"} {
 		if value, ok := raw[requiredObject]; ok && isJSONNull(value) {
 			return Config{}, &SyntaxError{Err: fmt.Errorf("%s must not be null", requiredObject)}
 		}
@@ -50,6 +53,39 @@ func Decode(data []byte) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// DecodeClient parses a complete configuration submitted by a client. The
+// server-owned active profile field is rejected by presence, including an
+// explicit empty value; callers must use the runtime mutation boundary to
+// preserve or change that state.
+func DecodeClient(data []byte) (Config, error) {
+	var raw map[string]json.RawMessage
+	if err := decodeObject(data, &raw); err != nil {
+		return Config{}, err
+	}
+	if raw == nil {
+		return Config{}, &SyntaxError{Err: errors.New("configuration must be a JSON object")}
+	}
+	if err := checkConfigKeys(raw); err != nil {
+		return Config{}, &SyntaxError{Err: err}
+	}
+	if harnesses, ok := raw["harnesses"]; ok {
+		object, err := rawObject(harnesses, "harnesses")
+		if err != nil {
+			return Config{}, &SyntaxError{Err: err}
+		}
+		if claudeCode, ok := object["claude_code"]; ok {
+			profileConfig, err := rawObject(claudeCode, "harnesses.claude_code")
+			if err != nil {
+				return Config{}, &SyntaxError{Err: err}
+			}
+			if _, present := profileConfig["active_profile_id"]; present {
+				return Config{}, ErrActiveProfileReadOnly
+			}
+		}
+	}
+	return Decode(data)
 }
 
 // DecodeAutoMode strictly parses one Auto Mode object, applying the same
@@ -220,7 +256,7 @@ func walkJSONValue(decoder *json.Decoder) error {
 
 func checkConfigKeys(raw map[string]json.RawMessage) error {
 	if err := rejectUnknownKeys(raw, map[string]struct{}{
-		"schema_version": {}, "service": {}, "auth": {}, "auto_mode": {}, "providers": {},
+		"schema_version": {}, "service": {}, "auth": {}, "auto_mode": {}, "harnesses": {}, "providers": {},
 	}); err != nil {
 		return err
 	}
@@ -251,6 +287,15 @@ func checkConfigKeys(raw map[string]json.RawMessage) error {
 			return err
 		}
 	}
+	if value, ok := raw["harnesses"]; ok {
+		object, err := rawObject(value, "harnesses")
+		if err != nil {
+			return err
+		}
+		if err := checkHarnessesKeys(object); err != nil {
+			return err
+		}
+	}
 	if value, ok := raw["providers"]; ok {
 		var providers []json.RawMessage
 		if err := json.Unmarshal(value, &providers); err != nil {
@@ -264,6 +309,85 @@ func checkConfigKeys(raw map[string]json.RawMessage) error {
 			if err := checkProviderKeys(object); err != nil {
 				return fmt.Errorf("providers[%d]: %w", i, err)
 			}
+		}
+	}
+	return nil
+}
+
+func checkHarnessesKeys(object map[string]json.RawMessage) error {
+	if err := rejectUnknownKeys(object, map[string]struct{}{"claude_code": {}}); err != nil {
+		return err
+	}
+	if value, ok := object["claude_code"]; ok {
+		claudeCode, err := rawObject(value, "harnesses.claude_code")
+		if err != nil {
+			return err
+		}
+		return checkClaudeCodeKeys(claudeCode)
+	}
+	return nil
+}
+
+func checkClaudeCodeKeys(object map[string]json.RawMessage) error {
+	if err := rejectUnknownKeys(object, map[string]struct{}{
+		"path_mode": {}, "settings_path": {}, "disable_telemetry": {},
+		"active_profile_id": {}, "profiles": {},
+	}); err != nil {
+		return err
+	}
+	if value, ok := object["path_mode"]; ok {
+		var mode string
+		if err := json.Unmarshal(value, &mode); err != nil {
+			return fmt.Errorf("harnesses.claude_code.path_mode must be a string: %w", err)
+		}
+		if mode == "" {
+			return errors.New("harnesses.claude_code.path_mode must not be empty")
+		}
+	}
+	for _, field := range []string{"settings_path", "active_profile_id"} {
+		if value, ok := object[field]; ok {
+			var decoded string
+			if err := json.Unmarshal(value, &decoded); err != nil {
+				return fmt.Errorf("harnesses.claude_code.%s must be a string: %w", field, err)
+			}
+		}
+	}
+	if value, ok := object["disable_telemetry"]; ok {
+		var decoded bool
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return fmt.Errorf("harnesses.claude_code.disable_telemetry must be a boolean: %w", err)
+		}
+	}
+	if value, ok := object["profiles"]; ok {
+		var profiles []json.RawMessage
+		if err := json.Unmarshal(value, &profiles); err != nil {
+			return fmt.Errorf("harnesses.claude_code.profiles must be an array: %w", err)
+		}
+		for i, profile := range profiles {
+			profileObject, err := rawObject(profile, fmt.Sprintf("harnesses.claude_code.profiles[%d]", i))
+			if err != nil {
+				return err
+			}
+			if err := checkProfileKeys(profileObject); err != nil {
+				return fmt.Errorf("harnesses.claude_code.profiles[%d]: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+func checkProfileKeys(object map[string]json.RawMessage) error {
+	if err := rejectUnknownKeys(object, map[string]struct{}{
+		"id": {}, "name": {}, "haiku_model": {}, "sonnet_model": {},
+		"opus_model": {}, "fable_model": {}, "subagent_model": {},
+		"teammate_default_model": {},
+	}); err != nil {
+		return err
+	}
+	for key, value := range object {
+		var decoded string
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return fmt.Errorf("profile.%s must be a string: %w", key, err)
 		}
 	}
 	return nil

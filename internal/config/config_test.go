@@ -199,7 +199,7 @@ func TestDecodeFixedProviderRequiresTargetShape(t *testing.T) {
 }
 
 func TestDecodeAppliesOnlyDocumentedDefaults(t *testing.T) {
-	cfg, err := Decode([]byte(`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{"mode":"disabled","model":""}}`))
+	cfg, err := Decode([]byte(`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{"mode":"disabled","model":""},"harnesses":{"claude_code":{}}}`))
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}

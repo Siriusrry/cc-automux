@@ -76,6 +76,17 @@ type ConfigStore interface {
 	RemovePending() error
 }
 
+// HarnessConfigRuntime is the narrow runtime boundary used by the harness
+// configuration service. Harness mutations are scoped to the harness subtree;
+// the active profile ID has dedicated server-side operations and cannot be
+// changed through a client-style configuration update.
+type HarnessConfigRuntime interface {
+	Config() config.Config
+	UpdateHarness(func(*config.HarnessesConfig) error) (ApplyResult, error)
+	ClearActiveProfileID() (ApplyResult, error)
+	SetActiveProfileID(string) (ApplyResult, error)
+}
+
 type Manager struct {
 	mu                 sync.Mutex
 	store              ConfigStore
@@ -231,11 +242,13 @@ func (m *Manager) RestartStatus() RestartStatus {
 	return m.restartStatus
 }
 
-// Apply replaces the complete configuration transactionally.
+// Apply applies a complete client configuration transactionally. The
+// server-owned active profile ID is preserved or invalidated according to the
+// active-input comparison rules; clients cannot supply it directly.
 func (m *Manager) Apply(next config.Config) (ApplyResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.applyLocked(next)
+	return m.applyClientLocked(next)
 }
 
 // Update serializes read-modify-write operations such as Provider CRUD so two
@@ -249,11 +262,86 @@ func (m *Manager) Update(mutator func(*config.Config) error) (ApplyResult, error
 	if m.restartStatus.InProgress {
 		return ApplyResult{}, ErrRestartInProgress
 	}
-	next := m.current.Load().Config()
+	current := m.current.Load().Config()
+	next := current.Clone()
 	if err := mutator(&next); err != nil {
 		return ApplyResult{}, err
 	}
+	prepared, err := current.ApplyServerUpdate(next)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	return m.applyLocked(prepared)
+}
+
+// UpdateHarness serializes a server-side mutation of the harness subtree.
+// Changing an input that can make an active profile stale clears the active ID
+// in the same persisted configuration transaction. The mutator cannot write
+// the active ID directly; use SetActiveProfileID or ClearActiveProfileID for
+// that server-owned transition.
+func (m *Manager) UpdateHarness(mutator func(*config.HarnessesConfig) error) (ApplyResult, error) {
+	if mutator == nil {
+		return ApplyResult{}, errors.New("harness configuration mutator is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.restartStatus.InProgress {
+		return ApplyResult{}, ErrRestartInProgress
+	}
+	current := m.current.Load().Config()
+	next := current.Clone()
+	if err := mutator(&next.Harnesses); err != nil {
+		return ApplyResult{}, err
+	}
+	prepared, err := current.ApplyServerUpdate(next)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	return m.applyLocked(prepared)
+}
+
+// ClearActiveProfileID atomically persists the server-owned inactive state.
+func (m *Manager) ClearActiveProfileID() (ApplyResult, error) {
+	return m.setActiveProfileID("")
+}
+
+// SetActiveProfileID atomically persists a server-owned active profile ID.
+// The config package validates that the ID is canonical and references an
+// existing profile before the candidate can be published.
+func (m *Manager) SetActiveProfileID(id string) (ApplyResult, error) {
+	return m.setActiveProfileID(id)
+}
+
+func (m *Manager) setActiveProfileID(id string) (ApplyResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.restartStatus.InProgress {
+		return ApplyResult{}, ErrRestartInProgress
+	}
+	current := m.current.Load().Config()
+	next, err := current.WithActiveProfileID(id)
+	if err != nil {
+		return ApplyResult{}, err
+	}
 	return m.applyLocked(next)
+}
+
+func (m *Manager) applyClientLocked(next config.Config) (ApplyResult, error) {
+	current := m.current.Load().Config()
+	prepared, err := current.ApplyClientUpdate(next)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	return m.applyLocked(prepared)
+}
+
+// Config returns a defensive copy of the currently published configuration
+// through the narrow harness runtime read boundary.
+func (m *Manager) Config() config.Config {
+	if m == nil {
+		return config.Config{}
+	}
+	return m.Snapshot().Config()
 }
 
 func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
