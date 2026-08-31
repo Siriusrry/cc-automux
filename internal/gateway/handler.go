@@ -13,9 +13,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
+	"github.com/Siriusrry/cc-automux/internal/protocol"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
@@ -30,6 +32,14 @@ type Options struct {
 	Now              func() time.Time
 	DetectorRegistry *traffic.Registry
 	FlowDispatcher   *flow.Dispatcher
+	// ProtocolAdapters is the process-owned registry for fixed classifier
+	// targets. Production currently supplies an empty registry; tests may
+	// inject a fake adapter through this same seam.
+	ProtocolAdapters protocol.ProtocolAdapterRegistry
+	// ProtocolRegistry is a descriptive compatibility alias for
+	// ProtocolAdapters. If both are set, ProtocolAdapters wins.
+	ProtocolRegistry protocol.ProtocolAdapterRegistry
+	FixedDiagnostics *automode.Diagnostics
 }
 
 type Handler struct {
@@ -41,9 +51,14 @@ type Handler struct {
 	now              func() time.Time
 	detectors        *traffic.Registry
 	flows            *flow.Dispatcher
+	protocols        protocol.ProtocolAdapterRegistry
+	fixedDiagnostics *automode.Diagnostics
 	active           atomic.Int64
 	clientRevisionMu sync.Mutex
 	clientRevision   uint64
+	fixedScopeMu     sync.RWMutex
+	fixedScope       automode.DiagnosticScope
+	fixedScopeBound  bool
 }
 
 func New(snapshot SnapshotFunc, selector scheduler.Selector) *Handler {
@@ -79,15 +94,28 @@ func NewWithOptions(snapshot SnapshotFunc, selector scheduler.Selector, options 
 			flows = flow.NewDispatcher(normal)
 		}
 	}
+	protocols := options.ProtocolAdapters
+	if protocols == nil {
+		protocols = options.ProtocolRegistry
+	}
+	if protocols == nil {
+		protocols = protocol.EmptyRegistry()
+	}
+	diagnostics := options.FixedDiagnostics
+	if diagnostics == nil {
+		diagnostics = automode.NewDiagnostics()
+	}
 	return &Handler{
-		snapshot:        snapshot,
-		selector:        selector,
-		clients:         clients,
-		recorder:        recorder,
-		replayDirectory: options.ReplayDirectory,
-		now:             now,
-		detectors:       detectors,
-		flows:           flows,
+		snapshot:         snapshot,
+		selector:         selector,
+		clients:          clients,
+		recorder:         recorder,
+		replayDirectory:  options.ReplayDirectory,
+		now:              now,
+		detectors:        detectors,
+		flows:            flows,
+		protocols:        protocols,
+		fixedDiagnostics: diagnostics,
 	}
 }
 
@@ -103,7 +131,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 		return
 	}
-	if h.snapshot == nil || h.selector == nil {
+	if h.snapshot == nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
@@ -185,7 +213,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// already accounted for before the body was received.
 	plan, err := h.dispatchIngress(r.Context(), plannerSnapshot, ingress)
 	if err != nil {
-		if errors.Is(err, bodyfile.ErrLocalIO) {
+		if requestCanceled(r.Context()) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		} else if errors.Is(err, automode.ErrAutoModeNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "auto_mode_not_configured", "auto mode is not configured")
+		} else if errors.Is(err, bodyfile.ErrLocalIO) {
 			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request could not be prepared")
 		} else if errors.Is(err, flow.ErrMissingPlanner) {
 			writeError(w, http.StatusServiceUnavailable, "request_flow_unavailable", "request flow is unavailable")
@@ -194,11 +226,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if plan.TargetMode == flow.TargetModeProviderPool && len(snapshot.Candidates(plan.PreparedRequest.Plan.EffectiveModel)) == 0 {
-		writeError(w, http.StatusNotFound, "model_not_configured", "model is not configured")
-		return
-	}
-	h.reconcileClientsWithProviders(snapshot, scanProviders)
+	// Reconcile against the rich runtime view, not the attempt-policy wrapper,
+	// so a fixed target remains part of the active transport set.
+	h.reconcileClientsWithProviders(runtimeSnapshot, scanProviders)
 	h.forwardExecution(w, r, snapshot, plan)
 }
 
@@ -218,7 +248,11 @@ func (h *Handler) reconcileClientsWithProviders(snapshot scheduler.Snapshot, pro
 	if snapshot.Revision() <= h.clientRevision {
 		return
 	}
-	h.clients.Reconcile(providers)
+	var fixed *provider.CompiledFixedTarget
+	if view, ok := snapshot.(flow.SnapshotView); ok {
+		fixed = view.AutoMode().FixedTarget
+	}
+	h.clients.ReconcileTargets(providers, fixed)
 	h.clientRevision = snapshot.Revision()
 }
 
@@ -228,6 +262,47 @@ func (h *Handler) ActiveRequests() int64 {
 		return 0
 	}
 	return h.active.Load()
+}
+
+// FixedTargetDiagnostics returns the latest fixed classifier target
+// observation, detached from the handler's internal state.
+func (h *Handler) FixedTargetDiagnostics() *automode.FixedTargetCall {
+	if h == nil || h.fixedDiagnostics == nil {
+		return nil
+	}
+	return h.fixedDiagnostics.Snapshot()
+}
+
+// SetRuntimeSnapshot advances the fixed-target diagnostic scope when a new
+// immutable runtime revision is published. It is called by the application
+// composition root, never by an individual request.
+func (h *Handler) SetRuntimeSnapshot(snapshot scheduler.Snapshot) {
+	if h == nil || h.fixedDiagnostics == nil || snapshot == nil {
+		return
+	}
+	scope := automode.DiagnosticScope{Revision: snapshot.Revision()}
+	if view, ok := snapshot.(flow.SnapshotView); ok {
+		if target := view.AutoMode().FixedTarget; target != nil {
+			scope.Configured = true
+			scope.Generation = target.Generation.String()
+		}
+	}
+	h.fixedScopeMu.Lock()
+	h.fixedScope = scope
+	h.fixedScopeBound = true
+	h.fixedScopeMu.Unlock()
+	h.fixedDiagnostics.SetScope(scope)
+}
+
+func (h *Handler) fixedDiagnosticScope(snapshot scheduler.Snapshot, target *provider.CompiledFixedTarget) (automode.DiagnosticScope, bool) {
+	if h == nil || h.fixedDiagnostics == nil || snapshot == nil || target == nil {
+		return automode.DiagnosticScope{}, false
+	}
+	scope := automode.DiagnosticScope{Revision: snapshot.Revision(), Generation: target.Generation.String(), Configured: true}
+	h.fixedScopeMu.RLock()
+	bound := h.fixedScopeBound
+	h.fixedScopeMu.RUnlock()
+	return scope, bound
 }
 
 type capturedFailure struct {
@@ -244,35 +319,97 @@ type capturedFailure struct {
 }
 
 func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, response *http.Response, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int) {
-	defer response.Body.Close()
+	// A response body is owned by this function from the moment it is passed in.
+	// Close it exactly once on every path, including cancellation, while keeping
+	// the health lease's terminal report exactly once.
+	if response == nil || response.Body == nil {
+		if requestCanceled(ctx) {
+			h.reportClientCanceledWithAttempt(lease, outcome.SessionID, outcome.UpstreamURL, responseStatus(response), attempt, nil)
+			return
+		}
+		outcome.Class = scheduler.FailureNeutral
+		outcome.RawError = "provider returned no response body"
+		if h != nil && h.selector != nil {
+			update := h.selector.Report(lease, outcome)
+			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+		}
+		return
+	}
+	closed := false
+	closeBody := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return response.Body.Close()
+	}
+	defer func() { _ = closeBody() }()
+	report := func(kind EventKind, value scheduler.Outcome) {
+		if h == nil || h.selector == nil {
+			return
+		}
+		update := h.selector.Report(lease, value)
+		h.recordOutcome(kind, lease, value, attempt, update)
+	}
+	cancel := func(cause error) {
+		value := outcome
+		value.Class = scheduler.FailureClientCanceled
+		value.ClientCanceled = true
+		value.RawError = contextError(ctx, cause).Error()
+		value.ResponseStarted = outcome.ResponseStarted
+		value.RawError = errors.Join(contextError(ctx, cause), closeBody()).Error()
+		report(EventFailure, value)
+	}
+	if requestCanceled(ctx) {
+		cancel(nil)
+		return
+	}
 	copyResponseHeaders(w.Header(), response.Header)
+	if requestCanceled(ctx) {
+		cancel(nil)
+		return
+	}
+	// The context check immediately before WriteHeader is the last point at
+	// which a canceled client can be guaranteed not to receive a status line.
 	w.WriteHeader(response.StatusCode)
+	outcome.ResponseStarted = true
+	if requestCanceled(ctx) {
+		cancel(nil)
+		return
+	}
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	outcome.ResponseStarted = true
 	var raw strings.Builder
 	captureError := outcome.Class != scheduler.FailureNone
 	buffer := make([]byte, 32*1024)
 	for {
+		if requestCanceled(ctx) {
+			cancel(nil)
+			return
+		}
 		n, readErr := response.Body.Read(buffer)
 		if n > 0 {
 			if captureError {
 				_, _ = raw.Write(buffer[:n])
+			}
+			if requestCanceled(ctx) {
+				cancel(nil)
+				return
 			}
 			written, writeErr := w.Write(buffer[:n])
 			if writeErr == nil && written != n {
 				writeErr = io.ErrShortWrite
 			}
 			if writeErr != nil {
-				outcome.Class = scheduler.FailureDownstream
-				outcome.RawError = writeErr.Error()
 				if requestCanceled(ctx) {
-					outcome.Class = scheduler.FailureClientCanceled
-					outcome.ClientCanceled = true
+					cancel(writeErr)
+					return
 				}
-				update := h.selector.Report(lease, outcome)
-				h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+				value := outcome
+				value.Class = scheduler.FailureDownstream
+				value.RawError = errors.Join(writeErr, closeBody()).Error()
+				report(EventFailure, value)
 				return
 			}
 			if flusher, ok := w.(http.Flusher); ok {
@@ -281,28 +418,34 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
+				closeErr := closeBody()
+				if requestCanceled(ctx) {
+					cancel(closeErr)
+					return
+				}
+				if closeErr != nil {
+					value := outcome
+					value.Class = scheduler.FailureNeutral
+					value.RawError = closeErr.Error()
+					report(EventFailure, value)
+					return
+				}
 				if captureError {
 					outcome.RawError = raw.String()
-					update := h.selector.Report(lease, outcome)
-					h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+					report(EventFailure, outcome)
 				} else {
-					update := h.selector.Report(lease, outcome)
-					h.recordOutcome(EventSuccess, lease, outcome, attempt, update)
+					report(EventSuccess, outcome)
 				}
 				return
 			}
 			if requestCanceled(ctx) {
-				outcome.Class = scheduler.FailureClientCanceled
-				outcome.ClientCanceled = true
-				outcome.RawError = contextError(ctx, readErr).Error()
-				update := h.selector.Report(lease, outcome)
-				h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+				cancel(readErr)
 				return
 			}
-			outcome.Class = scheduler.FailureChannelStream
-			outcome.RawError = readErr.Error()
-			update := h.selector.Report(lease, outcome)
-			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+			value := outcome
+			value.Class = scheduler.FailureChannelStream
+			value.RawError = errors.Join(readErr, closeBody()).Error()
+			report(EventFailure, value)
 			// Headers and a prefix of the body may already be visible to the
 			// caller. Returning leaves that partial stream intact and prevents a
 			// retry that could duplicate side effects.
@@ -423,6 +566,42 @@ func singleSessionHeader(headers http.Header) string {
 
 func requestCanceled(ctx context.Context) bool {
 	return ctx != nil && ctx.Err() != nil
+}
+
+func responseStatus(response *http.Response) int {
+	if response == nil {
+		return 0
+	}
+	return response.StatusCode
+}
+
+// reportClientCanceledWithAttempt records the terminal outcome for a leased
+// normal or classifier pool attempt.  Cancellation is deliberately kept
+// outside the Provider health failure classes, but the lease still must be
+// reported so a half-open probe is released and the event stream has one
+// matching failure.  The helper never writes a client response.
+func (h *Handler) reportClientCanceledWithAttempt(lease scheduler.AttemptLease, sessionID, upstream string, status, attempt int, cause error) {
+	h.reportClientCanceledState(lease, sessionID, upstream, status, attempt, false, cause)
+}
+
+func (h *Handler) reportClientCanceledState(lease scheduler.AttemptLease, sessionID, upstream string, status, attempt int, responseStarted bool, cause error) {
+	if h == nil || h.selector == nil {
+		return
+	}
+	if cause == nil {
+		cause = context.Canceled
+	}
+	outcome := scheduler.Outcome{
+		Class:           scheduler.FailureClientCanceled,
+		HTTPStatus:      status,
+		UpstreamURL:     upstream,
+		RawError:        cause.Error(),
+		SessionID:       sessionID,
+		ResponseStarted: responseStarted,
+		ClientCanceled:  true,
+	}
+	update := h.selector.Report(lease, outcome)
+	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 }
 
 func contextError(ctx context.Context, fallback error) error {

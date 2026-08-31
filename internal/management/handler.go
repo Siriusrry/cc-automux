@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/patch"
@@ -27,23 +28,25 @@ const (
 var errProviderNotFound = errors.New("provider not found")
 
 type Options struct {
-	MaxBodyBytes   int64
-	Version        string
-	Health         *health.Store
-	Selector       scheduler.Selector
-	Sync           func()
-	ActiveRequests func() int64
+	MaxBodyBytes        int64
+	Version             string
+	Health              *health.Store
+	Selector            scheduler.Selector
+	Sync                func()
+	ActiveRequests      func() int64
+	AutoModeDiagnostics *automode.Diagnostics
 }
 
 type Handler struct {
-	manager        *runtime.Manager
-	maxBodyBytes   int64
-	version        string
-	registry       patch.Registry
-	health         *health.Store
-	selector       scheduler.Selector
-	syncRuntime    func()
-	activeRequests func() int64
+	manager             *runtime.Manager
+	maxBodyBytes        int64
+	version             string
+	registry            patch.Registry
+	health              *health.Store
+	selector            scheduler.Selector
+	syncRuntime         func()
+	activeRequests      func() int64
+	autoModeDiagnostics *automode.Diagnostics
 }
 
 func New(manager *runtime.Manager) *Handler {
@@ -64,14 +67,15 @@ func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
 		version = productversion.Current()
 	}
 	return &Handler{
-		manager:        manager,
-		maxBodyBytes:   maxBodyBytes,
-		version:        version,
-		registry:       registry,
-		health:         options.Health,
-		selector:       options.Selector,
-		syncRuntime:    options.Sync,
-		activeRequests: options.ActiveRequests,
+		manager:             manager,
+		maxBodyBytes:        maxBodyBytes,
+		version:             version,
+		registry:            registry,
+		health:              options.Health,
+		selector:            options.Selector,
+		syncRuntime:         options.Sync,
+		activeRequests:      options.ActiveRequests,
+		autoModeDiagnostics: options.AutoModeDiagnostics,
 	}
 }
 
@@ -310,26 +314,35 @@ func (h *Handler) handlePatches(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	Product                     string                `json:"product"`
-	Version                     string                `json:"version"`
-	Revision                    uint64                `json:"revision"`
-	ListenAddr                  string                `json:"listen_addr"`
-	LogMaxBytes                 int64                 `json:"log_max_bytes"`
-	GatewayConfigured           bool                  `json:"gateway_configured"`
-	ProviderCount               int                   `json:"provider_count"`
-	EnabledProviderCount        int                   `json:"enabled_provider_count"`
-	ActiveProviderCount         int                   `json:"active_provider_count"`
-	InactiveProviderCount       int                   `json:"inactive_provider_count"`
-	GlobalHealth                health.StateCounts    `json:"global_health"`
-	ChannelHealth               health.StateCounts    `json:"channel_health"`
-	HealthDisabledProviderCount int                   `json:"health_disabled_provider_count"`
-	ActiveDataRequests          int64                 `json:"active_data_requests"`
-	StickyAssignmentCount       int                   `json:"sticky_assignment_count"`
-	UptimeSeconds               int64                 `json:"uptime_seconds"`
-	StartTime                   string                `json:"start_time"`
-	Restart                     runtime.RestartStatus `json:"restart"`
-	RestartInProgress           bool                  `json:"restart_in_progress"`
-	Pending                     bool                  `json:"pending"`
+	Product                     string                 `json:"product"`
+	Version                     string                 `json:"version"`
+	Revision                    uint64                 `json:"revision"`
+	ListenAddr                  string                 `json:"listen_addr"`
+	LogMaxBytes                 int64                  `json:"log_max_bytes"`
+	GatewayConfigured           bool                   `json:"gateway_configured"`
+	ProviderCount               int                    `json:"provider_count"`
+	EnabledProviderCount        int                    `json:"enabled_provider_count"`
+	ActiveProviderCount         int                    `json:"active_provider_count"`
+	InactiveProviderCount       int                    `json:"inactive_provider_count"`
+	GlobalHealth                health.StateCounts     `json:"global_health"`
+	ChannelHealth               health.StateCounts     `json:"channel_health"`
+	HealthDisabledProviderCount int                    `json:"health_disabled_provider_count"`
+	ActiveDataRequests          int64                  `json:"active_data_requests"`
+	StickyAssignmentCount       int                    `json:"sticky_assignment_count"`
+	UptimeSeconds               int64                  `json:"uptime_seconds"`
+	StartTime                   string                 `json:"start_time"`
+	Restart                     runtime.RestartStatus  `json:"restart"`
+	RestartInProgress           bool                   `json:"restart_in_progress"`
+	Pending                     bool                   `json:"pending"`
+	AutoMode                    autoModeStatusResponse `json:"auto_mode"`
+}
+
+type autoModeStatusResponse struct {
+	Mode                    string                    `json:"mode"`
+	Model                   string                    `json:"model"`
+	FixedProviderConfigured bool                      `json:"fixed_provider_configured"`
+	FixedProviderProtocol   string                    `json:"fixed_provider_protocol"`
+	FixedTargetLastCall     *automode.FixedTargetCall `json:"fixed_target_last_call"`
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -376,6 +389,17 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	restart := h.manager.RestartStatus()
+	autoStatus := autoModeStatusResponse{
+		Mode:                    cfg.AutoMode.Mode,
+		Model:                   cfg.AutoMode.Model,
+		FixedProviderConfigured: cfg.AutoMode.FixedProvider != nil,
+	}
+	if cfg.AutoMode.FixedProvider != nil {
+		autoStatus.FixedProviderProtocol = cfg.AutoMode.FixedProvider.Protocol
+	}
+	if h.autoModeDiagnostics != nil {
+		autoStatus.FixedTargetLastCall = h.autoModeDiagnostics.Snapshot()
+	}
 	writeJSON(w, http.StatusOK, statusResponse{
 		Product:                     productversion.ProductName,
 		Version:                     h.version,
@@ -397,6 +421,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Restart:                     restart,
 		RestartInProgress:           restart.InProgress,
 		Pending:                     restart.Pending,
+		AutoMode:                    autoStatus,
 	})
 }
 
@@ -653,7 +678,7 @@ func (h *Handler) writeApplyError(w http.ResponseWriter, err error) {
 		return
 	}
 	var validationErr *config.ValidationError
-	if errors.As(err, &validationErr) || errors.Is(err, patch.ErrUnknownPatch) || errors.Is(err, patch.ErrDuplicatePatch) || errors.Is(err, patch.ErrPatchConflict) || errors.Is(err, patch.ErrInvalidDefinition) {
+	if errors.As(err, &validationErr) || errors.Is(err, patch.ErrUnknownPatch) || errors.Is(err, patch.ErrDuplicatePatch) || errors.Is(err, patch.ErrPatchConflict) || errors.Is(err, patch.ErrPatchNotApplicable) || errors.Is(err, patch.ErrInvalidDefinition) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
 		return
 	}

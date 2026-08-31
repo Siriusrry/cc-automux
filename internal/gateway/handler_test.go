@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -123,6 +124,47 @@ func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, erro
 	return f(request)
 }
 
+type cancelingResponseWriter struct {
+	header      http.Header
+	status      int
+	headerCalls int
+	writeCalls  int
+	cancel      context.CancelFunc
+	cancelOnce  sync.Once
+	cancelOn    string
+}
+
+func (w *cancelingResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	if w.cancelOn == "header" {
+		w.cancelOnce.Do(w.cancel)
+	}
+	return w.header
+}
+
+func (w *cancelingResponseWriter) WriteHeader(status int) {
+	w.headerCalls++
+	if w.status == 0 {
+		w.status = status
+	}
+	if w.cancelOn == "write_header" {
+		w.cancelOnce.Do(w.cancel)
+	}
+}
+
+func (w *cancelingResponseWriter) Write(data []byte) (int, error) {
+	w.writeCalls++
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if w.cancelOn == "write" {
+		w.cancelOnce.Do(w.cancel)
+	}
+	return len(data), nil
+}
+
 func (c *eventCollector) RecordGatewayEvent(event Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -165,6 +207,31 @@ func testProviderRuntimeContext(t *testing.T) provider.RuntimeContext {
 		t.Fatal(err)
 	}
 	return context
+}
+
+func normalResponsePatchPlan(t *testing.T, response patch.ResponsePatch) patch.Plan {
+	t.Helper()
+	definition := patch.PatchDefinition{
+		ID:            "normal-response-test",
+		Name:          "Normal response test",
+		Description:   "Exercises the normal buffered response boundary.",
+		RequestTypes:  []patch.RequestType{patch.RequestTypeNormal},
+		Stages:        []patch.Stage{patch.StageResponse},
+		ResponsePaths: []string{},
+		Idempotence:   patch.PerExecution,
+		Factory: func(patch.FactoryContext) (patch.PatchInstance, error) {
+			return patch.NewHooksInstance(patch.Hooks{Response: response}), nil
+		},
+	}
+	registry, err := patch.NewRegistry([]patch.PatchDefinition{definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := registry.Compile([]string{definition.ID}, patch.RequestTypeNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
 }
 
 func TestRequestScanSpecUsesOnlyReachableProviderPlans(t *testing.T) {
@@ -603,6 +670,129 @@ func TestGatewayFinalRetryableFailureRecordsOnlyFailure(t *testing.T) {
 	}
 }
 
+func TestGatewayCancellationAfterDoStopsBeforeResponseAndFailover(t *testing.T) {
+	var secondCalls atomic.Int32
+	first := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "first", "https://first.invalid", "key-1", "m", false)
+	second := compileTestProvider(t, "22222222-2222-4222-8222-222222222222", "second", "https://second.invalid", "key-2", "m", false)
+	selector := &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(first, "m"), leaseFor(second, "m")}}
+	events := &eventCollector{}
+	pool := NewClientPool()
+	ctx, cancel := context.WithCancel(context.Background())
+	pool.clients[clientKey{providerID: first.ID, generation: first.Generation}] = pooledClient{
+		client: &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+			cancel()
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("retryable")),
+				Request:    request,
+			}, nil
+		})},
+		transport: &http.Transport{},
+	}
+	pool.clients[clientKey{providerID: second.ID, generation: second.Generation}] = pooledClient{
+		client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			secondCalls.Add(1)
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("unexpected"))}, nil
+		})},
+		transport: &http.Transport{},
+	}
+	handler := NewWithOptions(func() scheduler.Snapshot {
+		return &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{first, second}}
+	}, selector, Options{ClientPool: pool, Recorder: events})
+	defer handler.Close()
+	request := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`)
+	request = request.WithContext(ctx)
+	w := &cancelingResponseWriter{}
+	handler.ServeHTTP(w, request)
+
+	acquires, reports := selector.snapshot()
+	if w.headerCalls != 0 || w.writeCalls != 0 || secondCalls.Load() != 0 || acquires != 1 {
+		t.Fatalf("writes=%d/%d second=%d acquires=%d", w.headerCalls, w.writeCalls, secondCalls.Load(), acquires)
+	}
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureClientCanceled || !reports[0].ClientCanceled {
+		t.Fatalf("reports = %#v", reports)
+	}
+	got := events.snapshot()
+	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventFailure || got[1].NextProviderID != "" {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
+func TestStreamResponseCancellationBeforeWriteHeaderReportsOnce(t *testing.T) {
+	item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", "https://one.invalid", "key", "m", false)
+	selector := &fakeSelector{}
+	events := &eventCollector{}
+	handler := NewWithOptions(nil, selector, Options{Recorder: events})
+	defer handler.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &cancelingResponseWriter{cancel: cancel, cancelOn: "header"}
+	handler.streamResponse(w, ctx, &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"X-Test": []string{"value"}},
+		Body:       io.NopCloser(strings.NewReader("body")),
+	}, leaseFor(item, "m"), scheduler.Outcome{Class: scheduler.FailureNone, UpstreamURL: "https://one.invalid/v1/messages", SessionID: "session"}, 1)
+
+	_, reports := selector.snapshot()
+	if w.headerCalls != 0 || w.writeCalls != 0 {
+		t.Fatalf("canceled stream wrote response: headers=%d writes=%d", w.headerCalls, w.writeCalls)
+	}
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureClientCanceled || reports[0].ResponseStarted {
+		t.Fatalf("reports = %#v", reports)
+	}
+	got := events.snapshot()
+	if len(got) != 1 || got[0].Kind != EventFailure {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
+func TestBufferedResponseCancellationAfterPatchStopsBeforeWriteHeader(t *testing.T) {
+	plan := normalResponsePatchPlan(t, fixedTestResponsePatch(func(_ patch.PatchContext, response *patch.MutableResponse) error {
+		response.Status = http.StatusAccepted
+		return nil
+	}))
+	item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", "https://one.invalid", "key", "m", false)
+	item.PatchPlan = plan
+	selector := &fakeSelector{}
+	events := &eventCollector{}
+	handler := NewWithOptions(nil, selector, Options{Recorder: events})
+	defer handler.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, MessagesPath, nil).WithContext(ctx)
+	w := &cancelingResponseWriter{cancel: cancel, cancelOn: "header"}
+	execution, err := plan.NewInstance(patch.PatchContext{
+		RequestType:    traffic.RequestTypeNormal,
+		OriginalModel:  "m",
+		EffectiveModel: "m",
+		TargetID:       item.ID,
+		Generation:     item.Generation.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := responseScanSpec(plan, traffic.RequestTypeNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.executeBufferedResponse(w, request, leaseFor(item, "m"), "session", 1, &http.Response{
+		StatusCode: http.StatusCreated,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+	}, execution, "https://one.invalid/v1/messages", spec)
+
+	_, reports := selector.snapshot()
+	if w.headerCalls != 0 || w.writeCalls != 0 {
+		t.Fatalf("canceled buffered response wrote: headers=%d writes=%d", w.headerCalls, w.writeCalls)
+	}
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureClientCanceled || reports[0].ResponseStarted {
+		t.Fatalf("reports = %#v", reports)
+	}
+	got := events.snapshot()
+	if len(got) != 1 || got[0].Kind != EventFailure {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
 func TestGatewayCapturesAttemptPolicyOncePerRequest(t *testing.T) {
 	for _, maxAttempts := range []int{2, 5} {
 		t.Run(fmt.Sprintf("maximum_%d", maxAttempts), func(t *testing.T) {
@@ -819,15 +1009,43 @@ func TestRetryAfterParsing(t *testing.T) {
 	}
 }
 
-func TestUpstreamURLPreservesEscapedPrefix(t *testing.T) {
-	base, _ := url.Parse("https://example.test/prefix%2Ffixed/")
-	requestURL, _ := url.Parse(MessagesPath + "?x=1")
-	result, err := upstreamURL(&provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{BaseURL: base}}, requestURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.String() != "https://example.test/prefix%2Ffixed/v1/messages?x=1" {
-		t.Fatalf("URL = %q", result.String())
+func TestUpstreamURLAlwaysAppendsMessagesPathAndPreservesRawClientQuery(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		base     string
+		incoming string
+		want     string
+	}{
+		{
+			name:     "escaped prefix and repeated encoded query",
+			base:     "https://example.test/prefix%2Ffixed/",
+			incoming: MessagesPath + "?x=%2F&x=a+b",
+			want:     "https://example.test/prefix%2Ffixed/v1/messages?x=%2F&x=a+b",
+		},
+		{
+			name:     "existing suffix remains a base path and empty query is retained",
+			base:     "https://example.test/v1/messages",
+			incoming: MessagesPath + "?",
+			want:     "https://example.test/v1/messages/v1/messages?",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base, err := url.Parse(test.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestURL, err := url.Parse(test.incoming)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := upstreamURL(&provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{BaseURL: base}}, requestURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.String() != test.want || result.RawQuery != requestURL.RawQuery || result.ForceQuery != requestURL.ForceQuery {
+				t.Fatalf("URL = %q raw=%q force=%v, want %q", result.String(), result.RawQuery, result.ForceQuery, test.want)
+			}
+		})
 	}
 }
 

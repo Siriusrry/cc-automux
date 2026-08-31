@@ -123,7 +123,7 @@ func TestGatewayRequestPatchCannotObserveOrOverrideCredentials(t *testing.T) {
 	}
 }
 
-func TestGatewayRequestPatchFailureFailsOverWithOneTerminalEvent(t *testing.T) {
+func TestGatewayRequestPatchFailureTerminatesWithoutFailover(t *testing.T) {
 	const patchID = "test-semantic-failure"
 	registry := testRequestPatchRegistry(t, patchID, func(patch.FactoryContext) patch.RequestPatch {
 		return requestPatchFunc(func(patch.PatchContext, *patch.MutableRequest) error {
@@ -150,24 +150,19 @@ func TestGatewayRequestPatchFailureFailsOverWithOneTerminalEvent(t *testing.T) {
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`))
-	if response.Code != http.StatusOK || response.Body.String() != "fallback" || firstCalls.Load() != 0 {
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"patch_failed"`) || firstCalls.Load() != 0 {
 		t.Fatalf("response=%d %q first_calls=%d", response.Code, response.Body.String(), firstCalls.Load())
 	}
 	_, reports := selector.snapshot()
-	if len(reports) != 2 || reports[0].Class != scheduler.FailureNeutral || reports[1].Class != scheduler.FailureNone {
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureNeutral {
 		t.Fatalf("reports = %#v", reports)
 	}
 	got := events.snapshot()
-	if len(got) != 3 || got[0].Kind != EventFailover || got[1].Kind != EventForward || got[2].Kind != EventSuccess {
+	if len(got) != 1 || got[0].Kind != EventFailure {
 		t.Fatalf("events = %#v", got)
 	}
-	if got[0].PatchID != patchID || got[0].PatchStage != string(patch.StageRequest) || got[0].NextProviderID != second.ID || got[0].UpstreamURL == "" {
-		t.Fatalf("patch failover = %#v", got[0])
-	}
-	for _, event := range got {
-		if event.Kind == EventFailure && event.ProviderID == first.ID {
-			t.Fatalf("failed attempt emitted both failure and failover: %#v", got)
-		}
+	if got[0].PatchID != patchID || got[0].PatchStage != string(patch.StageRequest) || got[0].ProviderID != first.ID {
+		t.Fatalf("patch failure = %#v", got[0])
 	}
 }
 
@@ -445,7 +440,7 @@ func TestGatewayPlannerReceivesOriginalFlowSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAttempts := scheduler.AttemptPolicy{MaxAttempts: 2}
+	wantAttempts := scheduler.AttemptPolicy{MaxAttempts: 1}
 	wantAuto := flow.AutoModeSnapshot{Mode: "test-mode", ClassifierModel: "test-classifier"}
 	flows, err := flow.NewRegistry(snapshotCheckingClassifierPlanner{wantAttempts: wantAttempts, wantAuto: wantAuto})
 	if err != nil {
@@ -465,10 +460,10 @@ func TestGatewayPlannerReceivesOriginalFlowSnapshot(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`))
 	acquires, reports := selector.snapshot()
-	if response.Code != http.StatusOK || response.Body.String() != "fallback" || firstCalls.Load() != 0 || acquires != 2 {
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"patch_failed"`) || firstCalls.Load() != 0 || acquires != 1 {
 		t.Fatalf("response=%d %q first_calls=%d acquires=%d", response.Code, response.Body.String(), firstCalls.Load(), acquires)
 	}
-	if len(reports) != 2 || reports[0].Class != scheduler.FailureNeutral || reports[1].Class != scheduler.FailureNone {
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureNeutral {
 		t.Fatalf("reports = %#v", reports)
 	}
 }

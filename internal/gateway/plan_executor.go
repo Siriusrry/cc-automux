@@ -128,7 +128,11 @@ func (h *Handler) requestScanSpecWithProviders(snapshot scheduler.Snapshot) (bod
 			paths = appendUniquePaths(paths, required...)
 		}
 	}
-	spec, err := bodyfile.RequestScanSpec(paths...)
+	var markers []string
+	if h != nil && h.detectors != nil {
+		markers = h.detectors.RequiredRawMarkers()
+	}
+	spec, err := bodyfile.RequestScanSpecWithRawMarkers(paths, markers...)
 	return spec, providers, err
 }
 
@@ -158,14 +162,58 @@ func (h *Handler) dispatchIngress(ctx context.Context, snapshot flow.SnapshotVie
 // to planners; this function interprets only TargetMode and AttemptPolicy.
 func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request, snapshot scheduler.Snapshot, plan flow.ExecutionPlan) {
 	prepared := plan.PreparedRequest
-	defer prepared.BaseBody.Close() // idempotent fallback for every early return
+	if prepared.BaseBody == nil {
+		if incoming == nil || !requestCanceled(incoming.Context()) {
+			writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request body is unavailable")
+		}
+		return
+	}
+	if err := plan.Validate(); err != nil {
+		_ = prepared.BaseBody.Close()
+		if incoming == nil || !requestCanceled(incoming.Context()) {
+			writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request execution plan is invalid")
+		}
+		return
+	}
 
+	if plan.TargetMode == flow.TargetModeFixedTarget {
+		// The fixed executor owns the prepared body and every conversion/response
+		// body it creates.  Keeping its ownership separate avoids a second Close
+		// call from this common executor (custom Body implementations may expose
+		// observable close errors even though production file bodies are idempotent).
+		h.forwardFixedExecution(w, incoming, snapshot, plan)
+		return
+	}
+	defer prepared.BaseBody.Close() // idempotent fallback for every early return
+	// A cancellation observed after planning but before target selection must
+	// stop the request without even acquiring a health lease.  Once a lease has
+	// been acquired the loop below reports the cancellation so the lease is
+	// released exactly once.
+	if incoming != nil && requestCanceled(incoming.Context()) {
+		return
+	}
 	if plan.TargetMode != flow.TargetModeProviderPool {
 		if err := prepared.BaseBody.Close(); err != nil {
 			writeError(w, http.StatusInternalServerError, "replay_unavailable", "request replay cleanup failed")
 			return
 		}
 		writeError(w, http.StatusNotImplemented, "target_not_implemented", "target mode is not implemented")
+		return
+	}
+	if snapshot == nil {
+		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
+		return
+	}
+	if len(snapshot.Candidates(prepared.Plan.EffectiveModel)) == 0 {
+		writeError(w, http.StatusNotFound, "model_not_configured", "model is not configured")
+		return
+	}
+	if incoming == nil || incoming.URL == nil {
+		writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request is unavailable")
+		return
+	}
+	if h == nil || h.selector == nil {
+		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
 	if err := plan.AttemptPolicy.Validate(); err != nil {
@@ -182,14 +230,46 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 	excluded := make(map[string]struct{})
 	var last *capturedFailure
 	for attempt := 1; attempt <= plan.AttemptPolicy.MaxAttempts; attempt++ {
-		lease, err := h.selector.Acquire(snapshot, sticky, excluded)
+		if requestCanceled(incoming.Context()) {
+			// A retryable response may already have been reported to Health, but its
+			// event is intentionally delayed until the gateway knows whether a
+			// replacement will be attempted.  Cancellation removes that decision:
+			// finish it as a normal terminal failure and never emit EventFailover.
+			if last != nil {
+				h.recordCapturedFailure(last)
+			}
+			return
+		}
+		lease, err := acquireWithPlanPolicy(h.selector, snapshot, sticky, excluded, plan.AttemptPolicy)
 		if err != nil {
+			if requestCanceled(incoming.Context()) {
+				if last != nil {
+					h.recordCapturedFailure(last)
+				}
+				return
+			}
 			h.finishCapturedFailure(w, prepared.BaseBody, last, err)
 			return
 		}
 		if lease.Provider == nil {
+			if requestCanceled(incoming.Context()) {
+				if last != nil {
+					h.recordCapturedFailure(last)
+				}
+				return
+			}
 			h.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sticky.SessionID})
 			h.finishLocalSelectionFailure(w, prepared.BaseBody, last, "selected provider is unavailable")
+			return
+		}
+		if requestCanceled(incoming.Context()) {
+			// The lease is real even though no upstream call has started.  Report a
+			// client cancellation to release its health token, then let the deferred
+			// BaseBody cleanup finish the request.
+			if last != nil {
+				h.recordCapturedFailure(last)
+			}
+			h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
 			return
 		}
 		if _, duplicate := excluded[lease.Provider.ID]; duplicate {
@@ -198,6 +278,11 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			return
 		}
 		if last != nil {
+			if requestCanceled(incoming.Context()) {
+				h.recordCapturedFailure(last)
+				h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
+				return
+			}
 			h.recordFailover(last, lease, attempt, incoming)
 			last = nil
 		}
@@ -209,6 +294,35 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 		excluded[lease.Provider.ID] = struct{}{}
 	}
 	h.finishCapturedFailure(w, prepared.BaseBody, last, nil)
+}
+
+// attemptPolicySnapshot adapts the immutable plan budget to the legacy
+// scheduler.Snapshot interface. The concrete Scheduler reads AttemptPolicy
+// from this wrapper, so classifier requests cannot accidentally consume the
+// ordinary three-attempt default.
+type attemptPolicySnapshot struct {
+	scheduler.Snapshot
+	policy scheduler.AttemptPolicy
+}
+
+func (s attemptPolicySnapshot) AttemptPolicy() scheduler.AttemptPolicy { return s.policy }
+
+func (s attemptPolicySnapshot) AttemptPolicyFor(traffic.RequestType) scheduler.AttemptPolicy {
+	return s.policy
+}
+
+func snapshotWithAttemptPolicy(snapshot scheduler.Snapshot, policy scheduler.AttemptPolicy) scheduler.Snapshot {
+	if snapshot == nil {
+		return nil
+	}
+	return attemptPolicySnapshot{Snapshot: snapshot, policy: policy}
+}
+
+func acquireWithPlanPolicy(selector scheduler.Selector, snapshot scheduler.Snapshot, key scheduler.StickyKey, excluded map[string]struct{}, policy scheduler.AttemptPolicy) (scheduler.AttemptLease, error) {
+	if requestSelector, ok := selector.(scheduler.RequestPolicySelector); ok {
+		return requestSelector.AcquireWithPolicy(snapshot, key, excluded, policy)
+	}
+	return selector.Acquire(snapshotWithAttemptPolicy(snapshot, policy), key, excluded)
 }
 
 func (h *Handler) finishCapturedFailure(w http.ResponseWriter, base bodyfile.Body, last *capturedFailure, unavailable error) {
@@ -243,7 +357,13 @@ func (h *Handler) finishLocalSelectionFailure(w http.ResponseWriter, base bodyfi
 
 func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, prepared traffic.PreparedRequest, lease scheduler.AttemptLease, sessionID string, attempt int) (*capturedFailure, bool) {
 	item := lease.Provider
-	if item == nil {
+	if item == nil || incoming == nil || incoming.URL == nil {
+		return nil, true
+	}
+	ctx := incoming.Context()
+	if requestCanceled(ctx) {
+		_ = prepared.BaseBody.Close()
+		h.reportClientCanceledWithAttempt(lease, sessionID, "", 0, attempt, contextError(ctx, nil))
 		return nil, true
 	}
 	url, err := upstreamURL(item, incoming.URL)
@@ -269,9 +389,27 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	}
 
 	base := prepared.BaseBody
+	// Every cancellation after a lease has been acquired is terminal for this
+	// request.  Close all attempt-scoped resources before reporting the outcome;
+	// the caller's deferred BaseBody close remains an idempotent safety net.
+	cancelAttempt := func(attemptBody bodyfile.Body, requestBody io.ReadCloser, extra error) (*capturedFailure, bool) {
+		closeErr := error(nil)
+		if requestBody != nil {
+			closeErr = requestBody.Close()
+		}
+		cleanupErr := closeRequestAttempt(base, attemptBody, execution, true)
+		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), 0, attempt, errors.Join(contextError(ctx, nil), extra, closeErr, cleanupErr))
+		return nil, true
+	}
+	if requestCanceled(ctx) {
+		return cancelAttempt(nil, nil, nil)
+	}
 	mutable := patch.NewMutableRequest(base, prepared.BaseIndex, patch.NewHTTPHeaderSet(headers))
 	if err := execution.ApplyRequestOnly(mutable); err != nil {
 		return h.requestPatchFailure(w, base, lease, sessionID, attempt, url.String(), execution, mutable.Body, err)
+	}
+	if requestCanceled(ctx) {
+		return cancelAttempt(mutable.Body, nil, nil)
 	}
 	if mutable.Body == nil {
 		return h.requestPatchFailure(w, base, lease, sessionID, attempt, url.String(), execution, nil, errors.New("patch returned nil body"))
@@ -289,6 +427,9 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		cleanupErr := closeRequestAttempt(base, mutable.Body, execution, false)
 		return nil, h.terminalReplayFailure(w, base, lease, sessionID, attempt, url.String(), errors.Join(err, cleanupErr), "", "")
 	}
+	if requestCanceled(ctx) {
+		return cancelAttempt(mutable.Body, requestBody, nil)
+	}
 	request, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, url.String(), requestBody)
 	if err != nil {
 		closeErr := requestBody.Close()
@@ -299,17 +440,29 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	request.ContentLength = mutable.Body.Size()
 	request.Host = ""
 	request.GetBody = nil
-	h.record(Event{Kind: EventForward, Time: h.now().UTC(), ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
+	if requestCanceled(ctx) {
+		return cancelAttempt(mutable.Body, requestBody, nil)
+	}
 
+	if h.clients == nil {
+		return nil, h.terminalLocalAttempt(w, base, lease, sessionID, attempt, url.String(), http.StatusInternalServerError, "gateway_unavailable", "provider client is unavailable", errors.New("provider client pool is nil"), "", "")
+	}
 	client, err := h.clients.Client(item)
 	if err != nil {
 		closeErr := requestBody.Close()
 		cleanupErr := closeRequestAttempt(base, mutable.Body, execution, false)
 		return nil, h.terminalLocalAttempt(w, base, lease, sessionID, attempt, url.String(), http.StatusInternalServerError, "gateway_unavailable", "provider client is unavailable", errors.Join(err, closeErr, cleanupErr), "", "")
 	}
+	if requestCanceled(ctx) {
+		return cancelAttempt(mutable.Body, requestBody, nil)
+	}
+	h.record(Event{Kind: EventForward, Time: h.now().UTC(), ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
 	response, requestErr := client.Do(request)
 	requestCloseErr := requestBody.Close()
 	if requestErr != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		cleanupErr := closeRequestAttempt(base, mutable.Body, execution, false)
 		combined := errors.Join(requestErr, requestCloseErr, cleanupErr)
 		if errors.Is(combined, bodyfile.ErrLocalIO) {
@@ -317,22 +470,39 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		}
 		return h.handlePlanTransportError(w, incoming.Context(), base, lease, sessionID, attempt, url.String(), combined)
 	}
+	if requestCanceled(ctx) {
+		var responseCloseErr error
+		if response != nil && response.Body != nil {
+			responseCloseErr = response.Body.Close()
+		}
+		cleanupErr := closeRequestAttempt(base, mutable.Body, execution, true)
+		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), responseStatus(response), attempt, errors.Join(requestCloseErr, responseCloseErr, cleanupErr))
+		return nil, true
+	}
 	if requestCloseErr != nil {
-		_ = response.Body.Close()
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		cleanupErr := closeRequestAttempt(base, mutable.Body, execution, false)
 		return nil, h.terminalReplayFailure(w, base, lease, sessionID, attempt, url.String(), errors.Join(requestCloseErr, cleanupErr), "", "")
 	}
 
+	if response == nil {
+		return nil, h.terminalLocalAttempt(w, base, lease, sessionID, attempt, url.String(), http.StatusBadGateway, "bad_gateway", "provider returned no response", errors.New("nil upstream response"), "", "")
+	}
+	if response.Body == nil {
+		return nil, h.terminalLocalAttempt(w, base, lease, sessionID, attempt, url.String(), http.StatusBadGateway, "bad_gateway", "provider returned no response body", errors.New("nil upstream response body"), "", "")
+	}
 	outcome := scheduler.Outcome{Class: scheduler.ClassifyHTTPStatus(response.StatusCode), HTTPStatus: response.StatusCode, UpstreamURL: url.String(), SessionID: sessionID, RetryAfter: parseRetryAfter(response.Header, h.now()), HasRetryAfter: hasValidRetryAfter(response.Header)}
 	if outcome.ShouldFailover() {
 		data, readErr := io.ReadAll(response.Body)
 		closeErr := response.Body.Close()
 		bodyCleanupErr := closeRequestBodies(base, mutable.Body, false)
 		patchCleanupErr := closePatchExecution(execution)
-		if requestCanceled(incoming.Context()) {
+		if requestCanceled(ctx) {
 			outcome.Class = scheduler.FailureClientCanceled
 			outcome.ClientCanceled = true
-			outcome.RawError = contextError(incoming.Context(), readErr).Error()
+			outcome.RawError = errors.Join(contextError(ctx, readErr), bodyCleanupErr, patchCleanupErr, closeErr).Error()
 			update := h.selector.Report(lease, outcome)
 			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 			_ = base.Close()
@@ -357,6 +527,18 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 			return nil, true
 		}
 		outcome.RawError = string(data)
+		// Cancellation can race the final read/close boundary.  Re-check before
+		// exposing this captured failure to the fallback loop so it cannot trigger
+		// a second Provider call after the client has gone away.
+		if requestCanceled(ctx) {
+			outcome.Class = scheduler.FailureClientCanceled
+			outcome.ClientCanceled = true
+			outcome.RawError = contextError(ctx, nil).Error()
+			update := h.selector.Report(lease, outcome)
+			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+			_ = base.Close()
+			return nil, true
+		}
 		update := h.selector.Report(lease, outcome)
 		return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, headers: response.Header.Clone(), body: data}, false
 	}
@@ -365,7 +547,17 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	// any terminal response visible to the client.
 	if err := closeRequestBodies(base, mutable.Body, true); err != nil {
 		_ = response.Body.Close()
+		if requestCanceled(ctx) {
+			h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), response.StatusCode, attempt, err)
+			return nil, true
+		}
 		return nil, h.terminalReplayFailure(w, nil, lease, sessionID, attempt, url.String(), errors.Join(err, execution.Close()), "", "")
+	}
+	if requestCanceled(ctx) {
+		_ = response.Body.Close()
+		_ = execution.Close()
+		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), response.StatusCode, attempt, nil)
+		return nil, true
 	}
 	if item.PatchPlan.HasStage(patch.StageResponse, prepared.Plan.RequestType) && response.StatusCode >= 200 && response.StatusCode < 300 {
 		responseSpec, specErr := responseScanSpec(item.PatchPlan, prepared.Plan.RequestType)
@@ -380,7 +572,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		_ = response.Body.Close()
 		return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, url.String(), err, "", patch.StageRequest)
 	}
-	h.streamResponse(w, incoming.Context(), response, lease, outcome, attempt)
+	h.streamResponse(w, ctx, response, lease, outcome, attempt)
 	return nil, true
 }
 
@@ -397,9 +589,10 @@ func (h *Handler) requestPatchFailure(w http.ResponseWriter, base bodyfile.Body,
 	if errors.Is(err, bodyfile.ErrLocalIO) {
 		return nil, h.terminalReplayFailure(w, base, lease, sessionID, attempt, upstream, err, patchID, stage)
 	}
-	outcome := scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sessionID, UpstreamURL: upstream, RawError: err.Error()}
-	update := h.selector.Report(lease, outcome)
-	return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, transport: true, patchFailure: true, patchID: patchID, patchStage: string(stage)}, false
+	// Request patch failures are terminal and must never trigger a Provider
+	// failover. The patch may have partially transformed the attempt body, so all
+	// cleanup happens before the single failure event/response is emitted.
+	return nil, h.terminalPatchFailure(w, base, lease, sessionID, attempt, upstream, err, patchID, stage)
 }
 
 func (h *Handler) handlePlanTransportError(w http.ResponseWriter, ctx context.Context, base bodyfile.Body, lease scheduler.AttemptLease, sessionID string, attempt int, upstream string, err error) (*capturedFailure, bool) {
@@ -417,36 +610,76 @@ func (h *Handler) handlePlanTransportError(w http.ResponseWriter, ctx context.Co
 }
 
 func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.Request, lease scheduler.AttemptLease, sessionID string, attempt int, response *http.Response, execution *patch.Execution, upstream string, spec bodyfile.ScanSpec) (*capturedFailure, bool) {
-	body, index, err := bodyfile.CaptureAndScan(response.Body, spec, h.replayDirectory)
-	closeErr := response.Body.Close()
-	if requestCanceled(incoming.Context()) {
-		if body != nil {
-			_ = body.Close()
+	if response == nil || response.Body == nil {
+		if requestCanceled(incomingContext(incoming)) {
+			h.reportClientCanceledWithAttempt(lease, sessionID, upstream, responseStatus(response), attempt, nil)
+			return nil, true
 		}
-		_ = execution.Close()
-		outcome := scheduler.Outcome{Class: scheduler.FailureClientCanceled, HTTPStatus: response.StatusCode, UpstreamURL: upstream, SessionID: sessionID, RawError: contextError(incoming.Context(), err).Error(), ClientCanceled: true}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+		return nil, h.terminalLocalAttempt(w, nil, lease, sessionID, attempt, upstream, http.StatusBadGateway, "bad_gateway", "provider returned no response body", errors.New("provider returned no response body"), "", patch.StageResponse)
+	}
+	ctx := incomingContext(incoming)
+	responseStatusCode := response.StatusCode
+	responseHeaders := response.Header.Clone()
+	closedResponse := false
+	closeResponse := func() error {
+		if closedResponse {
+			return nil
+		}
+		closedResponse = true
+		return response.Body.Close()
+	}
+	defer func() { _ = closeResponse() }()
+	report := func(kind EventKind, value scheduler.Outcome) {
+		if h == nil || h.selector == nil {
+			return
+		}
+		update := h.selector.Report(lease, value)
+		h.recordOutcome(kind, lease, value, attempt, update)
+	}
+	cancel := func(cause error, responseStarted bool) {
+		cleanupErr := errors.Join(closeResponse(), execution.Close())
+		value := scheduler.Outcome{
+			Class:           scheduler.FailureClientCanceled,
+			HTTPStatus:      responseStatusCode,
+			UpstreamURL:     upstream,
+			SessionID:       sessionID,
+			ResponseStarted: responseStarted,
+			ClientCanceled:  true,
+			RawError:        errors.Join(contextError(ctx, cause), cleanupErr).Error(),
+		}
+		report(EventFailure, value)
+	}
+	if requestCanceled(ctx) {
+		cancel(nil, false)
 		return nil, true
 	}
-	if err != nil || closeErr != nil {
+	body, index, captureErr := bodyfile.CaptureAndScan(response.Body, spec, h.replayDirectory)
+	closeErr := closeResponse()
+	if requestCanceled(ctx) {
+		bodyErr := error(nil)
+		if body != nil {
+			bodyErr = body.Close()
+		}
+		cancel(errors.Join(captureErr, closeErr, bodyErr), false)
+		return nil, true
+	}
+	if captureErr != nil || closeErr != nil {
 		executionErr := execution.Close()
 		cleanupErr := error(nil)
 		if body != nil {
 			cleanupErr = body.Close()
 		}
-		combined := errors.Join(err, closeErr, cleanupErr, executionErr)
-		if errors.Is(err, bodyfile.ErrLocalIO) || errors.Is(closeErr, bodyfile.ErrLocalIO) || errors.Is(cleanupErr, bodyfile.ErrLocalIO) {
+		combined := errors.Join(captureErr, closeErr, cleanupErr, executionErr)
+		if errors.Is(combined, bodyfile.ErrLocalIO) {
 			return nil, h.terminalReplayFailure(w, nil, lease, sessionID, attempt, upstream, combined, "", patch.StageResponse)
 		}
 		class := scheduler.FailureNeutral
-		if closeErr != nil || bodyfile.IsReadError(err) && !errors.Is(err, bodyfile.ErrLocalIO) {
+		if closeErr != nil || bodyfile.IsReadError(captureErr) && !errors.Is(captureErr, bodyfile.ErrLocalIO) {
 			class = scheduler.FailureChannelStream
 		}
-		outcome := scheduler.Outcome{Class: class, HTTPStatus: response.StatusCode, UpstreamURL: upstream, SessionID: sessionID, RawError: safeBodyfileError(combined)}
-		update := h.selector.Report(lease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		if bodyfile.IsReadError(err) || closeErr != nil {
+		outcome := scheduler.Outcome{Class: class, HTTPStatus: responseStatusCode, UpstreamURL: upstream, SessionID: sessionID, RawError: safeBodyfileError(combined)}
+		report(EventFailure, outcome)
+		if bodyfile.IsReadError(captureErr) || closeErr != nil {
 			writeError(w, http.StatusBadGateway, "bad_gateway", "provider response ended unexpectedly")
 		} else {
 			writeError(w, http.StatusBadGateway, "patch_failed", "response patch failed")
@@ -454,8 +687,14 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 		return nil, true
 	}
 
-	mutable := patch.NewMutableResponse(response.StatusCode, body, index, patch.NewHTTPHeaderSet(response.Header.Clone()))
+	mutable := patch.NewMutableResponse(responseStatusCode, body, index, patch.NewHTTPHeaderSet(responseHeaders))
+	var err error
 	if err := execution.ApplyResponseOnly(mutable); err != nil {
+		if requestCanceled(ctx) {
+			cleanupErr := closeResponseBodies(body, mutable.Body)
+			cancel(errors.Join(err, cleanupErr), false)
+			return nil, true
+		}
 		patchID, stage := patchErrorDetails(err, patch.StageResponse)
 		cleanupErr := closeResponseBodies(body, mutable.Body)
 		executionErr := execution.Close()
@@ -465,16 +704,29 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 		}
 		return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, upstream, combined, patchID, stage)
 	}
-	responseHeaders, err := mutableHTTPHeaders(mutable.Headers)
+	responseHeaders, err = mutableHTTPHeaders(mutable.Headers)
 	if err != nil {
+		if requestCanceled(ctx) {
+			cancel(err, false)
+			return nil, true
+		}
 		cleanupErr := closeResponseBodies(body, mutable.Body)
 		return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, upstream, errors.Join(err, cleanupErr, execution.Close()), "", patch.StageResponse)
 	}
 	if mutable.Body == nil {
+		err = errors.New("patch returned nil response body")
+		if requestCanceled(ctx) {
+			cancel(err, false)
+			return nil, true
+		}
 		_ = body.Close()
-		return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, upstream, errors.Join(errors.New("patch returned nil response body"), execution.Close()), "", patch.StageResponse)
+		return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, upstream, errors.Join(err, execution.Close()), "", patch.StageResponse)
 	}
 	if err := execution.Close(); err != nil {
+		if requestCanceled(ctx) {
+			cancel(err, false)
+			return nil, true
+		}
 		cleanupErr := closeResponseBodies(body, mutable.Body)
 		return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, upstream, errors.Join(err, cleanupErr), "", patch.StageResponse)
 	}
@@ -483,37 +735,71 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 	responseHeaders.Set("Content-Length", strconv.FormatInt(mutable.Body.Size(), 10))
 	reader, err := mutable.Body.OpenReader()
 	if err != nil {
+		if requestCanceled(ctx) {
+			cancel(err, false)
+			return nil, true
+		}
 		cleanupErr := closeResponseBodies(body, mutable.Body)
 		if errors.Is(err, bodyfile.ErrLocalIO) || errors.Is(cleanupErr, bodyfile.ErrLocalIO) {
 			return nil, h.terminalReplayFailure(w, nil, lease, sessionID, attempt, upstream, errors.Join(err, cleanupErr), "", patch.StageResponse)
 		}
 		return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, upstream, errors.Join(err, cleanupErr), "", patch.StageResponse)
 	}
-
+	readerClosed := false
+	closeReader := func() error {
+		if readerClosed {
+			return nil
+		}
+		readerClosed = true
+		return reader.Close()
+	}
+	defer func() { _ = closeReader() }()
+	if requestCanceled(ctx) {
+		cancel(closeReader(), false)
+		_ = closeResponseBodies(body, mutable.Body)
+		return nil, true
+	}
 	copyResponseHeaders(w.Header(), responseHeaders)
+	if requestCanceled(ctx) {
+		cancel(closeReader(), false)
+		_ = closeResponseBodies(body, mutable.Body)
+		return nil, true
+	}
 	w.WriteHeader(mutable.Status)
+	responseStarted := true
+	if requestCanceled(ctx) {
+		cancel(closeReader(), responseStarted)
+		_ = closeResponseBodies(body, mutable.Body)
+		return nil, true
+	}
 	_, copyErr := io.Copy(w, reader)
-	readerCloseErr := reader.Close()
+	readerCloseErr := closeReader()
 	bodyCloseErr := closeResponseBodies(body, mutable.Body)
-	outcome := scheduler.Outcome{Class: scheduler.FailureNone, HTTPStatus: mutable.Status, UpstreamURL: upstream, SessionID: sessionID, ResponseStarted: true}
+	if requestCanceled(ctx) {
+		cancel(errors.Join(copyErr, readerCloseErr, bodyCloseErr), responseStarted)
+		return nil, true
+	}
+	outcome := scheduler.Outcome{Class: scheduler.FailureNone, HTTPStatus: mutable.Status, UpstreamURL: upstream, SessionID: sessionID, ResponseStarted: responseStarted}
 	if copyErr != nil {
 		outcome.Class = scheduler.FailureDownstream
 		outcome.RawError = copyErr.Error()
-		if requestCanceled(incoming.Context()) {
-			outcome.Class = scheduler.FailureClientCanceled
-			outcome.ClientCanceled = true
-		}
 	} else if readerCloseErr != nil || bodyCloseErr != nil {
 		outcome.Class = scheduler.FailureNeutral
 		outcome.RawError = safeBodyfileError(errors.Join(readerCloseErr, bodyCloseErr))
 	}
-	update := h.selector.Report(lease, outcome)
 	if outcome.Class == scheduler.FailureNone {
-		h.recordOutcome(EventSuccess, lease, outcome, attempt, update)
+		report(EventSuccess, outcome)
 	} else {
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+		report(EventFailure, outcome)
 	}
 	return nil, true
+}
+
+func incomingContext(incoming *http.Request) context.Context {
+	if incoming == nil {
+		return context.Background()
+	}
+	return incoming.Context()
 }
 
 func responseScanSpec(plan patch.Plan, requestType traffic.RequestType) (bodyfile.ScanSpec, error) {
@@ -532,9 +818,20 @@ func cleanUpstreamHeaders(source http.Header) (http.Header, error) {
 	removeHopByHop(headers)
 	deleteHeaderFold(headers, "Content-Length")
 	deleteHeaderFold(headers, "Host")
-	deleteHeaderFold(headers, "Authorization")
-	deleteHeaderFold(headers, "X-Api-Key")
+	deleteCredentialHeaders(headers)
 	return headers, nil
+}
+
+// deleteCredentialHeaders removes every credential-shaped header that can be
+// supplied by a client or an adapter. Gateway writes the selected target key
+// only after request patches/encoding complete.
+func deleteCredentialHeaders(headers http.Header) {
+	for _, name := range []string{
+		"Authorization", "Proxy-Authorization", "X-Api-Key", "Api-Key",
+		"X-Gateway-Key", "X-Management-Key", "X-Provider-Key",
+	} {
+		deleteHeaderFold(headers, name)
+	}
 }
 
 func mutableHTTPHeaders(headers patch.MutableHeaderSet) (http.Header, error) {

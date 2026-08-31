@@ -244,6 +244,11 @@ func TestExecutionPlanValidation(t *testing.T) {
 			p.FixedTarget = &provider.CompiledFixedTarget{CompiledTarget: provider.CompiledTarget{ID: "fixed"}, Protocol: "openai_responses"}
 			return p
 		}()},
+		{name: "classifier wrong budget", plan: func() ExecutionPlan {
+			p := validFixed
+			p.AttemptPolicy = scheduler.AttemptPolicy{MaxAttempts: 3}
+			return p
+		}()},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -11,10 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/provider"
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 func freeListenAddr(t *testing.T) string {
@@ -78,6 +82,231 @@ func TestNewBindsLoopbackAndServesManagementAndMessagesRoutes(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m"}`)))
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "gateway_not_configured") {
 		t.Fatalf("unconfigured Messages route = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAppProductionClassifierProviderPoolUsesOverrideSingleCallAndRawQuery(t *testing.T) {
+	var calls atomic.Int32
+	var upstreamPath, upstreamQuery, upstreamBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		upstreamPath = r.URL.EscapedPath()
+		upstreamQuery = r.URL.RawQuery
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read classifier body: %v", err)
+		}
+		upstreamBody = string(data)
+		if r.Header.Get("Authorization") != "Bearer provider-key" {
+			t.Errorf("classifier auth = %q", r.Header.Get("Authorization"))
+		}
+		_, _ = io.WriteString(w, `{"type":"message","content":[]}`)
+	}))
+	defer upstream.Close()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Default()
+	cfg.Service.ListenAddr = freeListenAddr(t)
+	cfg.Auth.ManagementKey = "management-key"
+	cfg.Auth.GatewayKey = "gateway-key"
+	cfg.AutoMode = config.AutoModeConfig{Mode: config.AutoModeProviderPool, Model: "classifier-model"}
+	cfg.Providers = []config.ProviderConfig{{
+		ID:      "11111111-1111-4111-8111-111111111111",
+		Name:    "classifier-provider",
+		BaseURL: upstream.URL + "/prefix",
+		APIKey:  "provider-key",
+		Models:  []string{"classifier-model"},
+		Enabled: true,
+	}}
+	writeAppConfig(t, path, cfg)
+	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+
+	requestBody := `{"model":"client-model","system":[{"type":"text","text":"` + automode.SecurityMarker + `. classify"}],"future":{"kept":true}}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages?trace=%2F&trace=a+b", strings.NewReader(requestBody))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	request.Header.Set("X-Claude-Code-Session-Id", "classifier-session")
+	response := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != `{"type":"message","content":[]}` {
+		t.Fatalf("classifier response = %d %s", response.Code, response.Body.String())
+	}
+	if calls.Load() != 1 || upstreamPath != "/prefix/v1/messages" || upstreamQuery != "trace=%2F&trace=a+b" {
+		t.Fatalf("classifier calls=%d path=%q query=%q", calls.Load(), upstreamPath, upstreamQuery)
+	}
+	wantBody := strings.Replace(requestBody, `"client-model"`, `"classifier-model"`, 1)
+	if upstreamBody != wantBody {
+		t.Fatalf("classifier body = %q, want %q", upstreamBody, wantBody)
+	}
+	assignments := application.selector.Assignments("")
+	if len(assignments) != 1 || assignments[0].ProviderID != cfg.Providers[0].ID ||
+		assignments[0].Key.SessionID != "classifier-session" || assignments[0].Key.Model != "classifier-model" ||
+		assignments[0].Key.RequestType != traffic.RequestTypeClassifier {
+		t.Fatalf("classifier assignment = %#v", assignments)
+	}
+}
+
+func TestAppClassifierProviderPoolFailureUsesOneProviderAndNoFailoverEvent(t *testing.T) {
+	var firstCalls, secondCalls atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		firstCalls.Add(1)
+		w.Header().Set("X-Classifier-Error", "raw")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "complete classifier failure")
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { secondCalls.Add(1) }))
+	defer second.Close()
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Default()
+	cfg.Service.ListenAddr = freeListenAddr(t)
+	cfg.Auth.ManagementKey = "management-key"
+	cfg.Auth.GatewayKey = "gateway-key"
+	cfg.AutoMode = config.AutoModeConfig{Mode: config.AutoModeProviderPool, Model: "classifier-model"}
+	cfg.Providers = []config.ProviderConfig{
+		{ID: "11111111-1111-4111-8111-111111111111", Name: "first", BaseURL: first.URL, APIKey: "first-key", Models: []string{"classifier-model"}, Enabled: true},
+		{ID: "22222222-2222-4222-8222-222222222222", Name: "second", BaseURL: second.URL, APIKey: "second-key", Models: []string{"classifier-model"}, Enabled: true},
+	}
+	writeAppConfig(t, path, cfg)
+	var stdout, stderr bytes.Buffer
+	application, err := New(Options{ConfigPath: path, Stdout: &stdout, Stderr: &stderr, Restart: func() error { return errors.New("not used") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+	body := `{"model":"client-model","system":[{"text":"` + automode.SecurityMarker + `"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	request.Header.Set("X-Claude-Code-Session-Id", "classifier-failure-session")
+	response := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "complete classifier failure" ||
+		response.Header().Get("X-Classifier-Error") != "raw" || firstCalls.Load() != 1 || secondCalls.Load() != 0 {
+		t.Fatalf("classifier failure = %d headers=%v body=%q calls=%d/%d", response.Code, response.Header(), response.Body.String(), firstCalls.Load(), secondCalls.Load())
+	}
+	if strings.Contains(stderr.String(), "kind=failover") || strings.Count(stderr.String(), "kind=failure") != 1 ||
+		!strings.Contains(stderr.String(), `request_type="classifier"`) || !strings.Contains(stderr.String(), `attempt=1`) {
+		t.Fatalf("classifier failure events = %q", stderr.String())
+	}
+}
+
+func TestAppDisabledClassifierNeverFallsBackToNormal(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer upstream.Close()
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Default()
+	cfg.Service.ListenAddr = freeListenAddr(t)
+	cfg.Auth.ManagementKey = "management-key"
+	cfg.Auth.GatewayKey = "gateway-key"
+	cfg.Providers = []config.ProviderConfig{{
+		ID: "11111111-1111-4111-8111-111111111111", Name: "normal-provider", BaseURL: upstream.URL,
+		APIKey: "provider-key", Models: []string{"client-model"}, Enabled: true,
+	}}
+	writeAppConfig(t, path, cfg)
+	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+	body := `{"model":"client-model","system":[{"text":"` + automode.SecurityMarker + `"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	response := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "auto_mode_not_configured") || calls.Load() != 0 {
+		t.Fatalf("disabled classifier = %d %s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+}
+
+func TestAppFixedModeNormalUsesPoolAndClassifierReportsMissingAdapter(t *testing.T) {
+	var normalCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		normalCalls.Add(1)
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("normal path = %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, "normal-ok")
+	}))
+	defer upstream.Close()
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Default()
+	cfg.Service.ListenAddr = freeListenAddr(t)
+	cfg.Auth.ManagementKey = "management-key"
+	cfg.Auth.GatewayKey = "gateway-key"
+	cfg.AutoMode = config.AutoModeConfig{
+		Mode:  config.AutoModeFixedProvider,
+		Model: "classifier-model",
+		FixedProvider: &config.FixedProviderConfig{
+			BaseURL: "https://classifier.example/prefix", APIKey: "fixed-secret",
+			Protocol: config.ProtocolOpenAIResponses, TLS: config.TLSConfig{}, Patches: []string{},
+		},
+	}
+	cfg.Providers = []config.ProviderConfig{{
+		ID: "11111111-1111-4111-8111-111111111111", Name: "normal-provider", BaseURL: upstream.URL,
+		APIKey: "provider-key", Models: []string{"normal-model"}, Enabled: true,
+	}}
+	writeAppConfig(t, path, cfg)
+	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+
+	normal := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"normal-model","system":[{"text":"ordinary"}]}`))
+	normal.Header.Set("Authorization", "Bearer gateway-key")
+	normalResponse := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(normalResponse, normal)
+	if normalResponse.Code != http.StatusOK || normalResponse.Body.String() != "normal-ok" || normalCalls.Load() != 1 || application.gateway.FixedTargetDiagnostics() != nil {
+		t.Fatalf("normal fixed-mode request = %d %q calls=%d diagnostic=%#v", normalResponse.Code, normalResponse.Body.String(), normalCalls.Load(), application.gateway.FixedTargetDiagnostics())
+	}
+
+	classifierBody := `{"model":"client-model","system":[{"text":"` + automode.SecurityMarker + `"}]}`
+	classifier := httptest.NewRequest(http.MethodPost, "/v1/messages?trace=%2F&trace=a+b", strings.NewReader(classifierBody))
+	classifier.Header.Set("Authorization", "Bearer gateway-key")
+	classifier.Header.Set("X-Claude-Code-Session-Id", "fixed-session")
+	classifierResponse := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(classifierResponse, classifier)
+	if classifierResponse.Code != http.StatusNotImplemented || !strings.Contains(classifierResponse.Body.String(), "protocol_not_implemented") || normalCalls.Load() != 1 {
+		t.Fatalf("fixed classifier = %d %s normal_calls=%d", classifierResponse.Code, classifierResponse.Body.String(), normalCalls.Load())
+	}
+	call := application.gateway.FixedTargetDiagnostics()
+	if call == nil || call.UpstreamURL != "https://classifier.example/prefix/v1/responses?trace=%2F&trace=a+b" ||
+		call.GatewayStatus != http.StatusNotImplemented || call.UpstreamStatus != 0 || call.SessionID != "fixed-session" {
+		t.Fatalf("fixed diagnostics = %#v", call)
+	}
+	if len(application.selector.Assignments(provider.FixedTargetID)) != 0 {
+		t.Fatal("fixed target entered scheduler assignments")
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	statusRequest.Header.Set("Authorization", "Bearer management-key")
+	status := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(status, statusRequest)
+	var statusBody struct {
+		AutoMode struct {
+			FixedProviderConfigured bool   `json:"fixed_provider_configured"`
+			FixedProviderProtocol   string `json:"fixed_provider_protocol"`
+			FixedTargetLastCall     *struct {
+				UpstreamURL string `json:"upstream_url"`
+			} `json:"fixed_target_last_call"`
+		} `json:"auto_mode"`
+	}
+	decodeErr := json.Unmarshal(status.Body.Bytes(), &statusBody)
+	if status.Code != http.StatusOK || decodeErr != nil || !statusBody.AutoMode.FixedProviderConfigured ||
+		statusBody.AutoMode.FixedProviderProtocol != config.ProtocolOpenAIResponses ||
+		statusBody.AutoMode.FixedTargetLastCall == nil || statusBody.AutoMode.FixedTargetLastCall.UpstreamURL != call.UpstreamURL ||
+		strings.Contains(status.Body.String(), "fixed-secret") {
+		t.Fatalf("fixed status = %d %s", status.Code, status.Body.String())
+	}
+	healthRequest := httptest.NewRequest(http.MethodGet, "/api/v1/provider-health", nil)
+	healthRequest.Header.Set("Authorization", "Bearer management-key")
+	healthResponse := httptest.NewRecorder()
+	application.server.Handler.ServeHTTP(healthResponse, healthRequest)
+	if healthResponse.Code != http.StatusOK || strings.Contains(healthResponse.Body.String(), provider.FixedTargetID) || strings.Contains(healthResponse.Body.String(), "fixed-secret") {
+		t.Fatalf("fixed target leaked into provider health = %d %s", healthResponse.Code, healthResponse.Body.String())
 	}
 }
 

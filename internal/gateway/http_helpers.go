@@ -49,6 +49,7 @@ func upstreamURL(item *provider.CompiledProvider, requestURL *url.URL) (*url.URL
 		result.ForceQuery = false
 	}
 	result.Fragment = ""
+	result.RawFragment = ""
 	return &result, nil
 }
 

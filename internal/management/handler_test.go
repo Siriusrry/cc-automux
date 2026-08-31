@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/patch"
@@ -181,6 +182,74 @@ func TestConfigAndProviderCRUDAndKeyRotation(t *testing.T) {
 	}
 	if rec := request(handler, http.MethodGet, "/api/v1/status", "Bearer new-management-key", ""); rec.Code != http.StatusOK {
 		t.Fatalf("new key after rotation = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestManagementConfigRoundTripsFixedAutoModeAndStatusOmitsKey(t *testing.T) {
+	manager := testManager(t, nil)
+	diagnostics := automode.NewDiagnostics()
+	diagnostics.Record(automode.FixedTargetCall{
+		ObservedAt:     time.Date(2026, 8, 31, 8, 0, 0, 0, time.UTC),
+		UpstreamURL:    "https://classifier.example/prefix/v1/responses?trace=%2F",
+		GatewayStatus:  http.StatusBadGateway,
+		GatewayError:   "protocol_conversion_failed",
+		UpstreamStatus: http.StatusOK,
+		SessionID:      "original-session",
+		Error:          "complete conversion error",
+		UpstreamHeaders: http.Header{
+			"X-Upstream": []string{"raw"},
+		},
+		UpstreamBody: `{"raw":"response"}`,
+	})
+	handler := NewWithOptions(manager, Options{AutoModeDiagnostics: diagnostics})
+	next := manager.Snapshot().Config()
+	next.AutoMode = config.AutoModeConfig{
+		Mode:  config.AutoModeFixedProvider,
+		Model: "classifier-model",
+		FixedProvider: &config.FixedProviderConfig{
+			BaseURL: "https://classifier.example/prefix", APIKey: "fixed-secret",
+			UseXAPIKey: true, Protocol: config.ProtocolOpenAIResponses,
+			TLS:     config.TLSConfig{InsecureSkipVerify: true},
+			Patches: []string{patch.AnyRouterClassifierRequestID},
+		},
+	}
+	body, err := json.Marshal(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := request(handler, http.MethodPut, "/api/v1/config", "Bearer management-key", string(body))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("PUT fixed Auto Mode = %d %s", updated.Code, updated.Body.String())
+	}
+	gotResponse := request(handler, http.MethodGet, "/api/v1/config", "Bearer management-key", "")
+	var got config.Config
+	if gotResponse.Code != http.StatusOK {
+		t.Fatalf("GET fixed Auto Mode = %d %s", gotResponse.Code, gotResponse.Body.String())
+	}
+	if err := json.Unmarshal(gotResponse.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.AutoMode.FixedProvider == nil || got.AutoMode.Mode != config.AutoModeFixedProvider ||
+		got.AutoMode.Model != "classifier-model" || got.AutoMode.FixedProvider.BaseURL != "https://classifier.example/prefix" ||
+		got.AutoMode.FixedProvider.APIKey != "fixed-secret" || !got.AutoMode.FixedProvider.UseXAPIKey ||
+		got.AutoMode.FixedProvider.Protocol != config.ProtocolOpenAIResponses || !got.AutoMode.FixedProvider.TLS.InsecureSkipVerify ||
+		len(got.AutoMode.FixedProvider.Patches) != 1 || got.AutoMode.FixedProvider.Patches[0] != patch.AnyRouterClassifierRequestID {
+		t.Fatalf("fixed Auto Mode round trip = %#v", got.AutoMode)
+	}
+
+	status := request(handler, http.MethodGet, "/api/v1/status", "Bearer management-key", "")
+	if status.Code != http.StatusOK || strings.Contains(status.Body.String(), "fixed-secret") {
+		t.Fatalf("fixed status = %d %s", status.Code, status.Body.String())
+	}
+	var decoded statusResponse
+	if err := json.Unmarshal(status.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	last := decoded.AutoMode.FixedTargetLastCall
+	if !decoded.AutoMode.FixedProviderConfigured || decoded.AutoMode.FixedProviderProtocol != config.ProtocolOpenAIResponses ||
+		last == nil || last.UpstreamURL != "https://classifier.example/prefix/v1/responses?trace=%2F" ||
+		last.UpstreamStatus != http.StatusOK || last.UpstreamHeaders.Get("X-Upstream") != "raw" || last.UpstreamBody != `{"raw":"response"}` {
+		t.Fatalf("fixed status data = %#v", decoded.AutoMode)
 	}
 }
 

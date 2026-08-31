@@ -12,12 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/gateway"
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/management"
 	"github.com/Siriusrry/cc-automux/internal/patch"
+	"github.com/Siriusrry/cc-automux/internal/protocol"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
@@ -202,6 +204,7 @@ func New(options Options) (*App, error) {
 		logs.error.Printf("pending configuration was not activated: %v", startup.Warning())
 	}
 	app.manager = manager
+	fixedDiagnostics := automode.NewDiagnostics()
 	clock := options.Now
 	if clock == nil {
 		clock = time.Now
@@ -218,21 +221,30 @@ func New(options Options) (*App, error) {
 	}
 	app.health = healthStore
 	app.selector = selector
-	flowRegistry, flowErr := flow.NewRegistry(flow.NewNormalPlanner())
+	classifierDetector := automode.NewClassifierDetector()
+	detectorRegistry, detectorErr := traffic.NewRegistry(classifierDetector)
+	if detectorErr != nil {
+		closeResources(app.logs, app.listener)
+		return nil, fmt.Errorf("initialize detector registry: %w", detectorErr)
+	}
+	flowRegistry, flowErr := flow.NewRegistry(flow.NewNormalPlanner(), automode.NewClassifierPlanner())
 	if flowErr != nil {
 		closeResources(app.logs, app.listener)
 		return nil, fmt.Errorf("initialize flow registry: %w", flowErr)
 	}
 	app.gateway = gateway.NewWithOptions(app.snapshotForGateway, selector, gateway.Options{
 		Recorder:         gateway.EventRecorderFunc(app.recordGatewayEvent),
-		DetectorRegistry: traffic.DefaultRegistry(),
+		DetectorRegistry: detectorRegistry,
 		FlowDispatcher:   flow.NewDispatcher(flowRegistry),
+		ProtocolAdapters: protocol.EmptyRegistry(),
+		FixedDiagnostics: fixedDiagnostics,
 	})
 	app.management = management.NewWithOptions(manager, management.Options{
-		Health:         healthStore,
-		Selector:       selector,
-		Sync:           app.syncRuntime,
-		ActiveRequests: app.activeDataRequests,
+		Health:              healthStore,
+		Selector:            selector,
+		Sync:                app.syncRuntime,
+		ActiveRequests:      app.activeDataRequests,
+		AutoModeDiagnostics: fixedDiagnostics,
 	})
 	app.syncRuntime()
 	app.server = newHTTPServer(app.rootHandler())
@@ -397,25 +409,49 @@ func (a *App) snapshotForGateway() scheduler.Snapshot {
 	if a == nil || a.manager == nil {
 		return nil
 	}
-	a.syncRuntime()
-	return a.manager.Snapshot()
+	// Capture and reconcile under one lock. A second Manager read (or another
+	// request racing a newer revision) must not leave Gateway using a snapshot
+	// that the Scheduler/Health pair has not seen yet.
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	snapshot := a.manager.Snapshot()
+	a.syncRuntimeSnapshotLocked(snapshot)
+	return snapshot
 }
 
 func (a *App) syncRuntime() {
 	if a == nil || a.manager == nil || a.selector == nil {
 		return
 	}
-	snapshot := a.manager.Snapshot()
-	if snapshot == nil {
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	a.syncRuntimeSnapshotLocked(a.manager.Snapshot())
+}
+
+func (a *App) syncRuntimeSnapshot(snapshot scheduler.Snapshot) {
+	if a == nil || a.selector == nil {
 		return
 	}
 	a.runtimeMu.Lock()
 	defer a.runtimeMu.Unlock()
+	a.syncRuntimeSnapshotLocked(snapshot)
+}
+
+func (a *App) syncRuntimeSnapshotLocked(snapshot scheduler.Snapshot) {
+	if a == nil || a.selector == nil {
+		return
+	}
+	if snapshot == nil {
+		return
+	}
 	if snapshot.Revision() <= a.syncedRevision {
 		return
 	}
 	a.selector.Reconcile(snapshot)
 	a.syncedRevision = snapshot.Revision()
+	if a.gateway != nil {
+		a.gateway.SetRuntimeSnapshot(snapshot)
+	}
 }
 
 func (a *App) activeDataRequests() int64 {

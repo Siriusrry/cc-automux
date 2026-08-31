@@ -34,11 +34,22 @@ func NewClientPool() *ClientPool {
 }
 
 func (p *ClientPool) Client(item *provider.CompiledProvider) (*http.Client, error) {
+	if item == nil {
+		return nil, errors.New("provider is nil")
+	}
+	return p.ClientForTarget(&item.CompiledTarget)
+}
+
+// ClientForTarget returns a pooled HTTP client for any compiled target,
+// including a pool-external fixed classifier target. Pool identity remains the
+// target ID plus generation, so changing endpoint/auth/TLS never reuses an old
+// transport.
+func (p *ClientPool) ClientForTarget(item *provider.CompiledTarget) (*http.Client, error) {
 	if p == nil {
 		return nil, errors.New("provider client pool is nil")
 	}
 	if item == nil {
-		return nil, errors.New("provider is nil")
+		return nil, errors.New("target is nil")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -72,14 +83,26 @@ func (p *ClientPool) Client(item *provider.CompiledProvider) (*http.Client, erro
 }
 
 func (p *ClientPool) Reconcile(providers []*provider.CompiledProvider) {
+	p.ReconcileTargets(providers, nil)
+}
+
+// ReconcileTargets keeps both pool-provider clients and the optional fixed
+// classifier target client set aligned with the published runtime snapshot.
+// Fixed targets are intentionally not represented as CompiledProvider values,
+// but their target ID/generation still own a transport that must be retired on
+// hot update or mode disable.
+func (p *ClientPool) ReconcileTargets(providers []*provider.CompiledProvider, fixed *provider.CompiledFixedTarget) {
 	if p == nil {
 		return
 	}
-	active := make(map[clientKey]struct{}, len(providers))
+	active := make(map[clientKey]struct{}, len(providers)+1)
 	for _, item := range providers {
 		if item != nil {
 			active[clientKey{providerID: item.ID, generation: item.Generation}] = struct{}{}
 		}
+	}
+	if fixed != nil {
+		active[clientKey{providerID: fixed.ID, generation: fixed.Generation}] = struct{}{}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

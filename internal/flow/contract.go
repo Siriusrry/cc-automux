@@ -79,6 +79,9 @@ func (p ExecutionPlan) Validate() error {
 	if p.TargetMode == TargetModeFixedTarget && requestType != traffic.RequestTypeClassifier {
 		return ErrInvalidExecutionPlan
 	}
+	if requestType == traffic.RequestTypeClassifier && p.AttemptPolicy.MaxAttempts != 1 {
+		return ErrInvalidExecutionPlan
+	}
 	return nil
 }
 
