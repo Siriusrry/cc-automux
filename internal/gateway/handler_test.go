@@ -678,7 +678,7 @@ func TestGatewayCancellationAfterDoStopsBeforeResponseAndFailover(t *testing.T) 
 	events := &eventCollector{}
 	pool := NewClientPool()
 	ctx, cancel := context.WithCancel(context.Background())
-	pool.clients[clientKey{providerID: first.ID, generation: first.Generation}] = pooledClient{
+	pool.clients[clientKey{providerID: first.ID, generation: first.Generation}] = &pooledClient{
 		client: &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 			cancel()
 			return &http.Response{
@@ -690,7 +690,7 @@ func TestGatewayCancellationAfterDoStopsBeforeResponseAndFailover(t *testing.T) 
 		})},
 		transport: &http.Transport{},
 	}
-	pool.clients[clientKey{providerID: second.ID, generation: second.Generation}] = pooledClient{
+	pool.clients[clientKey{providerID: second.ID, generation: second.Generation}] = &pooledClient{
 		client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			secondCalls.Add(1)
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("unexpected"))}, nil
@@ -858,7 +858,7 @@ func TestGatewayTransportFailuresFailOverWithCompleteDiagnostics(t *testing.T) {
 			selector := &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(first, "m"), leaseFor(second, "m")}}
 			events := &eventCollector{}
 			pool := NewClientPool()
-			pool.clients[clientKey{providerID: first.ID, generation: first.Generation}] = pooledClient{
+			pool.clients[clientKey{providerID: first.ID, generation: first.Generation}] = &pooledClient{
 				client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 					return nil, failure.err
 				})},

@@ -447,17 +447,18 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	if h.clients == nil {
 		return nil, h.terminalLocalAttempt(w, base, lease, sessionID, attempt, url.String(), http.StatusInternalServerError, "gateway_unavailable", "provider client is unavailable", errors.New("provider client pool is nil"), "", "")
 	}
-	client, err := h.clients.Client(item)
+	clientLease, err := h.clients.Acquire(item)
 	if err != nil {
 		closeErr := requestBody.Close()
 		cleanupErr := closeRequestAttempt(base, mutable.Body, execution, false)
 		return nil, h.terminalLocalAttempt(w, base, lease, sessionID, attempt, url.String(), http.StatusInternalServerError, "gateway_unavailable", "provider client is unavailable", errors.Join(err, closeErr, cleanupErr), "", "")
 	}
+	defer clientLease.Release()
 	if requestCanceled(ctx) {
 		return cancelAttempt(mutable.Body, requestBody, nil)
 	}
 	h.record(Event{Kind: EventForward, Time: h.now().UTC(), ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
-	response, requestErr := client.Do(request)
+	response, requestErr := clientLease.Client().Do(request)
 	requestCloseErr := requestBody.Close()
 	if requestErr != nil {
 		if response != nil && response.Body != nil {

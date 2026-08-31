@@ -595,12 +595,13 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 			"gateway_unavailable", "fixed target client is unavailable", errors.New("provider client pool is nil"), 0, nil, "", "")
 		return
 	}
-	client, err := h.clients.ClientForTarget(&target.CompiledTarget)
+	clientLease, err := h.clients.AcquireTarget(&target.CompiledTarget)
 	if err != nil {
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusInternalServerError,
 			"gateway_unavailable", "fixed target client is unavailable", err, 0, nil, "", "")
 		return
 	}
+	defer clientLease.Release()
 	// Record forwarding only once a client is available and immediately before
 	// the actual upstream call; a local client-pool failure is not a call.
 	if requestCanceled(ctx) {
@@ -608,7 +609,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	}
 	lifecycle.markStarted()
 	h.recordFixedEvent(EventForward, target, sessionID, model, upstream, 1, 0, "")
-	response, requestErr := client.Do(request)
+	response, requestErr := clientLease.Client().Do(request)
 	requestCloseErr := lifecycle.closeRequestBody()
 	if requestErr != nil {
 		facts := consumeFixedResponse(response)

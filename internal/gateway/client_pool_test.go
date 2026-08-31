@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
@@ -81,5 +82,98 @@ func TestClientPoolUsesCompiledCustomCAAndGatewayAuthHeaders(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("custom-CA status = %d", response.StatusCode)
+	}
+}
+
+func TestClientPoolRetiresOldGenerationWithoutRepersistingIt(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	old := &provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{ID: id, Generation: provider.ProviderGeneration("old")}}
+	current := &provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{ID: id, Generation: provider.ProviderGeneration("current")}}
+	oldKey := clientKey{providerID: id, generation: old.Generation}
+	currentKey := clientKey{providerID: id, generation: current.Generation}
+
+	pool := NewClientPool()
+	defer pool.Close()
+	pool.Reconcile([]*provider.CompiledProvider{old})
+	inFlight, err := pool.Acquire(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Reconcile([]*provider.CompiledProvider{current})
+	if !inFlight.entry.retired || inFlight.entry.idleClosed {
+		t.Fatalf("in-flight retired entry = %#v", inFlight.entry)
+	}
+
+	late, err := pool.Acquire(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !late.entry.retired {
+		t.Fatal("stale generation received an active pooled entry")
+	}
+	pool.mu.Lock()
+	_, oldPersisted := pool.clients[oldKey]
+	_, currentPersistedBeforeAcquire := pool.clients[currentKey]
+	pool.mu.Unlock()
+	if oldPersisted || currentPersistedBeforeAcquire {
+		t.Fatalf("pool state before current acquire: old=%v current=%v", oldPersisted, currentPersistedBeforeAcquire)
+	}
+
+	currentLease, err := pool.Acquire(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.mu.Lock()
+	_, currentPersisted := pool.clients[currentKey]
+	pool.mu.Unlock()
+	if !currentPersisted || currentLease.entry.retired {
+		t.Fatal("current generation was not retained in the pool")
+	}
+
+	late.Release()
+	if !late.entry.idleClosed || late.entry.refs != 0 {
+		t.Fatalf("late stale lease was not closed: %#v", late.entry)
+	}
+	inFlight.Release()
+	if !inFlight.entry.idleClosed || inFlight.entry.refs != 0 {
+		t.Fatalf("in-flight stale lease was not closed: %#v", inFlight.entry)
+	}
+	currentLease.Release()
+	if currentLease.entry.idleClosed || currentLease.entry.refs != 0 {
+		t.Fatalf("active current lease was retired: %#v", currentLease.entry)
+	}
+}
+
+func TestClientPoolConcurrentStaleAcquireCannotRestoreGeneration(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	old := &provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{ID: id, Generation: provider.ProviderGeneration("old")}}
+	current := &provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{ID: id, Generation: provider.ProviderGeneration("current")}}
+	pool := NewClientPool()
+	defer pool.Close()
+	pool.Reconcile([]*provider.CompiledProvider{current})
+
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for index := 0; index < 32; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			lease, err := pool.Acquire(old)
+			if err != nil {
+				t.Errorf("Acquire(old): %v", err)
+				return
+			}
+			lease.Release()
+		}()
+	}
+	close(start)
+	wait.Wait()
+
+	pool.mu.Lock()
+	_, oldPersisted := pool.clients[clientKey{providerID: id, generation: old.Generation}]
+	pool.mu.Unlock()
+	if oldPersisted {
+		t.Fatal("concurrent stale requests restored the retired generation")
 	}
 }
