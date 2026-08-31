@@ -84,6 +84,18 @@ type HarnessesConfig struct {
 	ClaudeCode ClaudeCodeConfig `json:"claude_code"`
 }
 
+// HarnessMutation is the narrow server-side transaction surface used by the
+// harness configuration service. Implementations hold the Runtime mutation
+// lock for the lifetime of the callback that receives this value. The methods
+// intentionally return only errors so the config package does not depend on
+// Runtime's result types.
+type HarnessMutation interface {
+	Config() Config
+	UpdateHarness(func(*HarnessesConfig) error) error
+	ClearActiveProfileID() error
+	SetActiveProfileID(string) error
+}
+
 // ClaudeCodeConfig is the persistent, file-independent portion of the Claude
 // Code harness configuration. External settings.json semantics belong to the
 // harnessconfig package; this type only describes durable CC AutoMux state.

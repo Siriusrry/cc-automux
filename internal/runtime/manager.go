@@ -82,9 +82,103 @@ type ConfigStore interface {
 // changed through a client-style configuration update.
 type HarnessConfigRuntime interface {
 	Config() config.Config
+	WithHarnessMutation(func(config.HarnessMutation) error) error
 	UpdateHarness(func(*config.HarnessesConfig) error) (ApplyResult, error)
 	ClearActiveProfileID() (ApplyResult, error)
 	SetActiveProfileID(string) (ApplyResult, error)
+}
+
+// HarnessMutation is the transaction-scoped, server-side configuration
+// boundary used by harnessconfig. The enclosing Manager.WithHarnessMutation
+// call holds the same mutex used by all other configuration writes for the
+// entire callback, including any external harness file I/O performed by the
+// callback. Methods on this value must only be called from that callback.
+type HarnessMutation struct {
+	manager *Manager
+}
+
+var _ config.HarnessMutation = (*HarnessMutation)(nil)
+
+// WithHarnessMutation runs one harness operation while holding the Runtime
+// Manager's configuration mutation lock. It is intentionally narrower than a
+// general configuration transaction: callers can inspect the current config,
+// clear the server-owned active profile, and record a validated profile ID,
+// but cannot submit an arbitrary client configuration.
+func (m *Manager) WithHarnessMutation(fn func(config.HarnessMutation) error) error {
+	if m == nil {
+		return errors.New("runtime manager is required")
+	}
+	if fn == nil {
+		return errors.New("harness mutation callback is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.restartStatus.InProgress {
+		return ErrRestartInProgress
+	}
+	return fn(&HarnessMutation{manager: m})
+}
+
+// Config returns the current configuration from a transaction-scoped
+// HarnessMutation. The returned value is a defensive copy.
+func (t *HarnessMutation) Config() config.Config {
+	if t == nil || t.manager == nil {
+		return config.Config{}
+	}
+	return t.manager.current.Load().Config()
+}
+
+// UpdateHarness applies a trusted harness-subtree mutation without acquiring
+// the outer Runtime lock a second time.
+func (t *HarnessMutation) UpdateHarness(mutator func(*config.HarnessesConfig) error) error {
+	if t == nil || t.manager == nil {
+		return errors.New("runtime harness mutation is not initialized")
+	}
+	if mutator == nil {
+		return errors.New("harness configuration mutator is required")
+	}
+	if t.manager.restartStatus.InProgress {
+		return ErrRestartInProgress
+	}
+	current := t.manager.current.Load().Config()
+	next := current.Clone()
+	if err := mutator(&next.Harnesses); err != nil {
+		return err
+	}
+	prepared, err := current.ApplyServerUpdate(next)
+	if err != nil {
+		return err
+	}
+	_, err = t.manager.applyLocked(prepared)
+	return err
+}
+
+// ClearActiveProfileID persists the server-owned inactive state inside the
+// enclosing harness mutation.
+func (t *HarnessMutation) ClearActiveProfileID() error {
+	return t.setActiveProfileID("")
+}
+
+// SetActiveProfileID persists a server-owned active profile ID inside the
+// enclosing harness mutation.
+func (t *HarnessMutation) SetActiveProfileID(id string) error {
+	return t.setActiveProfileID(id)
+}
+
+func (t *HarnessMutation) setActiveProfileID(id string) error {
+	if t == nil || t.manager == nil {
+		return errors.New("runtime harness mutation is not initialized")
+	}
+	if t.manager.restartStatus.InProgress {
+		return ErrRestartInProgress
+	}
+	current := t.manager.current.Load().Config()
+	next, err := current.WithActiveProfileID(id)
+	if err != nil {
+		return err
+	}
+	_, err = t.manager.applyLocked(next)
+	return err
 }
 
 type Manager struct {
@@ -298,6 +392,50 @@ func (m *Manager) UpdateHarness(mutator func(*config.HarnessesConfig) error) (Ap
 		return ApplyResult{}, err
 	}
 	return m.applyLocked(prepared)
+}
+
+// ProtectedConfigPaths returns the active and pending configuration paths when
+// the underlying store exposes them. The slice is a fresh copy; stores used by
+// focused tests may intentionally omit path metadata.
+func (m *Manager) ProtectedConfigPaths() []string {
+	if m == nil || m.store == nil {
+		return []string{}
+	}
+	type pathStore interface {
+		Path() string
+		PendingPath() string
+	}
+	paths, ok := m.store.(pathStore)
+	if !ok {
+		return []string{}
+	}
+	result := make([]string, 0, 2)
+	if path := paths.Path(); path != "" {
+		result = append(result, path)
+	}
+	if path := paths.PendingPath(); path != "" {
+		result = append(result, path)
+	}
+	return result
+}
+
+// ConfigPath and PendingConfigPath expose the optional store path metadata for
+// composition roots that need to protect the Runtime-owned files from an
+// external harness target collision.
+func (m *Manager) ConfigPath() string {
+	paths := m.ProtectedConfigPaths()
+	if len(paths) == 0 {
+		return ""
+	}
+	return paths[0]
+}
+
+func (m *Manager) PendingConfigPath() string {
+	paths := m.ProtectedConfigPaths()
+	if len(paths) < 2 {
+		return ""
+	}
+	return paths[1]
 }
 
 // ClearActiveProfileID atomically persists the server-owned inactive state.
