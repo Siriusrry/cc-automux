@@ -575,6 +575,61 @@ func TestFixedExecutionCancellationAfterPatchedStatusPreservesWrittenGatewayStat
 	}
 }
 
+func TestFixedExecutionCancellationDuringResponsePatchWinsAndCleansBodies(t *testing.T) {
+	incoming := fixedTestIncoming("")
+	ctx, cancel := context.WithCancel(incoming.Context())
+	incoming = incoming.WithContext(ctx)
+	decodedBody := fixedTestTrackingBody(t, `{"decoded":true}`)
+	replacementBody := fixedTestTrackingBody(t, `{"replacement":true}`)
+	plan := fixedTestPatchPlan(t, nil, fixedTestResponsePatch(func(_ patch.PatchContext, response *patch.MutableResponse) error {
+		response.Body = replacementBody
+		cancel()
+		return errors.New("response patch failed after cancellation")
+	}))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"wire":true}`)
+	}))
+	defer upstream.Close()
+	adapter := &fixedTestAdapter{
+		protocol: "openai_responses",
+		encode: func(body bodyfile.Body, headers http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{Body: body, Headers: headers}, nil
+		},
+		decode: func(bodyfile.Body, http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{Body: decodedBody, Headers: http.Header{"Content-Type": []string{"application/json"}}}, nil
+		},
+	}
+	registry, err := protocol.NewRegistry(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := automode.NewDiagnostics()
+	events := &eventCollector{}
+	handler := NewWithOptions(nil, &fakeSelector{}, Options{ProtocolAdapters: registry, FixedDiagnostics: diagnostics, Recorder: events})
+	defer handler.Close()
+	response := &fixedWriteRecorder{header: make(http.Header)}
+	handler.forwardFixedExecution(response, incoming, nil, fixedTestExecutionPlan(t, fixedTestTarget(t, upstream.URL, "openai_responses", plan)))
+
+	if response.headerCalls != 0 || response.writeCalls != 0 {
+		t.Fatalf("canceled response patch wrote response: headers=%d writes=%d", response.headerCalls, response.writeCalls)
+	}
+	call := diagnostics.Snapshot()
+	if call == nil || call.GatewayStatus != 0 || call.GatewayError != "client_canceled" || call.UpstreamStatus != http.StatusCreated {
+		t.Fatalf("diagnostics = %#v", call)
+	}
+	if opens, readerCloses, closes := decodedBody.counts(); opens != 1 || readerCloses != 1 || closes != 1 {
+		t.Fatalf("decoded body lifecycle = opens:%d reader_closes:%d closes:%d", opens, readerCloses, closes)
+	}
+	if opens, readerCloses, closes := replacementBody.counts(); opens != 0 || readerCloses != 0 || closes != 1 {
+		t.Fatalf("replacement body lifecycle = opens:%d reader_closes:%d closes:%d", opens, readerCloses, closes)
+	}
+	gotEvents := events.snapshot()
+	if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventFailure {
+		t.Fatalf("events = %#v", gotEvents)
+	}
+}
+
 func TestFixedExecutionCleanupFailureAfterPatchedStatusPreservesWrittenGatewayStatus(t *testing.T) {
 	plan := fixedTestPatchPlan(t, nil, fixedTestResponsePatch(func(_ patch.PatchContext, response *patch.MutableResponse) error {
 		response.Status = http.StatusAccepted
