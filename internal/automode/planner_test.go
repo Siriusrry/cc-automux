@@ -61,10 +61,7 @@ func TestClassifierPlannerOverridesOnlyModelAndBuildsPoolPlan(t *testing.T) {
 func TestClassifierPlannerBuildsFixedPlanFromSnapshotTarget(t *testing.T) {
 	ingress, closeIngress := plannerIngress(t, `{"model":"client-model","system":[]}`, "session-fixed")
 	defer closeIngress()
-	target := &provider.CompiledFixedTarget{
-		CompiledTarget: provider.CompiledTarget{ID: provider.FixedTargetID},
-		Protocol:       "openai_responses",
-	}
+	target := &provider.CompiledFixedTarget{ID: provider.FixedTargetID, Protocol: "openai_responses"}
 	plan, err := NewClassifierPlanner().Build(context.Background(), plannerSnapshot{
 		auto: flow.AutoModeSnapshot{
 			Mode:            "fixed_provider",

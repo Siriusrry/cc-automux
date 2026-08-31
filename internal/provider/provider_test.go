@@ -69,6 +69,11 @@ func TestCompileCatalogExactModelIndexAndPriority(t *testing.T) {
 	if len(catalog.Match("missing")) != 0 {
 		t.Fatal("missing model returned candidates")
 	}
+	for _, compiled := range catalog.Providers() {
+		if compiled.Protocol != config.ProtocolAnthropicMessages {
+			t.Fatalf("pool provider %q protocol = %q, want %q", compiled.ID, compiled.Protocol, config.ProtocolAnthropicMessages)
+		}
+	}
 }
 
 func TestCompileRejectsMissingRuntimeContext(t *testing.T) {

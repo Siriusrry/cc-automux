@@ -595,7 +595,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 			"gateway_unavailable", "fixed target client is unavailable", errors.New("provider client pool is nil"), 0, nil, "", "")
 		return
 	}
-	clientLease, err := h.clients.AcquireTarget(&target.CompiledTarget)
+	clientLease, err := h.clients.AcquireTarget(target)
 	if err != nil {
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusInternalServerError,
 			"gateway_unavailable", "fixed target client is unavailable", err, 0, nil, "", "")

@@ -20,6 +20,7 @@ type CompiledTarget struct {
 	BaseURL     *url.URL
 	APIKey      string
 	UseXAPIKey  bool
+	Protocol    string
 	TLS         *tls.Config
 	TLSSettings config.TLSConfig
 	PatchPlan   patch.Plan
@@ -31,13 +32,10 @@ type CompiledTarget struct {
 // never enter the Provider Catalog, Scheduler, Health, or sticky assignments.
 const FixedTargetID = "auto-mode-fixed-provider"
 
-// CompiledFixedTarget is the runtime-ready fixed classifier target.  Protocol
-// belongs only to this pool-external target; ordinary pool targets cannot carry
-// a protocol identifier by construction.
-type CompiledFixedTarget struct {
-	CompiledTarget
-	Protocol string
-}
+// CompiledFixedTarget is kept as a descriptive alias for the shared runtime
+// target. Both pool providers and fixed classifier targets carry Protocol on
+// the same compiled object.
+type CompiledFixedTarget = CompiledTarget
 
 // Clone returns a defensive copy of a compiled target. Patch plans retain the
 // immutable registry definitions and can be copied by value; URL and TLS
@@ -55,18 +53,6 @@ func (t *CompiledTarget) Clone() *CompiledTarget {
 		out.TLS = t.TLS.Clone()
 	}
 	return &out
-}
-
-// Clone returns a defensive copy of a fixed target, including its protocol
-// identifier and the embedded common target.
-func (t *CompiledFixedTarget) Clone() *CompiledFixedTarget {
-	if t == nil {
-		return nil
-	}
-	return &CompiledFixedTarget{
-		CompiledTarget: *t.CompiledTarget.Clone(),
-		Protocol:       t.Protocol,
-	}
 }
 
 // RuntimeContext is the explicit, application-owned context required to
@@ -153,17 +139,15 @@ func CompileFixedTarget(input config.FixedProviderConfig, classifierModel string
 		return nil, err
 	}
 	return &CompiledFixedTarget{
-		CompiledTarget: CompiledTarget{
-			ID:          FixedTargetID,
-			BaseURL:     parsed,
-			APIKey:      input.APIKey,
-			UseXAPIKey:  input.UseXAPIKey,
-			TLS:         tlsConfig,
-			TLSSettings: input.TLS,
-			PatchPlan:   plan,
-			Generation:  fixedGenerationFor(input, classifierModel),
-		},
-		Protocol: input.Protocol,
+		ID:          FixedTargetID,
+		BaseURL:     parsed,
+		APIKey:      input.APIKey,
+		UseXAPIKey:  input.UseXAPIKey,
+		Protocol:    input.Protocol,
+		TLS:         tlsConfig,
+		TLSSettings: input.TLS,
+		PatchPlan:   plan,
+		Generation:  fixedGenerationFor(input, classifierModel),
 	}, nil
 }
 
@@ -227,6 +211,7 @@ func compileWithRegistry(input config.ProviderConfig, registry patch.Registry) (
 			BaseURL:     parsed,
 			APIKey:      input.APIKey,
 			UseXAPIKey:  input.UseXAPIKey,
+			Protocol:    config.ProtocolAnthropicMessages,
 			TLS:         tlsConfig,
 			TLSSettings: input.TLS,
 			Generation:  generation,

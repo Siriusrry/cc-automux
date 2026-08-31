@@ -284,7 +284,7 @@ func TestRequestScanSpecIncludesFixedClassifierTargetRequestPaths(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := &provider.CompiledFixedTarget{CompiledTarget: provider.CompiledTarget{PatchPlan: plan}, Protocol: config.ProtocolOpenAIResponses}
+	target := &provider.CompiledFixedTarget{PatchPlan: plan, Protocol: config.ProtocolOpenAIResponses}
 	snapshot := &fixedTargetScanSnapshot{
 		fakeSnapshot: &fakeSnapshot{revision: 1, gatewayKey: "gateway"},
 		auto:         flow.AutoModeSnapshot{Mode: "fixed_provider", FixedTarget: target},

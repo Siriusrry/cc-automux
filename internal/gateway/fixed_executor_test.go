@@ -176,7 +176,7 @@ func TestFixedUpstreamURLAlwaysAppendsProtocolPathAndPreservesClientQuery(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := fixedUpstreamURL(&provider.CompiledFixedTarget{CompiledTarget: provider.CompiledTarget{BaseURL: base}, Protocol: test.protocolID}, incoming)
+			got, err := fixedUpstreamURL(&provider.CompiledFixedTarget{BaseURL: base, Protocol: test.protocolID}, incoming)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -819,14 +819,12 @@ func fixedTestTarget(t *testing.T, baseURL, protocolID string, plan patch.Plan) 
 		t.Fatal(err)
 	}
 	return &provider.CompiledFixedTarget{
-		CompiledTarget: provider.CompiledTarget{
-			ID:         provider.FixedTargetID,
-			BaseURL:    parsed,
-			APIKey:     "fixed-secret",
-			PatchPlan:  plan,
-			Generation: provider.ProviderGeneration("fixed-test-generation"),
-		},
-		Protocol: protocolID,
+		ID:         provider.FixedTargetID,
+		BaseURL:    parsed,
+		APIKey:     "fixed-secret",
+		Protocol:   protocolID,
+		PatchPlan:  plan,
+		Generation: provider.ProviderGeneration("fixed-test-generation"),
 	}
 }
 
