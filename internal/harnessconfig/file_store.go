@@ -1,6 +1,7 @@
 package harnessconfig
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,10 @@ type FileOps interface {
 	Rename(string, string) error
 	Remove(string) error
 	SyncDirectory(string) error
+}
+
+type atomicFileReplacer interface {
+	AtomicReplace(string, string) error
 }
 
 // FileSystem is a descriptive alias for the injected filesystem boundary.
@@ -131,6 +136,7 @@ func NewTargetStore(options ...FileStoreOptions) *FileStore {
 type targetState struct {
 	exists bool
 	info   fs.FileInfo
+	data   []byte
 }
 
 // Read reads an existing target under the same ordinary-file and 8 MiB
@@ -179,7 +185,7 @@ func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjec
 	if err != nil {
 		return nil, err
 	}
-	state := targetState{exists: targetExists}
+	state := targetState{exists: targetExists, data: append([]byte(nil), original...)}
 	if targetExists {
 		state.info, err = s.fs.Lstat(path)
 		if err != nil {
@@ -220,7 +226,7 @@ func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjec
 	if err := s.checkTargetBeforeReplace(path, state); err != nil {
 		return nil, err
 	}
-	if err := s.fs.Rename(temporaryPath, path); err != nil {
+	if err := atomicReplace(s.fs, temporaryPath, path); err != nil {
 		return nil, fileError("atomically replace target", path, ErrAtomicReplace, err)
 	}
 	// Rename is the committed state transition. Directory synchronization is
@@ -476,15 +482,25 @@ func (s *FileStore) writeTemporary(directory string, data []byte) (string, error
 }
 
 func (s *FileStore) checkTargetBeforeReplace(path string, expected targetState) error {
-	info, err := s.fs.Lstat(path)
+	current, exists, err := s.readExisting(path)
 	if errors.Is(err, os.ErrNotExist) {
+		exists = false
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, ErrTargetSymlink) || errors.Is(err, ErrTargetNotRegular) || errors.Is(err, ErrTargetTooLarge) {
+			return err
+		}
+		return fileError("check target", path, ErrTargetIO, err)
+	}
+	if !exists {
 		if expected.exists {
 			return fileError("check target", path, ErrTargetChanged, os.ErrNotExist)
 		}
 		return nil
 	}
-	if err != nil {
-		return fileError("check target", path, ErrTargetIO, err)
+	info, statErr := s.fs.Lstat(path)
+	if statErr != nil {
+		return fileError("check target", path, ErrTargetIO, statErr)
 	}
 	if info == nil {
 		return fileError("check target", path, ErrTargetIO, errors.New("filesystem returned nil target info"))
@@ -500,6 +516,12 @@ func (s *FileStore) checkTargetBeforeReplace(path string, expected targetState) 
 	}
 	if expected.info != nil && !os.SameFile(expected.info, info) {
 		return fileError("check target", path, ErrTargetChanged, errors.New("target inode changed during write"))
+	}
+	if !bytes.Equal(current, expected.data) {
+		return fileError("check target", path, ErrTargetChanged, errors.New("target contents changed during write"))
+	}
+	if expected.info != nil && info.Mode().Perm() != expected.info.Mode().Perm() {
+		return fileError("check target", path, ErrTargetChanged, errors.New("target permissions changed during write"))
 	}
 	return nil
 }
