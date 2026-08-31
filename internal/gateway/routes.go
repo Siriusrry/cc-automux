@@ -1,6 +1,8 @@
 package gateway
 
 const (
-	MessagesPath     = "/v1/messages"
-	ManagementPrefix = "/api/v1/"
+	MessagesPath        = "/v1/messages"
+	ResponsesPath       = "/v1/responses"
+	ChatCompletionsPath = "/v1/chat/completions"
+	ManagementPrefix    = "/api/v1/"
 )

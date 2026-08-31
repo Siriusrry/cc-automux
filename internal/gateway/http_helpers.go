@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 )
 
@@ -26,12 +27,26 @@ func upstreamURL(item *provider.CompiledProvider, requestURL *url.URL) (*url.URL
 	if item == nil || item.BaseURL == nil {
 		return nil, errors.New("provider base URL is unavailable")
 	}
-	result := *item.BaseURL
+	return targetUpstreamURL(&item.CompiledTarget, requestURL)
+}
+
+// targetUpstreamURL composes an upstream endpoint from a compiled target. The
+// target's base URL is never interpreted as an endpoint; the protocol selects
+// the fixed API path and the client's raw query is copied unchanged.
+func targetUpstreamURL(target *provider.CompiledTarget, requestURL *url.URL) (*url.URL, error) {
+	if target == nil || target.BaseURL == nil {
+		return nil, errors.New("target base URL is unavailable")
+	}
+	suffix, err := protocolAPIPath(target.Protocol)
+	if err != nil {
+		return nil, err
+	}
+	result := *target.BaseURL
 	escapedPrefix := result.EscapedPath()
 	if strings.HasSuffix(escapedPrefix, "/") {
 		escapedPrefix = strings.TrimSuffix(escapedPrefix, "/")
 	}
-	escapedPath := escapedPrefix + MessagesPath
+	escapedPath := escapedPrefix + suffix
 	decodedPath, err := url.PathUnescape(escapedPath)
 	if err != nil {
 		return nil, fmt.Errorf("compose upstream path: %w", err)
@@ -51,6 +66,19 @@ func upstreamURL(item *provider.CompiledProvider, requestURL *url.URL) (*url.URL
 	result.Fragment = ""
 	result.RawFragment = ""
 	return &result, nil
+}
+
+func protocolAPIPath(protocolID string) (string, error) {
+	switch protocolID {
+	case config.ProtocolAnthropicMessages:
+		return MessagesPath, nil
+	case config.ProtocolOpenAIResponses:
+		return ResponsesPath, nil
+	case config.ProtocolOpenAICompatible:
+		return ChatCompletionsPath, nil
+	default:
+		return "", fmt.Errorf("unsupported target protocol %q", protocolID)
+	}
 }
 
 func prepareUpstreamHeaders(source http.Header, item *provider.CompiledProvider) (http.Header, error) {

@@ -1038,7 +1038,7 @@ func TestUpstreamURLAlwaysAppendsMessagesPathAndPreservesRawClientQuery(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := upstreamURL(&provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{BaseURL: base}}, requestURL)
+			result, err := upstreamURL(&provider.CompiledProvider{CompiledTarget: provider.CompiledTarget{BaseURL: base, Protocol: config.ProtocolAnthropicMessages}}, requestURL)
 			if err != nil {
 				t.Fatal(err)
 			}

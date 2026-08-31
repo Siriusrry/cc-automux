@@ -13,6 +13,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
+	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/protocol"
@@ -22,8 +23,8 @@ import (
 )
 
 const (
-	fixedResponsesPath  = "/v1/responses"
-	fixedCompatiblePath = "/v1/chat/completions"
+	fixedResponsesPath  = ResponsesPath
+	fixedCompatiblePath = ChatCompletionsPath
 )
 
 type fixedDiagnosticContextKey struct{}
@@ -328,37 +329,7 @@ func fixedUpstreamURL(target *provider.CompiledFixedTarget, incoming *url.URL) (
 	if target == nil || target.BaseURL == nil {
 		return nil, errors.New("fixed target base URL is unavailable")
 	}
-	var suffix string
-	switch target.Protocol {
-	case "openai_responses":
-		suffix = fixedResponsesPath
-	case "openai_compatible":
-		suffix = fixedCompatiblePath
-	default:
-		return nil, fmt.Errorf("unsupported fixed target protocol %q", target.Protocol)
-	}
-	result := *target.BaseURL
-	escapedPrefix := strings.TrimSuffix(result.EscapedPath(), "/")
-	escapedPath := escapedPrefix + suffix
-	decodedPath, err := url.PathUnescape(escapedPath)
-	if err != nil {
-		return nil, fmt.Errorf("compose fixed upstream path: %w", err)
-	}
-	result.Path = decodedPath
-	result.RawPath = escapedPath
-	if result.EscapedPath() == result.Path {
-		result.RawPath = ""
-	}
-	// Preserve the client's raw query and empty-query marker.
-	result.RawQuery = ""
-	result.ForceQuery = false
-	if incoming != nil {
-		result.RawQuery = incoming.RawQuery
-		result.ForceQuery = incoming.ForceQuery
-	}
-	result.Fragment = ""
-	result.RawFragment = ""
-	return &result, nil
+	return targetUpstreamURL(target, incoming)
 }
 
 // forwardFixedExecution executes exactly one fixed classifier call. It never
@@ -453,16 +424,20 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 			"bad_gateway", "fixed target request could not be built", endpointErr, 0, nil, "", "")
 		return
 	}
-	if h.protocols == nil {
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusNotImplemented,
-			"protocol_not_implemented", "fixed target protocol is not implemented", nil, 0, nil, "", "")
-		return
-	}
-	adapter, ok := h.protocols.Lookup(target.Protocol)
-	if !ok || adapter == nil {
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusNotImplemented,
-			"protocol_not_implemented", "fixed target protocol is not implemented", nil, 0, nil, "", "")
-		return
+	var adapter protocol.ProtocolAdapter
+	if target.Protocol != config.ProtocolAnthropicMessages {
+		if h.protocols == nil {
+			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusNotImplemented,
+				"protocol_not_implemented", "fixed target protocol is not implemented", nil, 0, nil, "", "")
+			return
+		}
+		var ok bool
+		adapter, ok = h.protocols.Lookup(target.Protocol)
+		if !ok || adapter == nil {
+			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusNotImplemented,
+				"protocol_not_implemented", "fixed target protocol is not implemented", nil, 0, nil, "", "")
+			return
+		}
 	}
 	if requestCanceled(ctx) {
 		return
@@ -522,25 +497,37 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 	// A request patch is allowed to add ordinary protocol metadata, but it must
-	// never smuggle a client/provider credential into the Adapter boundary.
-	adapterHeaders := encodedHeaders.Clone()
-	removeHopByHop(adapterHeaders)
-	deleteCredentialHeaders(adapterHeaders)
-	deleteHeaderFold(adapterHeaders, "Content-Length")
-	deleteHeaderFold(adapterHeaders, "Host")
-	encoded, encodeErr := encodeFixedRequest(adapter, mutable.Body, adapterHeaders)
-	// Ownership transfers only on success. On failure the Adapter remains
-	// responsible for every temporary resource it created.
-	if encodeErr != nil {
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
-			"protocol_conversion_failed", "fixed target request conversion failed", encodeErr, 0, nil, "", "")
-		return
+	// never smuggle a client/provider credential into either the Adapter boundary
+	// or the direct Anthropic request.
+	protocolHeaders := encodedHeaders.Clone()
+	removeHopByHop(protocolHeaders)
+	deleteCredentialHeaders(protocolHeaders)
+	deleteHeaderFold(protocolHeaders, "Content-Length")
+	deleteHeaderFold(protocolHeaders, "Host")
+	var encoded protocol.ProtocolMessage
+	var encodeErr error
+	if adapter == nil {
+		encoded = protocol.ProtocolMessage{Body: mutable.Body, Headers: protocolHeaders}
+	} else {
+		encoded, encodeErr = encodeFixedRequest(adapter, mutable.Body, protocolHeaders)
+		// Ownership transfers only on success. On failure the Adapter remains
+		// responsible for every temporary resource it created.
+		if encodeErr != nil {
+			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
+				"protocol_conversion_failed", "fixed target request conversion failed", encodeErr, 0, nil, "", "")
+			return
+		}
 	}
 	own(encoded.Body)
 	if requestCanceled(ctx) {
 		return
 	}
 	if encoded.Body == nil {
+		if adapter == nil {
+			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
+				"bad_gateway", "fixed target request body is unavailable", errors.New("fixed target request body is nil"), 0, nil, "", "")
+			return
+		}
 		if encodeErr == nil {
 			encodeErr = errors.New("protocol adapter returned a nil request body")
 		}
@@ -678,8 +665,8 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 
-	// Decode requires an immutable body. Capture and close the raw response
-	// before invoking the adapter; capture errors are body/transport failures.
+	// Capture and close the raw response before applying response conversion or
+	// response patches; capture errors are body/transport failures.
 	rawBody, captureErr := bodyfile.Capture(response.Body, h.replayDirectory)
 	responseCloseErr := response.Body.Close()
 	own(rawBody)
@@ -695,21 +682,29 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 			"fixed target response could not be read", cause, response.StatusCode, response.Header, "", "")
 		return
 	}
-	decoded, decodeErr := decodeFixedResponse(adapter, rawBody, response.Header.Clone())
-	if decodeErr != nil {
-		rawText, rawErr := fixedBodyText(rawBody)
-		decodeErr = errors.Join(decodeErr, rawErr)
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
-			"protocol_conversion_failed", "fixed target response conversion failed", decodeErr, response.StatusCode, response.Header, "", rawText)
-		return
+	var decoded protocol.ProtocolMessage
+	if adapter == nil {
+		decoded = protocol.ProtocolMessage{Body: rawBody, Headers: response.Header.Clone()}
+	} else {
+		var decodeErr error
+		decoded, decodeErr = decodeFixedResponse(adapter, rawBody, response.Header.Clone())
+		if decodeErr != nil {
+			rawText, rawErr := fixedBodyText(rawBody)
+			decodeErr = errors.Join(decodeErr, rawErr)
+			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
+				"protocol_conversion_failed", "fixed target response conversion failed", decodeErr, response.StatusCode, response.Header, "", rawText)
+			return
+		}
 	}
 	own(decoded.Body)
 	if decoded.Body == nil {
-		if decodeErr == nil {
-			decodeErr = errors.New("protocol adapter returned a nil response body")
-		}
 		rawText, rawErr := fixedBodyText(rawBody)
-		decodeErr = errors.Join(decodeErr, rawErr)
+		if adapter == nil {
+			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
+				"bad_gateway", "fixed target response body is unavailable", errors.Join(errors.New("fixed target response body is nil"), rawErr), response.StatusCode, response.Header, "", rawText)
+			return
+		}
+		decodeErr := errors.Join(errors.New("protocol adapter returned a nil response body"), rawErr)
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"protocol_conversion_failed", "fixed target response conversion failed", decodeErr, response.StatusCode, response.Header, "", rawText)
 		return

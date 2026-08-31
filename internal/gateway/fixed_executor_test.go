@@ -15,6 +15,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
+	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/protocol"
@@ -151,6 +152,13 @@ func TestFixedUpstreamURLAlwaysAppendsProtocolPathAndPreservesClientQuery(t *tes
 			want:       "https://classifier.example/v1/responses?x=%2F&x=a+b",
 		},
 		{
+			name:       "anthropic messages root",
+			base:       "https://classifier.example",
+			protocolID: config.ProtocolAnthropicMessages,
+			incoming:   "https://gateway.example/v1/messages?beta=true&beta=false",
+			want:       "https://classifier.example/v1/messages?beta=true&beta=false",
+		},
+		{
 			name:       "compatible path prefix",
 			base:       "https://classifier.example/prefix/",
 			protocolID: "openai_compatible",
@@ -218,6 +226,60 @@ func TestFixedExecutionMissingAdapterStopsBeforePatchUpstreamAndScheduler(t *tes
 	gotEvents := events.snapshot()
 	if len(gotEvents) != 1 || gotEvents[0].Kind != EventFailure || gotEvents[0].Attempt != 1 {
 		t.Fatalf("events = %#v", gotEvents)
+	}
+}
+
+func TestFixedExecutionAnthropicMessagesSkipsProtocolAdapter(t *testing.T) {
+	var encodeCalls atomic.Int32
+	var decodeCalls atomic.Int32
+	adapter := &fixedTestAdapter{
+		protocol: config.ProtocolAnthropicMessages,
+		encode: func(bodyfile.Body, http.Header) (protocol.ProtocolMessage, error) {
+			encodeCalls.Add(1)
+			return protocol.ProtocolMessage{}, errors.New("Anthropic request must not be encoded")
+		},
+		decode: func(bodyfile.Body, http.Header) (protocol.ProtocolMessage, error) {
+			decodeCalls.Add(1)
+			return protocol.ProtocolMessage{}, errors.New("Anthropic response must not be decoded")
+		},
+	}
+	registry, err := protocol.NewRegistry(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotPath, gotQuery, gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		gotPath = request.URL.Path
+		gotQuery = request.URL.RawQuery
+		body, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			t.Errorf("read request body: %v", readErr)
+		}
+		gotBody = string(body)
+		if request.Header.Get("Authorization") != "Bearer fixed-secret" {
+			t.Errorf("Authorization = %q", request.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","content":[]}`)
+	}))
+	defer upstream.Close()
+	target := fixedTestTarget(t, upstream.URL, config.ProtocolAnthropicMessages, patch.Plan{})
+	handler := NewWithOptions(nil, &fakeSelector{}, Options{ProtocolAdapters: registry})
+	defer handler.Close()
+	response := httptest.NewRecorder()
+	incoming := fixedTestIncoming("beta=true&beta=false")
+	handler.forwardFixedExecution(response, incoming, nil, fixedTestExecutionPlan(t, target))
+	if response.Code != http.StatusOK || response.Body.String() != `{"type":"message","content":[]}` {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+	if gotPath != MessagesPath || gotQuery != "beta=true&beta=false" {
+		t.Fatalf("upstream URL path/query = %q?%s", gotPath, gotQuery)
+	}
+	if gotBody != `{"model":"original-model","metadata":{"user_id":"original-session"}}` {
+		t.Fatalf("upstream body = %q", gotBody)
+	}
+	if encodeCalls.Load() != 0 || decodeCalls.Load() != 0 {
+		t.Fatalf("adapter calls encode=%d decode=%d", encodeCalls.Load(), decodeCalls.Load())
 	}
 }
 
