@@ -150,7 +150,15 @@ type AttemptLease struct {
 	HalfOpenProbe    bool
 	HealthLease      HealthLease
 
-	stickyKey              StickyKey
+	stickyKey StickyKey
+	// stickyMigration records the assignment observed when this lease was
+	// acquired after an excluded provider. A successful replacement can then
+	// atomically move the session affinity only if that source assignment is
+	// still current; unrelated concurrent requests cannot overwrite it.
+	stickyMigration        bool
+	stickySourceProviderID string
+	stickySourceGeneration ProviderGeneration
+	stickySourceVersion    uint64
 	cursorKey              roundRobinKey
 	cursorVersion          uint64
 	advanceCursorOnSuccess bool
@@ -173,6 +181,26 @@ type Snapshot interface {
 	Providers() []*provider.CompiledProvider
 }
 
+// RequestAttemptPolicyProvider exposes the immutable retry budget selected for
+// a particular request type. Runtime snapshots may implement this boundary so
+// the legacy Selector.Acquire method can still resolve classifier traffic
+// without falling back to the normal-request budget.
+//
+// A request path that already has an ExecutionPlan should prefer the explicit
+// RequestPolicySelector boundary below; this provider is the compatibility
+// path for callers that only have a request-time Snapshot.
+type RequestAttemptPolicyProvider interface {
+	AttemptPolicyFor(requestType traffic.RequestType) AttemptPolicy
+}
+
+// RequestAttemptPolicyView is the method-shaped variant already implemented
+// by runtime snapshots. It keeps scheduler independent from the flow package
+// while allowing legacy Acquire callers to resolve a type-specific budget.
+type RequestAttemptPolicyView interface {
+	NormalAttemptPolicy() AttemptPolicy
+	ClassifierAttemptPolicy() AttemptPolicy
+}
+
 // HealthController is the scheduler-facing health state boundary.
 type HealthController interface {
 	Reconcile(providers []*provider.CompiledProvider)
@@ -188,4 +216,13 @@ type Selector interface {
 	Reconcile(snapshot Snapshot)
 	Assignments(providerID string) []Assignment
 	ActiveAssignmentCount() int
+}
+
+// RequestPolicySelector is an optional extension implemented by selectors
+// that can consume the immutable AttemptPolicy carried by an ExecutionPlan.
+// Keeping it separate preserves the original Selector interface for focused
+// callers and test doubles while allowing the gateway to pass a classifier's
+// one-attempt budget explicitly.
+type RequestPolicySelector interface {
+	AcquireWithPolicy(snapshot Snapshot, key StickyKey, excluded map[string]struct{}, policy AttemptPolicy) (AttemptLease, error)
 }

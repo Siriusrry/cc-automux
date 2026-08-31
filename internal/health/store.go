@@ -202,10 +202,19 @@ func (s *Store) Reconcile(providers []*provider.CompiledProvider) {
 
 func copyScopeDiagnostics(target, source *providerScope) {
 	copyDiagnostics(&target.global, &source.global)
-	for key, targetEntry := range target.channels {
-		if sourceEntry := source.channels[key]; sourceEntry != nil {
-			copyDiagnostics(targetEntry, sourceEntry)
+	for key, sourceEntry := range source.channels {
+		if _, configured := target.modelSet[key.model]; !configured {
+			continue
 		}
+		targetEntry := target.channels[key]
+		if targetEntry == nil {
+			// Classifier and future request-type channels are created lazily. Preserve
+			// them across a disable_health toggle just like pre-created normal
+			// channels, while resetting all breaker state to the target mode.
+			targetEntry = &stateEntry{state: initialState(target.disableHealth)}
+			target.channels[key] = targetEntry
+		}
+		copyDiagnostics(targetEntry, sourceEntry)
 	}
 }
 
@@ -403,6 +412,13 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 			GlobalState:  globalState(scope.global.state),
 			ChannelState: channelState(channel.state),
 		}
+		// A generation or health-mode change may retire a scope while one of
+		// its half-open probes is still in flight. The late result is isolated
+		// from current state, but its single-use lease must still release the
+		// retired probe token so another old-snapshot request cannot remain
+		// blocked behind a probe that has already completed.
+		releaseProbe(&scope.global, lease.Token)
+		releaseProbe(channel, lease.Token)
 		s.releaseLeaseLocked(scope, entryKey, channel)
 		return update
 	}
@@ -466,9 +482,10 @@ func observeLatest(entry *stateEntry, outcome scheduler.Outcome) {
 	}
 	entry.lastUpstreamURL = outcome.UpstreamURL
 	entry.lastSessionID = outcome.SessionID
-	if outcome.RawError != "" {
-		entry.lastError = outcome.RawError
-	}
+	// An empty upstream error body is still the latest complete observation.
+	// Overwrite an older diagnostic instead of leaving stale text attached to
+	// the new status/result.
+	entry.lastError = outcome.RawError
 }
 
 func observeNeutralFailure(entry *stateEntry, outcome scheduler.Outcome, now time.Time) {

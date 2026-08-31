@@ -32,6 +32,16 @@ type countingAttemptSnapshot struct {
 	calls int
 }
 
+type typedAttemptSnapshot struct {
+	*fakeSnapshot
+	normal     AttemptPolicy
+	classifier AttemptPolicy
+}
+
+func (s *typedAttemptSnapshot) NormalAttemptPolicy() AttemptPolicy { return s.normal }
+
+func (s *typedAttemptSnapshot) ClassifierAttemptPolicy() AttemptPolicy { return s.classifier }
+
 func (s *countingAttemptSnapshot) AttemptPolicy() AttemptPolicy {
 	s.calls++
 	return s.fakeSnapshot.AttemptPolicy()
@@ -65,13 +75,14 @@ func (s *fakeSnapshot) Providers() []*provider.CompiledProvider {
 }
 
 type fakeHealth struct {
-	mu         sync.Mutex
-	decisions  map[HealthKey]HealthDecision
-	updates    map[HealthKey]HealthUpdate
-	retryAt    time.Time
-	acquired   []HealthKey
-	reports    []HealthLease
-	reconciled [][]ProviderGeneration
+	mu                 sync.Mutex
+	decisions          map[HealthKey]HealthDecision
+	updates            map[HealthKey]HealthUpdate
+	retryAt            time.Time
+	earliestRetryCalls int
+	acquired           []HealthKey
+	reports            []HealthLease
+	reconciled         [][]ProviderGeneration
 }
 
 func newFakeHealth() *fakeHealth {
@@ -125,6 +136,7 @@ func (h *fakeHealth) Report(lease HealthLease, _ Outcome) HealthUpdate {
 func (h *fakeHealth) EarliestRetry(keys []HealthKey) (time.Time, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.earliestRetryCalls++
 	if len(keys) == 0 || h.retryAt.IsZero() {
 		return time.Time{}, false
 	}
@@ -379,6 +391,74 @@ func TestAttemptBudgetComesFromRequestSnapshot(t *testing.T) {
 	}
 }
 
+func TestClassifierAcquireUsesTypedRequestBudget(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
+	snapshot := &typedAttemptSnapshot{
+		fakeSnapshot: &fakeSnapshot{
+			revision: 1,
+			// The legacy ordinary budget is intentionally larger than the
+			// classifier budget; classifier selection must not read it.
+			attempts: AttemptPolicy{MaxAttempts: 3},
+			providers: []*provider.CompiledProvider{
+				compileProvider(t, providerA, "a", []string{"m"}, 0),
+				compileProvider(t, providerB, "b", []string{"m"}, 0),
+			},
+		},
+		normal:     AttemptPolicy{MaxAttempts: 3},
+		classifier: AttemptPolicy{MaxAttempts: 1},
+	}
+	selector.Reconcile(snapshot)
+	key := StickyKey{SessionID: "classifier-session", Model: "m", RequestType: traffic.RequestTypeClassifier}
+	first, err := selector.Acquire(snapshot, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first.Provider.ID; got != providerA {
+		t.Fatalf("first classifier provider = %s", got)
+	}
+	_, err = selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if !errors.Is(err, ErrAttemptBudgetExhausted) {
+		t.Fatalf("classifier budget error = %v", err)
+	}
+}
+
+func TestAcquireWithPolicyUsesExplicitExecutionPlanBudget(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
+	snapshot := &fakeSnapshot{revision: 1, attempts: AttemptPolicy{MaxAttempts: 3}, providers: []*provider.CompiledProvider{
+		compileProvider(t, providerA, "a", []string{"m"}, 0),
+		compileProvider(t, providerB, "b", []string{"m"}, 0),
+	}}
+	selector.Reconcile(snapshot)
+	key := StickyKey{SessionID: "classifier-session", Model: "m", RequestType: traffic.RequestTypeClassifier}
+	first, err := selector.AcquireWithPolicy(snapshot, key, nil, AttemptPolicy{MaxAttempts: 1})
+	if err != nil || first.Provider == nil {
+		t.Fatalf("explicit classifier acquire = %#v, %v", first, err)
+	}
+	_, err = selector.AcquireWithPolicy(snapshot, key, map[string]struct{}{first.Provider.ID: {}}, AttemptPolicy{MaxAttempts: 1})
+	if !errors.Is(err, ErrAttemptBudgetExhausted) {
+		t.Fatalf("explicit budget error = %v", err)
+	}
+	if _, err := selector.AcquireWithPolicy(snapshot, key, nil, AttemptPolicy{}); !errors.Is(err, ErrInvalidSchedulingKey) {
+		t.Fatalf("invalid explicit budget error = %v", err)
+	}
+}
+
+func TestClassifierAcquireFailsClosedWithoutTypedBudget(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
+	snapshot := &fakeSnapshot{revision: 1, attempts: AttemptPolicy{MaxAttempts: 3}, providers: []*provider.CompiledProvider{
+		compileProvider(t, providerA, "a", []string{"m"}, 0),
+	}}
+	selector.Reconcile(snapshot)
+	key := StickyKey{SessionID: "classifier-session", Model: "m", RequestType: traffic.RequestTypeClassifier}
+	_, err := selector.Acquire(snapshot, key, nil)
+	if !errors.Is(err, ErrInvalidSchedulingKey) || !errors.Is(err, ErrRequestAttemptPolicyUnavailable) {
+		t.Fatalf("untyped classifier acquire error = %v", err)
+	}
+}
+
 func TestCaptureAttemptPolicyFreezesOneSnapshotRead(t *testing.T) {
 	source := &countingAttemptSnapshot{fakeSnapshot: &fakeSnapshot{
 		revision: 1,
@@ -396,6 +476,22 @@ func TestCaptureAttemptPolicyFreezesOneSnapshotRead(t *testing.T) {
 	}
 	if source.calls != 1 {
 		t.Fatalf("source AttemptPolicy() calls = %d", source.calls)
+	}
+}
+
+func TestCaptureAttemptPolicyPreservesTypedClassifierBudget(t *testing.T) {
+	source := &typedAttemptSnapshot{
+		fakeSnapshot: &fakeSnapshot{revision: 1, attempts: AttemptPolicy{MaxAttempts: 3}},
+		normal:       AttemptPolicy{MaxAttempts: 3},
+		classifier:   AttemptPolicy{MaxAttempts: 1},
+	}
+	captured, normal, err := CaptureAttemptPolicy(source)
+	if err != nil || normal.MaxAttempts != 3 {
+		t.Fatalf("CaptureAttemptPolicy() = %#v, %v", normal, err)
+	}
+	got, err := ResolveRequestAttemptPolicy(captured, traffic.RequestTypeClassifier)
+	if err != nil || got.MaxAttempts != 1 {
+		t.Fatalf("captured classifier policy = %#v, %v", got, err)
 	}
 }
 
@@ -604,9 +700,11 @@ func TestUnavailableErrorCarriesEarliestRetry(t *testing.T) {
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{item}}
 	selector.Reconcile(snapshot)
 	key := HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
+	retryAt := health.retryAt
 	health.decisions[key] = HealthDecision{
 		Available: false, GlobalState: GlobalCooldown, ChannelState: ChannelHealthy,
-		Lease: HealthLease{Key: key},
+		RetryAt: &retryAt,
+		Lease:   HealthLease{Key: key},
 	}
 
 	_, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
@@ -619,6 +717,45 @@ func TestUnavailableErrorCarriesEarliestRetry(t *testing.T) {
 	}
 	if retryAt, present := timed.RetryAtTime(); !present || !retryAt.Equal(health.retryAt) {
 		t.Fatalf("retry time = %v, %v", retryAt, present)
+	}
+	health.mu.Lock()
+	deferredRetryCalls := health.earliestRetryCalls
+	health.mu.Unlock()
+	if deferredRetryCalls != 0 {
+		t.Fatalf("Acquire re-queried EarliestRetry for an old scope: %d calls", deferredRetryCalls)
+	}
+}
+
+func TestUnavailableErrorUsesEarliestCurrentHealthDecision(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 1)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	keyA := HealthKey{ProviderID: a.ID, Generation: a.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
+	keyB := HealthKey{ProviderID: b.ID, Generation: b.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
+	later := time.Date(2026, 8, 29, 14, 0, 0, 0, time.UTC)
+	earlier := later.Add(-time.Minute)
+	health.decisions[keyA] = HealthDecision{Available: false, GlobalState: GlobalCooldown, RetryAt: &later, Lease: HealthLease{Key: keyA}}
+	health.decisions[keyB] = HealthDecision{Available: false, GlobalState: GlobalCooldown, RetryAt: &earlier, Lease: HealthLease{Key: keyB}}
+
+	_, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
+	if !errors.Is(err, ErrNoEligibleProvider) {
+		t.Fatalf("unavailable error = %v", err)
+	}
+	timed, ok := err.(interface{ RetryAtTime() (time.Time, bool) })
+	if !ok {
+		t.Fatalf("error does not expose retry time: %T", err)
+	}
+	if got, present := timed.RetryAtTime(); !present || !got.Equal(earlier) {
+		t.Fatalf("retry time = %v, %v; want %v", got, present, earlier)
+	}
+	health.mu.Lock()
+	deferredRetryCalls := health.earliestRetryCalls
+	health.mu.Unlock()
+	if deferredRetryCalls != 0 {
+		t.Fatalf("Acquire re-queried EarliestRetry: %d calls", deferredRetryCalls)
 	}
 }
 
@@ -685,7 +822,340 @@ func TestCooldownUpdatesRemoveOnlyAffectedAssignments(t *testing.T) {
 	}
 }
 
-func TestDisableHealthFailureUnbindsOnlyCurrentSession(t *testing.T) {
+func TestCooldownFallbackCreatesAssignmentOnlyAfterSuccess(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+
+	failed, err := selector.Acquire(snapshot, key, nil)
+	if got := providerID(t, failed, err); got != providerA {
+		t.Fatalf("initial provider = %s", got)
+	}
+	health.updates[failed.HealthLease.Key] = HealthUpdate{
+		ChannelEnteredCooldown: true,
+		ChannelState:           ChannelCooldown,
+	}
+	selector.Report(failed, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
+	if got := selector.ActiveAssignmentCount(); got != 0 {
+		t.Fatalf("source assignment survived cooldown: %d", got)
+	}
+
+	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if got := providerID(t, fallback, err); got != providerB {
+		t.Fatalf("fallback provider = %s", got)
+	}
+	if got := selector.ActiveAssignmentCount(); got != 0 {
+		t.Fatalf("fallback assignment created before success: %d", got)
+	}
+	selector.Report(fallback, Outcome{Class: FailureNone, SessionID: key.SessionID})
+	assignments := selector.Assignments(providerB)
+	if len(assignments) != 1 || assignments[0].Key != key {
+		t.Fatalf("successful fallback assignment = %#v", assignments)
+	}
+}
+
+func TestCooldownFallbackFailureDoesNotCreateAssignment(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+
+	failed, err := selector.Acquire(snapshot, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.updates[failed.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
+	selector.Report(failed, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
+	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if got := providerID(t, fallback, err); got != providerB {
+		t.Fatalf("fallback provider = %s", got)
+	}
+	selector.Report(fallback, Outcome{Class: FailureChannelTransient, SessionID: key.SessionID})
+	if got := selector.ActiveAssignmentCount(); got != 0 {
+		t.Fatalf("failed fallback created assignment: %d", got)
+	}
+}
+
+func TestCooldownRemovesAssignmentsButPreservesPendingMigrationForEverySession(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	// A has the higher priority so both sessions initially bind to it. B is
+	// still an eligible fallback for the same model.
+	a := compileProvider(t, providerA, "a", []string{"m"}, 10)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+
+	s1, err := selector.Acquire(snapshot, normalKey("s1", "m"), nil)
+	if err != nil || s1.Provider.ID != providerA {
+		t.Fatalf("s1 initial lease = %#v, %v", s1, err)
+	}
+	s2, err := selector.Acquire(snapshot, normalKey("s2", "m"), nil)
+	if err != nil || s2.Provider.ID != providerA {
+		t.Fatalf("s2 initial lease = %#v, %v", s2, err)
+	}
+
+	// S2 has already acquired its replacement while its A assignment still
+	// exists. A later global cooldown removes both A assignments; both source
+	// identities must remain available for their respective migrations.
+	s2Fallback, err := selector.Acquire(snapshot, normalKey("s2", "m"), map[string]struct{}{providerA: {}})
+	if err != nil || s2Fallback.Provider.ID != providerB {
+		t.Fatalf("s2 fallback lease = %#v, %v", s2Fallback, err)
+	}
+	health.updates[s1.HealthLease.Key] = HealthUpdate{GlobalEnteredCooldown: true, GlobalState: GlobalCooldown}
+	selector.Report(s1, Outcome{Class: FailureGlobalImmediate, SessionID: "s1"})
+	if got := selector.ActiveAssignmentCount(); got != 0 {
+		t.Fatalf("assignments after global cooldown = %d", got)
+	}
+
+	selector.Report(s2Fallback, Outcome{Class: FailureNone, SessionID: "s2"})
+	assignments := selector.Assignments(providerB)
+	if len(assignments) != 1 || assignments[0].Key != normalKey("s2", "m") {
+		t.Fatalf("s2 migration assignment = %#v", assignments)
+	}
+}
+
+func TestLateFallbackSuccessCannotOverwriteNewerAssignment(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	c := compileProvider(t, providerC, "c", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b, c}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+
+	failed, err := selector.Acquire(snapshot, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.updates[failed.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
+	selector.Report(failed, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
+	aKey := failed.HealthLease.Key
+	health.decisions[aKey] = HealthDecision{Available: false, GlobalState: GlobalHealthy, ChannelState: ChannelCooldown}
+
+	late, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if got := providerID(t, late, err); got != providerB {
+		t.Fatalf("late fallback provider = %s", got)
+	}
+	bKey := late.HealthLease.Key
+	health.decisions[bKey] = HealthDecision{Available: false, GlobalState: GlobalHealthy, ChannelState: ChannelCooldown}
+	newer, err := selector.Acquire(snapshot, key, nil)
+	if got := providerID(t, newer, err); got != providerC {
+		t.Fatalf("newer provider = %s", got)
+	}
+	selector.Report(newer, Outcome{Class: FailureNone, SessionID: key.SessionID})
+	selector.Report(late, Outcome{Class: FailureNone, SessionID: key.SessionID})
+
+	assignments := selector.Assignments(providerC)
+	if len(assignments) != 1 || assignments[0].Key != key || len(selector.Assignments(providerB)) != 0 {
+		t.Fatalf("late result overwrote newer assignment: B=%#v C=%#v", selector.Assignments(providerB), assignments)
+	}
+}
+
+func TestPendingMigrationExpiresWithStickyTTL(t *testing.T) {
+	now := time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC)
+	policy := DefaultPolicy()
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, policy, func() time.Time { return now })
+	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+
+	failed, err := selector.Acquire(snapshot, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.updates[failed.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
+	selector.Report(failed, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
+	if len(selector.pending) != 1 {
+		t.Fatalf("pending migrations = %#v", selector.pending)
+	}
+	now = now.Add(policy.StickyTTL)
+	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if got := providerID(t, fallback, err); got != providerB {
+		t.Fatalf("fallback provider = %s", got)
+	}
+	selector.Report(fallback, Outcome{Class: FailureNone, SessionID: key.SessionID})
+	if len(selector.pending) != 0 || selector.ActiveAssignmentCount() != 0 {
+		t.Fatalf("expired source created affinity: pending=%#v assignments=%#v", selector.pending, selector.Assignments(""))
+	}
+}
+
+func TestPendingMigrationExpiresBeforeLateReport(t *testing.T) {
+	now := time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC)
+	policy := DefaultPolicy()
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, policy, func() time.Time { return now })
+	a := compileProvider(t, providerA, "a", []string{"m"}, 10)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+
+	initial, err := selector.Acquire(snapshot, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.updates[initial.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
+	selector.Report(initial, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
+	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if err != nil || fallback.Provider.ID != providerB {
+		t.Fatalf("fallback lease = %#v, %v", fallback, err)
+	}
+
+	// No intervening Scheduler read occurs. Report itself must expire the
+	// pending tombstone before applying a late success, otherwise it revives an
+	// assignment whose source affinity has exceeded the sliding TTL.
+	now = now.Add(policy.StickyTTL + time.Nanosecond)
+	selector.Report(fallback, Outcome{Class: FailureNone, SessionID: key.SessionID})
+	if got := selector.ActiveAssignmentCount(); got != 0 {
+		t.Fatalf("late success revived expired assignment: %d", got)
+	}
+}
+
+func TestFreshRequestClearsPendingMigrationEvenWhenNoCandidateIsAvailable(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 10)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+	initial, err := selector.Acquire(snapshot, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.updates[initial.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
+	selector.Report(initial, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
+	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if err != nil || fallback.Provider.ID != providerB {
+		t.Fatalf("fallback lease = %#v, %v", fallback, err)
+	}
+
+	// A new request begins while both candidates are unavailable. Its empty
+	// exclusion set must invalidate the old request's pending tombstone even
+	// though no replacement assignment can be selected in this call.
+	health.decisions[fallback.HealthLease.Key] = HealthDecision{
+		Available:    false,
+		GlobalState:  GlobalHealthy,
+		ChannelState: ChannelCooldown,
+	}
+	health.decisions[initial.HealthLease.Key] = HealthDecision{
+		Available:    false,
+		GlobalState:  GlobalHealthy,
+		ChannelState: ChannelCooldown,
+	}
+	if _, err := selector.Acquire(snapshot, key, nil); !errors.Is(err, ErrNoEligibleProvider) {
+		t.Fatalf("fresh unavailable request error = %v", err)
+	}
+	delete(health.decisions, fallback.HealthLease.Key)
+	delete(health.decisions, initial.HealthLease.Key)
+	selector.Report(fallback, Outcome{Class: FailureNone, SessionID: key.SessionID})
+	if got := selector.ActiveAssignmentCount(); got != 0 {
+		t.Fatalf("cleared pending migration revived assignment: %d", got)
+	}
+}
+
+func TestSameGenerationLateFallbackCannotPassAssignmentABA(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 10)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+
+	initial, err := selector.Acquire(snapshot, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	if err != nil || oldFallback.Provider.ID != providerB {
+		t.Fatalf("old fallback lease = %#v, %v", oldFallback, err)
+	}
+
+	// Remove A through a real health cooldown, then make the same-generation A
+	// candidate available again and start a fresh request. This creates a new
+	// A assignment with the same provider ID/generation (an ABA cycle), but a
+	// newer internal assignment version.
+	health.updates[initial.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
+	selector.Report(initial, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
+	delete(health.decisions, initial.HealthLease.Key)
+	// The fake health controller returns the configured update for every lease;
+	// clear the one-shot cooldown before the replacement A request succeeds.
+	health.updates[initial.HealthLease.Key] = HealthUpdate{}
+	fresh, err := selector.Acquire(snapshot, key, nil)
+	if err != nil || fresh.Provider.ID != providerA {
+		t.Fatalf("fresh A lease = %#v, %v", fresh, err)
+	}
+	selector.Report(fresh, Outcome{Class: FailureNone, SessionID: key.SessionID})
+
+	// The old B success must not migrate the replacement A assignment. A
+	// provider ID/generation-only comparison would incorrectly accept it.
+	selector.Report(oldFallback, Outcome{Class: FailureNone, SessionID: key.SessionID})
+	assignments := selector.Assignments("")
+	if len(assignments) != 1 || assignments[0].ProviderID != providerA {
+		t.Fatalf("same-generation ABA assignment = %#v", assignments)
+	}
+}
+
+func TestLateLeaseCannotRebindAfterStaticOrModelInvalidation(t *testing.T) {
+	cases := []struct {
+		name   string
+		update func(*provider.CompiledProvider)
+	}{
+		{name: "disabled", update: func(item *provider.CompiledProvider) { item.Enabled = false }},
+		{name: "model removed", update: func(item *provider.CompiledProvider) { item.Models = []string{"other"} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			health := newFakeHealth()
+			selector := newTestScheduler(t, health, Policy{}, nil)
+			a := compileProvider(t, providerA, "a", []string{"m"}, 10)
+			b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+			first := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+			selector.Reconcile(first)
+			key := normalKey("session", "m")
+			initial, err := selector.Acquire(first, key, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fallback, err := selector.Acquire(first, key, map[string]struct{}{providerA: {}})
+			if err != nil || fallback.Provider.ID != providerB {
+				t.Fatalf("fallback lease = %#v, %v", fallback, err)
+			}
+
+			updatedB := b.Clone()
+			tc.update(updatedB)
+			second := &fakeSnapshot{revision: 2, providers: []*provider.CompiledProvider{a, updatedB}}
+			selector.Reconcile(second)
+			selector.Report(fallback, Outcome{Class: FailureNone, SessionID: key.SessionID})
+
+			assignments := selector.Assignments("")
+			if len(assignments) != 1 || assignments[0].ProviderID != providerA {
+				t.Fatalf("late invalid lease changed assignments = %#v", assignments)
+			}
+			// The source lease is intentionally left in flight; reporting it after
+			// the reconcile must not create a second assignment or alter B state.
+			selector.Report(initial, Outcome{Class: FailureNone, SessionID: key.SessionID})
+			if got := selector.ActiveAssignmentCount(); got != 1 {
+				t.Fatalf("assignment count after source report = %d", got)
+			}
+		})
+	}
+}
+
+func TestDisableHealthFailureKeepsAssignmentUntilSuccessfulMigration(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, Policy{}, nil)
 	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
@@ -710,7 +1180,7 @@ func TestDisableHealthFailureUnbindsOnlyCurrentSession(t *testing.T) {
 
 	selector.Report(failed, Outcome{Class: FailureChannelTransient, SessionID: "s1"})
 	aAssignments := selector.Assignments(providerA)
-	if len(aAssignments) != 1 || aAssignments[0].Key.SessionID != "s3" {
+	if len(aAssignments) != 2 {
 		t.Fatalf("provider A assignments after failure = %#v", aAssignments)
 	}
 	if len(selector.Assignments(providerB)) != 1 {
@@ -721,13 +1191,20 @@ func TestDisableHealthFailureUnbindsOnlyCurrentSession(t *testing.T) {
 	if got := providerID(t, retry, err); got != providerB {
 		t.Fatalf("failed session fallback = %s", got)
 	}
+	selector.Report(retry, Outcome{Class: FailureNone, SessionID: "s1"})
+	if assignments := selector.Assignments(providerA); len(assignments) != 1 || assignments[0].Key.SessionID != "s3" {
+		t.Fatalf("provider A assignments after migration = %#v", assignments)
+	}
+	if assignments := selector.Assignments(providerB); len(assignments) != 2 {
+		t.Fatalf("provider B assignments after migration = %#v", assignments)
+	}
 	afterRound, err := selector.Acquire(snapshot, normalKey("s4", "m"), nil)
-	if got := providerID(t, afterRound, err); got != providerA {
-		t.Fatalf("new session did not rotate back to failed provider: %s", got)
+	if got := providerID(t, afterRound, err); got != providerB {
+		t.Fatalf("new session did not continue round-robin after migration: %s", got)
 	}
 }
 
-func TestDisableHealthStreamFailureUnbindsAfterResponseStarts(t *testing.T) {
+func TestDisableHealthStreamFailureKeepsAssignmentAfterResponseStarts(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, Policy{}, nil)
 	item := compileProvider(t, providerA, "a", []string{"m"}, 0)
@@ -743,8 +1220,8 @@ func TestDisableHealthStreamFailureUnbindsAfterResponseStarts(t *testing.T) {
 		SessionID:       "stream-session",
 		ResponseStarted: true,
 	})
-	if assignments := selector.Assignments(providerA); len(assignments) != 0 {
-		t.Fatalf("stream failure kept disabled-health assignment: %#v", assignments)
+	if assignments := selector.Assignments(providerA); len(assignments) != 1 || assignments[0].Key.SessionID != "stream-session" {
+		t.Fatalf("stream failure changed disabled-health assignment: %#v", assignments)
 	}
 }
 

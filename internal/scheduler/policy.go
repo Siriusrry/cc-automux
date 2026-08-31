@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 // AttemptPolicy contains request-scoped retry limits. Runtime snapshots own a
@@ -70,12 +72,79 @@ func ResolveAttemptPolicy(snapshot Snapshot) (AttemptPolicy, error) {
 	return policy, nil
 }
 
+// ErrRequestAttemptPolicyUnavailable indicates that a legacy Snapshot does
+// not expose a budget for the requested traffic type. In particular, a
+// classifier request must never silently consume the ordinary request budget.
+var ErrRequestAttemptPolicyUnavailable = errors.New("request attempt policy unavailable")
+
+// ResolveRequestAttemptPolicy resolves the budget for one request type. The
+// typed view is preferred when available; the legacy Snapshot.AttemptPolicy
+// method remains valid for normal traffic. Classifier traffic without a typed
+// budget fails closed so a normal default cannot accidentally enable retry.
+func ResolveRequestAttemptPolicy(snapshot Snapshot, requestType traffic.RequestType) (AttemptPolicy, error) {
+	if snapshot == nil {
+		return AttemptPolicy{}, errors.New("snapshot is required")
+	}
+	if provider, ok := snapshot.(RequestAttemptPolicyProvider); ok {
+		policy := provider.AttemptPolicyFor(requestType)
+		if err := policy.Validate(); err != nil {
+			return AttemptPolicy{}, fmt.Errorf("invalid request attempt policy: %w", err)
+		}
+		return policy, nil
+	}
+	if view, ok := snapshot.(RequestAttemptPolicyView); ok {
+		var policy AttemptPolicy
+		switch requestType {
+		case traffic.RequestTypeNormal:
+			policy = view.NormalAttemptPolicy()
+		case traffic.RequestTypeClassifier:
+			policy = view.ClassifierAttemptPolicy()
+		default:
+			return AttemptPolicy{}, fmt.Errorf("%w: unsupported request type %q", ErrRequestAttemptPolicyUnavailable, requestType)
+		}
+		if err := policy.Validate(); err != nil {
+			return AttemptPolicy{}, fmt.Errorf("invalid request attempt policy: %w", err)
+		}
+		return policy, nil
+	}
+	if requestType != traffic.RequestTypeNormal {
+		return AttemptPolicy{}, fmt.Errorf("%w for %q", ErrRequestAttemptPolicyUnavailable, requestType)
+	}
+	return ResolveAttemptPolicy(snapshot)
+}
+
 type requestPolicySnapshot struct {
 	Snapshot
-	attempts AttemptPolicy
+	attempts      AttemptPolicy
+	typed         RequestAttemptPolicyView
+	typedProvider RequestAttemptPolicyProvider
 }
 
 func (s requestPolicySnapshot) AttemptPolicy() AttemptPolicy { return s.attempts }
+
+func (s requestPolicySnapshot) AttemptPolicyFor(requestType traffic.RequestType) AttemptPolicy {
+	switch requestType {
+	case traffic.RequestTypeNormal:
+		return s.attempts
+	case traffic.RequestTypeClassifier:
+		if s.typed != nil {
+			return s.typed.ClassifierAttemptPolicy()
+		}
+		if s.typedProvider != nil {
+			return s.typedProvider.AttemptPolicyFor(requestType)
+		}
+	}
+	return AttemptPolicy{}
+}
+
+func (s requestPolicySnapshot) NormalAttemptPolicy() AttemptPolicy { return s.attempts }
+
+func (s requestPolicySnapshot) ClassifierAttemptPolicy() AttemptPolicy {
+	if s.typed == nil {
+		return AttemptPolicy{}
+	}
+	return s.typed.ClassifierAttemptPolicy()
+}
 
 // CaptureAttemptPolicy freezes the snapshot's request budget behind a wrapper
 // so every consumer of one request observes the same validated value.
@@ -84,7 +153,9 @@ func CaptureAttemptPolicy(snapshot Snapshot) (Snapshot, AttemptPolicy, error) {
 	if err != nil {
 		return nil, AttemptPolicy{}, err
 	}
-	return requestPolicySnapshot{Snapshot: snapshot, attempts: policy}, policy, nil
+	typed, _ := snapshot.(RequestAttemptPolicyView)
+	typedProvider, _ := snapshot.(RequestAttemptPolicyProvider)
+	return requestPolicySnapshot{Snapshot: snapshot, attempts: policy, typed: typed, typedProvider: typedProvider}, policy, nil
 }
 
 func (p Policy) Validate() error {

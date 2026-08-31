@@ -111,6 +111,48 @@ func TestNeutralUpstreamErrorIsObservedWithoutBreakerMutation(t *testing.T) {
 	}
 }
 
+func TestHealthFailureWithEmptyRawErrorClearsPreviousDiagnostic(t *testing.T) {
+	clock := newFakeClock()
+	store := newTestStore(t, clock)
+	p := testProvider("provider", "generation", true, "model")
+	store.Reconcile([]*provider.CompiledProvider{p})
+	key := testHealthKey(p, "model")
+
+	report(t, store, key, true, scheduler.Outcome{
+		Class:       scheduler.FailureGlobalImmediate,
+		UpstreamURL: "https://provider.example/first-global",
+		RawError:    "old global error",
+		SessionID:   "global-old",
+	})
+	report(t, store, key, true, scheduler.Outcome{
+		Class:       scheduler.FailureGlobalTransient,
+		UpstreamURL: "https://provider.example/empty-global",
+		SessionID:   "global-empty",
+	})
+	report(t, store, key, true, scheduler.Outcome{
+		Class:       scheduler.FailureChannelImmediate,
+		HTTPStatus:  404,
+		UpstreamURL: "https://provider.example/first-channel",
+		RawError:    "old channel error",
+		SessionID:   "channel-old",
+	})
+	report(t, store, key, true, scheduler.Outcome{
+		Class:       scheduler.FailureChannelTransient,
+		HTTPStatus:  503,
+		UpstreamURL: "https://provider.example/empty-channel",
+		SessionID:   "channel-empty",
+	})
+
+	snapshot := mustProviderSnapshot(t, store, p)
+	channel := findChannel(t, snapshot, "model", traffic.RequestTypeNormal)
+	if snapshot.Global.LastError != "" || snapshot.Global.LastUpstreamURL != "https://provider.example/empty-global" || snapshot.Global.LastSessionID != "global-empty" {
+		t.Fatalf("latest empty global diagnostic = %#v", snapshot.Global)
+	}
+	if channel.LastError != "" || channel.LastUpstreamURL != "https://provider.example/empty-channel" || channel.LastSessionID != "channel-empty" {
+		t.Fatalf("latest empty channel diagnostic = %#v", channel)
+	}
+}
+
 func TestLocalNeutralErrorDoesNotPolluteProviderDiagnostics(t *testing.T) {
 	clock := newFakeClock()
 	store := newTestStore(t, clock)
@@ -165,6 +207,78 @@ func TestFailureWindowThresholdAndLayerIsolation(t *testing.T) {
 		t.Fatal("channel cooldown blocked a different model")
 	}
 	store.Report(decisionB.Lease, scheduler.Outcome{Class: scheduler.FailureNeutral})
+}
+
+func TestClassifierChannelHealthIsolatedFromNormalChannel(t *testing.T) {
+	clock := newFakeClock()
+	store := newTestStore(t, clock)
+	p := testProvider("provider", "generation", false, "model")
+	store.Reconcile([]*provider.CompiledProvider{p})
+	classifierKey := scheduler.HealthKey{
+		ProviderID:  p.ID,
+		Generation:  p.Generation,
+		Model:       "model",
+		RequestType: traffic.RequestTypeClassifier,
+	}
+	normalKey := testHealthKey(p, "model")
+
+	update := report(t, store, classifierKey, false, scheduler.Outcome{
+		Class:       scheduler.FailureChannelImmediate,
+		HTTPStatus:  404,
+		UpstreamURL: "https://provider.example/v1/messages",
+		RawError:    "classifier model missing",
+		SessionID:   "classifier-session",
+	})
+	if !update.ChannelEnteredCooldown || update.GlobalEnteredCooldown || update.ChannelState != scheduler.ChannelCooldown {
+		t.Fatalf("classifier channel update = %#v", update)
+	}
+	if normal := store.Acquire(normalKey, false); !normal.Available {
+		t.Fatalf("classifier cooldown blocked normal channel = %#v", normal)
+	} else {
+		store.Report(normal.Lease, scheduler.Outcome{Class: scheduler.FailureNeutral, HTTPStatus: 400})
+	}
+	if next := store.Acquire(classifierKey, false); next.Available || next.ChannelState != scheduler.ChannelCooldown {
+		t.Fatalf("classifier cooldown decision = %#v", next)
+	}
+
+	snapshot := mustProviderSnapshot(t, store, p)
+	classifier := findChannel(t, snapshot, "model", traffic.RequestTypeClassifier)
+	normal := findChannel(t, snapshot, "model", traffic.RequestTypeNormal)
+	if classifier.State != scheduler.ChannelCooldown || classifier.LastError != "classifier model missing" ||
+		classifier.LastSessionID != "classifier-session" || normal.State == scheduler.ChannelCooldown {
+		t.Fatalf("classifier/normal channel states = %#v / %#v", classifier, normal)
+	}
+}
+
+func TestDisableHealthClassifierChannelNeverCoolsDown(t *testing.T) {
+	clock := newFakeClock()
+	store := newTestStore(t, clock)
+	p := testProvider("provider", "generation", true, "model")
+	store.Reconcile([]*provider.CompiledProvider{p})
+	key := scheduler.HealthKey{
+		ProviderID:  p.ID,
+		Generation:  p.Generation,
+		Model:       "model",
+		RequestType: traffic.RequestTypeClassifier,
+	}
+	for i := 0; i < 4; i++ {
+		decision := mustAcquire(t, store, key, true)
+		update := store.Report(decision.Lease, scheduler.Outcome{
+			Class:      scheduler.FailureChannelTransient,
+			HTTPStatus: 429,
+			RawError:   "classifier rate limited",
+			SessionID:  "classifier-session",
+		})
+		if update.ChannelEnteredCooldown || update.ChannelState != scheduler.ChannelDisabled {
+			t.Fatalf("disabled classifier update %d = %#v", i, update)
+		}
+	}
+	snapshot := mustProviderSnapshot(t, store, p)
+	channel := findChannel(t, snapshot, "model", traffic.RequestTypeClassifier)
+	if channel.State != scheduler.ChannelDisabled || channel.ConsecutiveFailures != 0 || channel.ObservedFailures != 4 ||
+		channel.LastError != "classifier rate limited" {
+		t.Fatalf("disabled classifier channel = %#v", channel)
+	}
 }
 
 func TestGlobalCooldownBlocksEveryChannel(t *testing.T) {
@@ -430,6 +544,53 @@ func TestDisableHealthToggleClearsBreakerState(t *testing.T) {
 	}
 }
 
+func TestDisableHealthTogglePreservesClassifierDiagnostics(t *testing.T) {
+	clock := newFakeClock()
+	store := newTestStore(t, clock)
+	enabled := testProvider("provider", "generation", false, "model")
+	store.Reconcile([]*provider.CompiledProvider{enabled})
+	classifierKey := scheduler.HealthKey{
+		ProviderID:  enabled.ID,
+		Generation:  enabled.Generation,
+		Model:       "model",
+		RequestType: traffic.RequestTypeClassifier,
+	}
+	report(t, store, classifierKey, false, scheduler.Outcome{
+		Class:       scheduler.FailureChannelImmediate,
+		HTTPStatus:  404,
+		UpstreamURL: "https://provider.example/v1/messages",
+		RawError:    "classifier endpoint missing",
+		SessionID:   "classifier-session",
+	})
+
+	// Toggling disable_health keeps the same target generation. Breaker fields
+	// must reset to the new mode, but the dynamically-created classifier channel
+	// and its latest observation remain available for diagnostics.
+	disabled := testProvider("provider", "generation", true, "model")
+	store.Reconcile([]*provider.CompiledProvider{disabled})
+	snapshot := mustProviderSnapshot(t, store, disabled)
+	channel := findChannel(t, snapshot, "model", traffic.RequestTypeClassifier)
+	if channel.State != scheduler.ChannelDisabled || channel.ConsecutiveFailures != 0 || channel.BackoffLevel != 0 || channel.CooldownUntil != nil {
+		t.Fatalf("classifier breaker state after disable toggle = %#v", channel)
+	}
+	if channel.ObservedFailures != 1 || channel.LastUpstreamURL != "https://provider.example/v1/messages" ||
+		channel.LastError != "classifier endpoint missing" || channel.LastSessionID != "classifier-session" {
+		t.Fatalf("classifier diagnostics after disable toggle = %#v", channel)
+	}
+
+	// Switching back must preserve the same diagnostic fields while resetting
+	// the disabled state again to an ordinary unknown channel.
+	store.Reconcile([]*provider.CompiledProvider{enabled})
+	snapshot = mustProviderSnapshot(t, store, enabled)
+	channel = findChannel(t, snapshot, "model", traffic.RequestTypeClassifier)
+	if channel.State != scheduler.ChannelUnknown || channel.ConsecutiveFailures != 0 || channel.BackoffLevel != 0 || channel.CooldownUntil != nil {
+		t.Fatalf("classifier breaker state after re-enable = %#v", channel)
+	}
+	if channel.ObservedFailures != 1 || channel.LastError != "classifier endpoint missing" || channel.LastSessionID != "classifier-session" {
+		t.Fatalf("classifier diagnostics after re-enable = %#v", channel)
+	}
+}
+
 func TestReconcileGenerationModeAndModels(t *testing.T) {
 	clock := newFakeClock()
 	store := newTestStore(t, clock)
@@ -663,6 +824,41 @@ func TestGenerationRetirementKeepsOnlyLiveScopes(t *testing.T) {
 	}
 	if got := mustProviderSnapshot(t, store, p2); got.Global.State != scheduler.GlobalUnknown {
 		t.Fatalf("current generation changed = %#v", got.Global)
+	}
+}
+
+func TestRetiredHalfOpenReportReleasesProbeToken(t *testing.T) {
+	clock := newFakeClock()
+	store := newTestStore(t, clock)
+	p1 := testProvider("provider", "generation-1", false, "model-a", "model-b")
+	store.Reconcile([]*provider.CompiledProvider{p1})
+	keyA := testHealthKey(p1, "model-a")
+	keyB := testHealthKey(p1, "model-b")
+	report(t, store, keyA, false, scheduler.Outcome{Class: scheduler.FailureChannelImmediate})
+	clock.Advance(time.Minute)
+	probe := mustAcquire(t, store, keyA, false)
+	if !probe.Lease.ChannelProbe {
+		t.Fatalf("half-open lease = %#v", probe.Lease)
+	}
+	// Keep the retired scope alive after the probe completes so its token can
+	// be observed through another old-generation Acquire.
+	held := mustAcquire(t, store, keyB, false)
+
+	p2 := testProvider("provider", "generation-2", false, "model-a", "model-b")
+	store.Reconcile([]*provider.CompiledProvider{p2})
+	store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureNone, HTTPStatus: 200})
+
+	next := store.Acquire(keyA, false)
+	if !next.Available || !next.Lease.ChannelProbe || next.ChannelState != scheduler.ChannelHalfOpen {
+		t.Fatalf("retired probe token was not released = %#v", next)
+	}
+	store.Report(next.Lease, scheduler.Outcome{Class: scheduler.FailureClientCanceled, ClientCanceled: true})
+	store.Report(held.Lease, scheduler.Outcome{Class: scheduler.FailureClientCanceled, ClientCanceled: true})
+	if len(store.retired) != 0 {
+		t.Fatalf("retired scope leaked = %#v", store.retired)
+	}
+	if current := mustProviderSnapshot(t, store, p2); current.Global.State != scheduler.GlobalUnknown {
+		t.Fatalf("retired reports changed current generation = %#v", current)
 	}
 }
 
