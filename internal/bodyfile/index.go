@@ -94,6 +94,7 @@ type JSONIndex struct {
 	spec       ScanSpec
 	valid      bool
 	modelSeen  bool
+	rawMarkers map[string]bool
 }
 
 var (
@@ -211,6 +212,49 @@ func (i JSONIndex) DirectChildren(path string) []Field {
 func (i JSONIndex) Spec() ScanSpec {
 	result := i.spec
 	result.Paths = append([]string(nil), i.spec.Paths...)
+	result.RawMarkers = append([]string(nil), i.spec.RawMarkers...)
+	return result
+}
+
+// RawMarkerStatus reports whether marker was found in the original bytes and
+// whether this index's ingress scan tracked that marker at all. The second
+// result lets detectors distinguish an untracked marker from a tracked
+// negative match without rescanning the body.
+func (i JSONIndex) RawMarkerStatus(marker string) (found, tracked bool) {
+	if i.rawMarkers == nil {
+		return false, false
+	}
+	found, tracked = i.rawMarkers[marker]
+	if !tracked {
+		// A configured marker with a false result is still present in the map;
+		// check the scan contract for callers that construct an empty map.
+		for _, configured := range i.spec.RawMarkers {
+			if configured == marker {
+				return false, true
+			}
+		}
+	}
+	return found, tracked
+}
+
+// RawMarkerFound reports whether the scanner observed marker in the original
+// request bytes. It returns false when marker was not part of the scan
+// contract, allowing callers to fail closed instead of performing a rescan.
+func (i JSONIndex) RawMarkerFound(marker string) bool {
+	found, _ := i.RawMarkerStatus(marker)
+	return found
+}
+
+// HasRawMarker is a descriptive alias for RawMarkerFound.
+func (i JSONIndex) HasRawMarker(marker string) bool { return i.RawMarkerFound(marker) }
+
+// RawMarkers returns a defensive copy of all raw marker scan results keyed by
+// their configured byte sequence.
+func (i JSONIndex) RawMarkers() map[string]bool {
+	result := make(map[string]bool, len(i.rawMarkers))
+	for marker, found := range i.rawMarkers {
+		result[marker] = found
+	}
 	return result
 }
 

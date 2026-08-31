@@ -1,6 +1,7 @@
 package bodyfile
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -124,6 +125,18 @@ func ApplyEditsIn(body Body, edits []Edit, directory string) (result Body, retur
 // derived file. Callers use the returned index for the next hook in a patch
 // chain.
 func ApplyEditsAndScan(body Body, edits []Edit, spec ScanSpec, directory ...string) (result Body, index JSONIndex, returnErr error) {
+	return ApplyEditsAndScanContext(context.Background(), body, edits, spec, directory...)
+}
+
+// ApplyEditsAndScanContext is the cancellation-aware form of
+// ApplyEditsAndScan.  The context is checked between bounded source reads,
+// writes, and sealing.  If it is cancelled before a derived Body is returned,
+// the in-progress builder is aborted and no derived Body or index escapes.
+func ApplyEditsAndScanContext(ctx context.Context, body Body, edits []Edit, spec ScanSpec, directory ...string) (result Body, index JSONIndex, returnErr error) {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, JSONIndex{}, err
+	}
 	if body == nil {
 		return nil, JSONIndex{}, ErrNilBody
 	}
@@ -133,12 +146,18 @@ func ApplyEditsAndScan(body Body, edits []Edit, spec ScanSpec, directory ...stri
 	if len(edits) == 0 {
 		return body, JSONIndex{}, ErrIndexRequired
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, JSONIndex{}, err
+	}
 	dir := ""
 	if len(directory) > 0 {
 		dir = directory[0]
 	}
 	scanner, err := NewJSONScanner(spec)
 	if err != nil {
+		return nil, JSONIndex{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, JSONIndex{}, err
 	}
 	reader, err := openBodyReader(body)
@@ -161,6 +180,9 @@ func ApplyEditsAndScan(body Body, edits []Edit, spec ScanSpec, directory ...stri
 	if err != nil {
 		return nil, JSONIndex{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, JSONIndex{}, err
+	}
 	if binder, ok := builder.(interface{ scanBinding() *scanBinding }); ok {
 		scanner.binding = binder.scanBinding()
 	}
@@ -176,27 +198,42 @@ func ApplyEditsAndScan(body Body, edits []Edit, spec ScanSpec, directory ...stri
 
 	var cursor int64
 	for _, edit := range edits {
-		if err := copyBodyRange(sink, reader, edit.Start-cursor); err != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, JSONIndex{}, err
+		}
+		if err := copyBodyRangeContext(ctx, sink, reader, edit.Start-cursor); err != nil {
 			return nil, JSONIndex{}, fmt.Errorf("copy body before edit: %w", err)
 		}
 		cursor = edit.Start
+		if err := ctx.Err(); err != nil {
+			return nil, JSONIndex{}, err
+		}
 		if len(edit.Replacement) > 0 {
-			if err := writeAll(sink, edit.Replacement); err != nil {
+			if err := writeAllContext(ctx, sink, edit.Replacement); err != nil {
 				return nil, JSONIndex{}, fmt.Errorf("write edit replacement: %w", err)
 			}
 		}
 		if edit.End > cursor {
-			if err := discardBodyRange(reader, edit.End-cursor); err != nil {
+			if err := discardBodyRangeContext(ctx, reader, edit.End-cursor); err != nil {
 				return nil, JSONIndex{}, fmt.Errorf("skip edited body range: %w", err)
 			}
 			cursor = edit.End
 		}
 	}
-	if err := copyBodyRange(sink, reader, body.Size()-cursor); err != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, JSONIndex{}, err
+	}
+	if err := copyBodyRangeContext(ctx, sink, reader, body.Size()-cursor); err != nil {
 		return nil, JSONIndex{}, fmt.Errorf("copy body after edits: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, JSONIndex{}, err
 	}
 	scanResult, err := scanner.Finish()
 	if err != nil {
+		return nil, JSONIndex{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, JSONIndex{}, err
 	}
 	result, err = builder.Seal()
@@ -204,11 +241,22 @@ func ApplyEditsAndScan(body Body, edits []Edit, spec ScanSpec, directory ...stri
 		return nil, JSONIndex{}, fmt.Errorf("seal edited body: %w", err)
 	}
 	abort = false
+	if err := ctx.Err(); err != nil {
+		closeErr := result.Close()
+		result = nil
+		return nil, JSONIndex{}, errors.Join(err, closeErr)
+	}
 	scanResult.source = result
 	index, err = scanResult.Bind(result)
 	if err != nil {
 		cleanupErr := result.Close()
 		result = nil
+		return nil, JSONIndex{}, errors.Join(err, cleanupErr)
+	}
+	if err := ctx.Err(); err != nil {
+		cleanupErr := result.Close()
+		result = nil
+		index = JSONIndex{}
 		return nil, JSONIndex{}, errors.Join(err, cleanupErr)
 	}
 	return result, index, nil
@@ -218,6 +266,17 @@ func ApplyEditsAndScan(body Body, edits []Edit, spec ScanSpec, directory ...stri
 // inspected the current body. A no-op returns the existing body/index without
 // opening a reader; non-empty edits delegate to the lockstep writer/scanner.
 func ApplyEditsAndScanWithIndex(body Body, index JSONIndex, edits []Edit, spec ScanSpec, directory ...string) (Body, JSONIndex, error) {
+	return ApplyEditsAndScanWithIndexContext(context.Background(), body, index, edits, spec, directory...)
+}
+
+// ApplyEditsAndScanWithIndexContext is the cancellation-aware indexed form.
+// It preserves the no-op identity contract when the context is live and
+// delegates non-empty edits to ApplyEditsAndScanContext.
+func ApplyEditsAndScanWithIndexContext(ctx context.Context, body Body, index JSONIndex, edits []Edit, spec ScanSpec, directory ...string) (Body, JSONIndex, error) {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, JSONIndex{}, err
+	}
 	if body == nil {
 		return nil, JSONIndex{}, ErrNilBody
 	}
@@ -230,7 +289,7 @@ func ApplyEditsAndScanWithIndex(body Body, index JSONIndex, edits []Edit, spec S
 		// post-classification projection just because the edit set is empty.
 		return body, index, nil
 	}
-	return ApplyEditsAndScan(body, edits, spec, directory...)
+	return ApplyEditsAndScanContext(ctx, body, edits, spec, directory...)
 }
 
 type scanningBuilder struct {
@@ -259,6 +318,13 @@ func (b *scanningBuilder) Write(data []byte) (int, error) {
 	return written, nil
 }
 
+func normalizeContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
 func validateEdits(size int64, edits []Edit) error {
 	if size < 0 {
 		return fmt.Errorf("%w: negative body size", ErrInvalidEdit)
@@ -284,8 +350,20 @@ func validateEdits(size int64, edits []Edit) error {
 }
 
 func writeAll(builder Builder, data []byte) error {
+	return writeAllContext(context.Background(), builder, data)
+}
+
+func writeAllContext(ctx context.Context, builder Builder, data []byte) error {
+	ctx = normalizeContext(ctx)
 	for len(data) > 0 {
-		n, err := builder.Write(data)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		chunk := data
+		if len(chunk) > 32*1024 {
+			chunk = chunk[:32*1024]
+		}
+		n, err := builder.Write(chunk)
 		if n > 0 {
 			data = data[n:]
 		}
@@ -298,6 +376,9 @@ func writeAll(builder Builder, data []byte) error {
 		}
 		if n == 0 {
 			return &WriteError{Err: wrapLocalIO(LocalIOWrite, io.ErrShortWrite)}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -325,6 +406,11 @@ func (e *scanWriteError) Unwrap() error {
 }
 
 func copyBodyRange(builder Builder, reader io.Reader, count int64) error {
+	return copyBodyRangeContext(context.Background(), builder, reader, count)
+}
+
+func copyBodyRangeContext(ctx context.Context, builder Builder, reader io.Reader, count int64) error {
+	ctx = normalizeContext(ctx)
 	if count < 0 {
 		return ErrInvalidEdit
 	}
@@ -334,16 +420,22 @@ func copyBodyRange(builder Builder, reader io.Reader, count int64) error {
 	buffer := make([]byte, 32*1024)
 	remaining := count
 	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		want := int64(len(buffer))
 		if want > remaining {
 			want = remaining
 		}
 		n, err := io.ReadFull(reader, buffer[:want])
 		if n > 0 {
-			if writeErr := writeAll(builder, buffer[:n]); writeErr != nil {
+			if writeErr := writeAllContext(ctx, builder, buffer[:n]); writeErr != nil {
 				return writeErr
 			}
 			remaining -= int64(n)
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
 		}
 		if err != nil {
 			return wrapLocalIO(LocalIORead, err)
@@ -353,15 +445,40 @@ func copyBodyRange(builder Builder, reader io.Reader, count int64) error {
 }
 
 func discardBodyRange(reader io.Reader, count int64) error {
+	return discardBodyRangeContext(context.Background(), reader, count)
+}
+
+func discardBodyRangeContext(ctx context.Context, reader io.Reader, count int64) error {
+	ctx = normalizeContext(ctx)
 	if count < 0 {
 		return ErrInvalidEdit
 	}
 	if count == 0 {
 		return nil
 	}
-	_, err := io.CopyN(io.Discard, reader, count)
-	if err != nil {
-		return wrapLocalIO(LocalIORead, err)
+	buffer := make([]byte, 32*1024)
+	remaining := count
+	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		want := int64(len(buffer))
+		if want > remaining {
+			want = remaining
+		}
+		n, err := reader.Read(buffer[:want])
+		if n > 0 {
+			remaining -= int64(n)
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		if err != nil {
+			return wrapLocalIO(LocalIORead, err)
+		}
+		if n == 0 {
+			return wrapLocalIO(LocalIORead, io.ErrNoProgress)
+		}
 	}
 	return nil
 }

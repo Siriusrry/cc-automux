@@ -32,7 +32,12 @@ import (
 // the legacy Index/IndexObject helpers; selective production scans leave it
 // false (including an empty Paths list).
 type ScanSpec struct {
-	Paths         []string
+	Paths []string
+	// RawMarkers lists byte sequences to find while the scanner consumes the
+	// source stream.  Matches are recorded without decoding JSON strings; this
+	// is useful for ingress predicates that require an exact, unescaped marker
+	// in the original request bytes.
+	RawMarkers    []string
 	RequireModel  bool
 	RequireObject bool
 	SelectAll     bool
@@ -62,6 +67,16 @@ func (s ScanSpec) Validate() error {
 			return err
 		}
 	}
+	markers := make(map[string]struct{}, len(s.RawMarkers))
+	for _, marker := range s.RawMarkers {
+		if marker == "" {
+			return errors.New("bodyfile: raw marker must not be empty")
+		}
+		if _, duplicate := markers[marker]; duplicate {
+			return fmt.Errorf("bodyfile: duplicate raw marker %q", marker)
+		}
+		markers[marker] = struct{}{}
+	}
 	return nil
 }
 
@@ -75,6 +90,38 @@ func RequestScanSpec(paths ...string) (ScanSpec, error) {
 	}
 	spec.RequireModel = true
 	return spec, nil
+}
+
+// RequestScanSpecWithRawMarkers constructs a request scan contract with the
+// supplied selective paths and raw byte markers.  Marker matching is done in
+// the same incremental pass as JSON validation and body capture.
+func RequestScanSpecWithRawMarkers(paths []string, markers ...string) (ScanSpec, error) {
+	spec, err := RequestScanSpec(paths...)
+	if err != nil {
+		return ScanSpec{}, err
+	}
+	spec.RawMarkers = append([]string(nil), markers...)
+	if err := spec.Validate(); err != nil {
+		return ScanSpec{}, err
+	}
+	return spec, nil
+}
+
+// RequestScanSpecWithMarkers is a concise alias for
+// RequestScanSpecWithRawMarkers.
+func RequestScanSpecWithMarkers(paths []string, markers ...string) (ScanSpec, error) {
+	return RequestScanSpecWithRawMarkers(paths, markers...)
+}
+
+// WithRawMarkers returns a validated copy of a scan contract with raw marker
+// matching enabled.  It never mutates the receiver's slices.
+func (s ScanSpec) WithRawMarkers(markers ...string) (ScanSpec, error) {
+	result := s
+	result.RawMarkers = append([]string(nil), markers...)
+	if err := result.Validate(); err != nil {
+		return ScanSpec{}, err
+	}
+	return result, nil
 }
 
 // ResponseScanSpec describes a selective response scan. It validates one
@@ -98,6 +145,7 @@ type ScanResult struct {
 	hasDigest  bool
 	binding    *scanBinding
 	source     Body
+	rawMarkers map[string]bool
 }
 
 // Bind attaches an immutable body to a completed scan.
@@ -137,7 +185,7 @@ func (r ScanResult) bindScanned(body Body) (JSONIndex, error) {
 		return JSONIndex{}, ErrIndexBodyMismatch
 	}
 	return makeJSONIndex(body, r.Spec, r.Model, r.ModelRange, r.ModelSeen,
-		append([]Field(nil), r.Fields...), append([]ContainerInfo(nil), r.Containers...)), nil
+		append([]Field(nil), r.Fields...), append([]ContainerInfo(nil), r.Containers...), cloneRawMarkerMatches(r.rawMarkers)), nil
 }
 
 func digestBody(body Body) ([sha256.Size]byte, error) {
@@ -156,7 +204,7 @@ func digestBody(body Body) ([sha256.Size]byte, error) {
 	return result, nil
 }
 
-func makeJSONIndex(body Body, spec ScanSpec, model string, modelRange ByteRange, modelSeen bool, fields []Field, containers []ContainerInfo) JSONIndex {
+func makeJSONIndex(body Body, spec ScanSpec, model string, modelRange ByteRange, modelSeen bool, fields []Field, containers []ContainerInfo, rawMarkers map[string]bool) JSONIndex {
 	byPath := make(map[string][]int, len(fields))
 	children := make(map[string][]int)
 	for index, field := range fields {
@@ -168,7 +216,8 @@ func makeJSONIndex(body Body, spec ScanSpec, model string, modelRange ByteRange,
 		byContainer[container.Path] = append(byContainer[container.Path], container)
 	}
 	spec.Paths = append([]string(nil), spec.Paths...)
-	return JSONIndex{Model: model, ModelRange: modelRange, body: body, bodySize: body.Size(), fields: fields, byPath: byPath, containers: byContainer, children: children, spec: spec, valid: true, modelSeen: modelSeen}
+	spec.RawMarkers = append([]string(nil), spec.RawMarkers...)
+	return JSONIndex{Model: model, ModelRange: modelRange, body: body, bodySize: body.Size(), fields: fields, byPath: byPath, containers: byContainer, children: children, spec: spec, valid: true, modelSeen: modelSeen, rawMarkers: cloneRawMarkerMatches(rawMarkers)}
 }
 
 // JSONScanner incrementally validates and indexes one top-level object.
@@ -180,6 +229,7 @@ type JSONScanner struct {
 	digest      hash.Hash
 	binding     *scanBinding
 	keyRawLimit int
+	rawMatchers []rawMarkerMatcher
 
 	offset int64
 	stack  []scanFrame
@@ -197,6 +247,57 @@ type JSONScanner struct {
 	containers []ContainerInfo
 }
 
+// rawMarkerMatcher tracks one literal byte sequence with a compact KMP
+// automaton. It retains only the marker-sized prefix state, never the body.
+type rawMarkerMatcher struct {
+	pattern []byte
+	failure []int
+	matched int
+	found   bool
+}
+
+func newRawMarkerMatcher(pattern string) rawMarkerMatcher {
+	matcher := rawMarkerMatcher{pattern: []byte(pattern)}
+	matcher.failure = make([]int, len(matcher.pattern))
+	for i, prefix := 1, 0; i < len(matcher.pattern); i++ {
+		for prefix > 0 && matcher.pattern[i] != matcher.pattern[prefix] {
+			prefix = matcher.failure[prefix-1]
+		}
+		if matcher.pattern[i] == matcher.pattern[prefix] {
+			prefix++
+		}
+		matcher.failure[i] = prefix
+	}
+	return matcher
+}
+
+func (m *rawMarkerMatcher) feed(value byte) {
+	if m == nil || m.found || len(m.pattern) == 0 {
+		return
+	}
+	for m.matched > 0 && value != m.pattern[m.matched] {
+		m.matched = m.failure[m.matched-1]
+	}
+	if value == m.pattern[m.matched] {
+		m.matched++
+	}
+	if m.matched == len(m.pattern) {
+		m.found = true
+		m.matched = m.failure[m.matched-1]
+	}
+}
+
+func cloneRawMarkerMatches(values map[string]bool) map[string]bool {
+	if len(values) == 0 {
+		return map[string]bool{}
+	}
+	result := make(map[string]bool, len(values))
+	for marker, found := range values {
+		result[marker] = found
+	}
+	return result
+}
+
 // Scanner is a concise alias.
 type Scanner = JSONScanner
 
@@ -206,14 +307,20 @@ func NewJSONScanner(spec ScanSpec) (*JSONScanner, error) {
 	// default rather than exposing a scalar mode callers could misuse.
 	spec.RequireObject = true
 	spec.Paths = append([]string(nil), spec.Paths...)
+	spec.RawMarkers = append([]string(nil), spec.RawMarkers...)
 	if err := spec.Validate(); err != nil {
 		return nil, err
+	}
+	rawMatchers := make([]rawMarkerMatcher, len(spec.RawMarkers))
+	for index, marker := range spec.RawMarkers {
+		rawMatchers[index] = newRawMarkerMatcher(marker)
 	}
 	return &JSONScanner{
 		spec:        spec,
 		trie:        newSelectorTrie(spec.Paths, spec.SelectAll),
 		digest:      sha256.New(),
 		keyRawLimit: selectorKeyRawLimit(spec),
+		rawMatchers: rawMatchers,
 	}, nil
 }
 
@@ -240,6 +347,15 @@ func (s *JSONScanner) Write(p []byte) (int, error) {
 	}
 	if len(p) > 0 && s.digest != nil {
 		_, _ = s.digest.Write(p)
+	}
+	// Matchers consume the original bytes exactly as supplied by the caller.
+	// Running them before token handling preserves matches split across Write
+	// calls and deliberately does not decode JSON escapes.
+	for index := range s.rawMatchers {
+		matcher := &s.rawMatchers[index]
+		for _, value := range p {
+			matcher.feed(value)
+		}
 	}
 	for index := 0; index < len(p); {
 		consumed, err := s.step(p[index])
@@ -305,8 +421,19 @@ func (s *JSONScanner) Close() error {
 }
 
 func (s *JSONScanner) result() ScanResult {
+	rawMarkers := make(map[string]bool, len(s.rawMatchers))
+	for index, matcher := range s.rawMatchers {
+		if index < len(s.spec.RawMarkers) {
+			rawMarkers[s.spec.RawMarkers[index]] = matcher.found
+		}
+	}
 	result := ScanResult{
-		Spec:       func() ScanSpec { spec := s.spec; spec.Paths = append([]string(nil), spec.Paths...); return spec }(),
+		Spec: func() ScanSpec {
+			spec := s.spec
+			spec.Paths = append([]string(nil), s.spec.Paths...)
+			spec.RawMarkers = append([]string(nil), s.spec.RawMarkers...)
+			return spec
+		}(),
 		Model:      s.model,
 		ModelRange: s.modelRange,
 		Fields:     append([]Field(nil), s.fields...),
@@ -320,6 +447,7 @@ func (s *JSONScanner) result() ScanResult {
 		result.hasDigest = true
 	}
 	result.binding = s.binding
+	result.rawMarkers = rawMarkers
 	return result
 }
 

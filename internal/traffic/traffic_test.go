@@ -19,10 +19,19 @@ type testDetector struct {
 
 type panicDetector struct{ typ RequestType }
 
+type markerDetector struct {
+	typ     RequestType
+	markers []string
+}
+
 func (d *panicDetector) Type() RequestType { return d.typ }
 func (d *panicDetector) Detect(RequestView) (bool, error) {
 	panic("detector panic fixture")
 }
+
+func (d *markerDetector) Type() RequestType                { return d.typ }
+func (d *markerDetector) Detect(RequestView) (bool, error) { return false, nil }
+func (d *markerDetector) RequiredRawMarkers() []string     { return d.markers }
 
 func (d *testDetector) Type() RequestType { return d.typ }
 func (d *testDetector) Detect(view RequestView) (bool, error) {
@@ -112,6 +121,28 @@ func TestDetectorPanicFailsClosed(t *testing.T) {
 	}
 	if _, err := registry.Classify(RequestView{}); !errors.Is(err, ErrDetectionFailed) {
 		t.Fatalf("panic classification error = %v", err)
+	}
+}
+
+func TestDetectorRegistrySnapshotsRawMarkerUnion(t *testing.T) {
+	registry, err := NewRegistry(
+		&markerDetector{typ: "first", markers: []string{"alpha", "shared"}},
+		&markerDetector{typ: "second", markers: []string{"shared", "beta"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"alpha", "shared", "beta"}
+	if got := registry.RequiredRawMarkers(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw markers = %#v, want %#v", got, want)
+	}
+	copy := registry.RequiredRawMarkers()
+	copy[0] = "mutated"
+	if got := registry.RequiredRawMarkers(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw marker union shares caller mutation: %#v", got)
+	}
+	if _, err := NewRegistry(&markerDetector{typ: "empty-marker", markers: []string{""}}); err == nil {
+		t.Fatal("empty raw marker was accepted")
 	}
 }
 

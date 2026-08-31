@@ -21,6 +21,15 @@ type ScanPathDetector interface {
 	RequiredPaths() []string
 }
 
+// RawMarkerDetector declares literal byte sequences that must be tracked by
+// the ingress scanner. Marker matching is performed on the original stream,
+// before JSON decoding, and the resulting state is exposed through
+// bodyfile.JSONIndex for the detector.
+type RawMarkerDetector interface {
+	Detector
+	RequiredRawMarkers() []string
+}
+
 // DetectorRegistry is the gateway-facing classification boundary.
 type DetectorRegistry interface {
 	Classify(RequestView) (RequestType, error)
@@ -30,8 +39,9 @@ type DetectorRegistry interface {
 // not a detector entry; an empty registry therefore classifies every request
 // as normal in production.
 type Registry struct {
-	detectors []Detector
-	scanPaths []string
+	detectors  []Detector
+	scanPaths  []string
+	rawMarkers []string
 }
 
 // NewRegistry validates and snapshots detectors.  Detector order is retained
@@ -42,6 +52,8 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 	seen := make(map[RequestType]struct{}, len(entries))
 	seenPaths := make(map[string]struct{})
 	var scanPaths []string
+	var rawMarkers []string
+	seenMarkers := make(map[string]struct{})
 	for index, detector := range entries {
 		if isNilDetector(detector) {
 			return nil, fmt.Errorf("%w at index %d", ErrNilDetector, index)
@@ -74,8 +86,25 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 			seenPaths[path] = struct{}{}
 			scanPaths = append(scanPaths, path)
 		}
+		markers, markerErr := detectorRawMarkersSafely(detector)
+		if markerErr != nil {
+			return nil, fmt.Errorf("detector %d: %w", index, markerErr)
+		}
+		for _, marker := range markers {
+			if marker == "" {
+				return nil, fmt.Errorf("detector %d: empty raw marker", index)
+			}
+			if _, duplicate := seenMarkers[marker]; duplicate {
+				continue
+			}
+			seenMarkers[marker] = struct{}{}
+			rawMarkers = append(rawMarkers, marker)
+		}
 	}
-	return &Registry{detectors: entries, scanPaths: scanPaths}, nil
+	if err := (bodyfile.ScanSpec{RawMarkers: rawMarkers}).Validate(); err != nil {
+		return nil, fmt.Errorf("invalid raw markers: %w", err)
+	}
+	return &Registry{detectors: entries, scanPaths: scanPaths, rawMarkers: rawMarkers}, nil
 }
 
 // NewDetectorRegistry is an alias for NewRegistry.
@@ -192,6 +221,29 @@ func detectorPathsSafely(detector Detector) (paths []string, err error) {
 	return append([]string(nil), paths...), nil
 }
 
+func detectorRawMarkersSafely(detector Detector) (markers []string, err error) {
+	required, hasRequired := detector.(interface{ RequiredRawMarkers() []string })
+	legacy, hasLegacy := detector.(interface{ RawMarkers() []string })
+	if !hasRequired && !hasLegacy {
+		return []string{}, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			markers = nil
+			err = fmt.Errorf("raw marker declaration panic: %v", recovered)
+		}
+	}()
+	if hasRequired {
+		markers = required.RequiredRawMarkers()
+	} else {
+		markers = legacy.RawMarkers()
+	}
+	if markers == nil {
+		return []string{}, nil
+	}
+	return append([]string(nil), markers...), nil
+}
+
 // ClassifyDetection is a convenience method for the canonical ingress fact
 // type.  It returns an IngressRequest only after successful classification.
 func (r *Registry) ClassifyDetection(request DetectionRequest) (IngressRequest, error) {
@@ -222,6 +274,18 @@ func (r *Registry) RequiredPaths() []string {
 	}
 	return append([]string(nil), r.scanPaths...)
 }
+
+// RequiredRawMarkers returns the stable union of literal byte markers needed
+// by all registered detectors. The result is a defensive copy.
+func (r *Registry) RequiredRawMarkers() []string {
+	if r == nil || len(r.rawMarkers) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), r.rawMarkers...)
+}
+
+// RawMarkers is a descriptive alias for RequiredRawMarkers.
+func (r *Registry) RawMarkers() []string { return r.RequiredRawMarkers() }
 
 // Types returns registered specialised types in deterministic registration
 // order.  It is useful for discovery/testing and never includes normal.

@@ -93,6 +93,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, snapshot SnapshotView, ingres
 		return ExecutionPlan{}, err
 	}
 	if err := plan.Validate(); err != nil {
+		// A planner may have already allocated a sealed request body before
+		// returning a structurally invalid plan.  The dispatcher owns no
+		// successful plan, so close that body on this rejection path to keep
+		// request-scoped temporary files from escaping.
+		if plan.PreparedRequest.BaseBody != nil {
+			_ = plan.PreparedRequest.BaseBody.Close()
+		}
 		return ExecutionPlan{}, err
 	}
 	return plan, nil
