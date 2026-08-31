@@ -15,8 +15,10 @@ type StartupCandidate struct {
 	store          *config.Store
 	activeConfig   config.Config
 	activeCatalog  *provider.Catalog
+	activeAutoMode CompiledAutoMode
 	config         config.Config
 	catalog        *provider.Catalog
+	autoMode       CompiledAutoMode
 	fromPending    bool
 	pendingBlocked bool
 	warning        error
@@ -37,12 +39,18 @@ func LoadStartup(store *config.Store, context provider.RuntimeContext) (*Startup
 	if err != nil {
 		return nil, fmt.Errorf("compile active configuration: %w", err)
 	}
+	activeAutoMode, err := compileAutoMode(active.AutoMode, context)
+	if err != nil {
+		return nil, fmt.Errorf("compile active Auto Mode: %w", err)
+	}
 	candidate := &StartupCandidate{
-		store:         store,
-		activeConfig:  active,
-		activeCatalog: activeCatalog,
-		config:        active,
-		catalog:       activeCatalog,
+		store:          store,
+		activeConfig:   active,
+		activeCatalog:  activeCatalog,
+		activeAutoMode: activeAutoMode,
+		config:         active,
+		catalog:        activeCatalog,
+		autoMode:       activeAutoMode,
 	}
 	exists, err := store.PendingExists()
 	if err != nil {
@@ -69,8 +77,18 @@ func LoadStartup(store *config.Store, context provider.RuntimeContext) (*Startup
 		}
 		return candidate, nil
 	}
+	pendingAutoMode, err := compileAutoMode(pending.AutoMode, context)
+	if err != nil {
+		candidate.warning = fmt.Errorf("discard uncompilable pending Auto Mode: %w", err)
+		if removeErr := store.RemovePending(); removeErr != nil {
+			candidate.warning = fmt.Errorf("%v; remove pending: %w", candidate.warning, removeErr)
+			candidate.pendingBlocked = true
+		}
+		return candidate, nil
+	}
 	candidate.config = pending
 	candidate.catalog = pendingCatalog
+	candidate.autoMode = pendingAutoMode
 	candidate.fromPending = true
 	return candidate, nil
 }
@@ -78,6 +96,13 @@ func LoadStartup(store *config.Store, context provider.RuntimeContext) (*Startup
 func (c *StartupCandidate) Config() config.Config { return c.config.Clone() }
 
 func (c *StartupCandidate) Catalog() *provider.Catalog { return c.catalog.Clone() }
+
+func (c *StartupCandidate) AutoMode() CompiledAutoMode {
+	if c == nil {
+		return CompiledAutoMode{}
+	}
+	return c.autoMode.Clone()
+}
 
 func (c *StartupCandidate) FromPending() bool { return c != nil && c.fromPending }
 
@@ -100,6 +125,7 @@ func (c *StartupCandidate) Promote() error {
 	}
 	c.activeConfig = c.config.Clone()
 	c.activeCatalog = c.catalog
+	c.activeAutoMode = c.autoMode.Clone()
 	c.fromPending = false
 	c.pendingBlocked = false
 	return nil
@@ -113,6 +139,7 @@ func (c *StartupCandidate) Rollback(cause error) error {
 	removeErr := c.store.RemovePending()
 	c.config = c.activeConfig.Clone()
 	c.catalog = c.activeCatalog
+	c.autoMode = c.activeAutoMode.Clone()
 	c.fromPending = false
 	c.warning = cause
 	if removeErr != nil {

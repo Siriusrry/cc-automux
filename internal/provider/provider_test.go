@@ -212,6 +212,54 @@ func TestCompileWithRuntimeContextRejectsUnknownAndConflictingPatchesAndFiltersB
 	}
 }
 
+func TestCompileFixedTargetUsesSharedContextAndClassifierPatchFilter(t *testing.T) {
+	context := testCompileContext(t)
+	input := config.FixedProviderConfig{
+		BaseURL:  "https://fixed.example/openai",
+		APIKey:   "fixed-key",
+		Protocol: config.ProtocolOpenAICompatible,
+		Patches:  []string{patch.CLIProxyAPIClassifierSessionID, patch.AnyRouterSubagentThinkingID},
+	}
+	// The normal-only patch is rejected instead of silently disappearing from
+	// the fixed classifier target.
+	if _, err := CompileFixedTarget(input, "classifier-model", context); err == nil || !strings.Contains(err.Error(), "not applicable") {
+		t.Fatalf("normal-only fixed patch error = %v", err)
+	}
+	input.Patches = []string{patch.CLIProxyAPIClassifierSessionID}
+	target, err := CompileFixedTarget(input, "classifier-model", context)
+	if err != nil {
+		t.Fatalf("CompileFixedTarget() error = %v", err)
+	}
+	if target.ID != FixedTargetID || target.Protocol != config.ProtocolOpenAICompatible || target.URLString() != input.BaseURL {
+		t.Fatalf("compiled fixed target = %#v", target)
+	}
+	if got := target.PatchPlan.IDs(); len(got) != 1 || got[0] != patch.CLIProxyAPIClassifierSessionID {
+		t.Fatalf("fixed patch plan = %#v", got)
+	}
+	if target.Generation == "" || target.Generation != FixedGenerationFor(input, "classifier-model") {
+		t.Fatalf("fixed generation = %q", target.Generation)
+	}
+	changed := input
+	changed.Protocol = config.ProtocolOpenAIResponses
+	other, err := CompileFixedTarget(changed, "classifier-model", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Generation == target.Generation {
+		t.Fatal("protocol change did not isolate fixed generation")
+	}
+}
+
+func TestCompileFixedTargetRejectsMissingContextAndInvalidModel(t *testing.T) {
+	input := config.FixedProviderConfig{BaseURL: "https://fixed.example", APIKey: "k", Protocol: config.ProtocolOpenAIResponses}
+	if _, err := CompileFixedTarget(input, "model", RuntimeContext{}); err == nil || !strings.Contains(err.Error(), "patch registry is required") {
+		t.Fatalf("missing context error = %v", err)
+	}
+	if _, err := CompileFixedTarget(input, "", testCompileContext(t)); err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("empty model error = %v", err)
+	}
+}
+
 func TestCompiledProviderCloneDoesNotShareSlices(t *testing.T) {
 	p := providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
 	p.Patches = []string{

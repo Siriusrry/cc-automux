@@ -26,8 +26,159 @@ func validConfig() Config {
 	return cfg
 }
 
+func validAutoModeFixed() AutoModeConfig {
+	return AutoModeConfig{
+		Mode:  AutoModeFixedProvider,
+		Model: "classifier-model",
+		FixedProvider: &FixedProviderConfig{
+			BaseURL:  "https://classifier.example/v1",
+			APIKey:   "classifier-key",
+			Protocol: ProtocolOpenAIResponses,
+			TLS:      TLSConfig{},
+			Patches:  []string{},
+		},
+	}
+}
+
+func TestAutoModeStrictModesAndRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		mode AutoModeConfig
+		good bool
+	}{
+		{name: "disabled", mode: AutoModeConfig{}, good: true},
+		{name: "pool", mode: AutoModeConfig{Mode: AutoModeProviderPool, Model: "m"}, good: true},
+		{name: "fixed", mode: validAutoModeFixed(), good: true},
+		{name: "disabled model", mode: AutoModeConfig{Mode: AutoModeDisabled, Model: "m"}},
+		{name: "pool fixed", mode: func() AutoModeConfig { a := validAutoModeFixed(); a.Mode = AutoModeProviderPool; return a }()},
+		{name: "fixed missing target", mode: AutoModeConfig{Mode: AutoModeFixedProvider, Model: "m"}},
+		{name: "unknown mode", mode: AutoModeConfig{Mode: "other", Model: "m"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.mode.Validate()
+			if tc.good && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if !tc.good && err == nil {
+				t.Fatal("Validate() unexpectedly succeeded")
+			}
+		})
+	}
+	cfg := validConfig()
+	cfg.AutoMode = validAutoModeFixed()
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.AutoMode.FixedProvider == nil || decoded.AutoMode.Model != cfg.AutoMode.Model || decoded.AutoMode.FixedProvider.Protocol != ProtocolOpenAIResponses {
+		t.Fatalf("round-trip Auto Mode = %#v", decoded.AutoMode)
+	}
+	clone := cfg.Clone()
+	clone.AutoMode.FixedProvider.Patches = append(clone.AutoMode.FixedProvider.Patches, "mutated")
+	if len(cfg.AutoMode.FixedProvider.Patches) != 0 {
+		t.Fatal("AutoMode Clone shares fixed patch slice")
+	}
+}
+
+func TestAutoModeModelValidationUsesDecodedUTF8ByteLimit(t *testing.T) {
+	valid := strings.Repeat("a", modelname.MaxBytes)
+	invalid := []string{
+		strings.Repeat("a", modelname.MaxBytes+1),
+		"classifier\nmodel",
+		string([]byte{0xff}),
+	}
+	for _, mode := range []string{AutoModeProviderPool, AutoModeFixedProvider} {
+		t.Run(mode, func(t *testing.T) {
+			makeConfig := func(model string) AutoModeConfig {
+				value := AutoModeConfig{Mode: mode, Model: model}
+				if mode == AutoModeFixedProvider {
+					fixed := validAutoModeFixed().FixedProvider.Clone()
+					value.FixedProvider = &fixed
+				}
+				return value
+			}
+			if err := makeConfig(valid).Validate(); err != nil {
+				t.Fatalf("%d-byte model rejected: %v", modelname.MaxBytes, err)
+			}
+			for _, model := range invalid {
+				if err := makeConfig(model).Validate(); err == nil {
+					t.Fatalf("invalid model %q accepted", model)
+				}
+			}
+		})
+	}
+}
+
+func TestDecodeAutoModeRejectsUnknownFieldsAndSecondModel(t *testing.T) {
+	if _, err := DecodeAutoMode([]byte(`{"mode":"fixed_provider","model":"m","fixed_provider":{"base_url":"https://x.test","api_key":"k","protocol":"openai_responses","model":"other"}}`)); err == nil {
+		t.Fatal("fixed provider second model accepted")
+	}
+	if _, err := DecodeAutoMode([]byte(`{"mode":"provider_pool","model":"m","unknown":true}`)); err == nil {
+		t.Fatal("unknown auto mode field accepted")
+	}
+}
+
+func TestFixedProviderBaseURLIsAPathPrefixedBaseAddress(t *testing.T) {
+	for _, baseURL := range []string{
+		"https://classifier.example",
+		"https://classifier.example/prefix",
+		"https://classifier.example/prefix/v1/responses",
+		"https://classifier.example/prefix%2Fescaped",
+		// URL correctness is an operator responsibility. Schema validation only
+		// requires a non-empty value that net/url can parse; Gateway always treats
+		// it as a base and replaces its query with the client's raw query.
+		"classifier.example/prefix",
+		"https://classifier.example?configured=1",
+		"https://classifier.example?",
+		"https://classifier.example#fragment",
+		"https://classifier.example#",
+	} {
+		auto := validAutoModeFixed()
+		auto.FixedProvider.BaseURL = baseURL
+		if err := auto.Validate(); err != nil {
+			t.Fatalf("base_url %q rejected: %v", baseURL, err)
+		}
+	}
+	auto := validAutoModeFixed()
+	auto.FixedProvider.BaseURL = ""
+	if err := auto.Validate(); err == nil {
+		t.Fatal("empty base_url accepted")
+	}
+	auto.FixedProvider.BaseURL = "https://classifier.example/%zz"
+	if err := auto.Validate(); err == nil {
+		t.Fatal("unparseable base_url accepted")
+	}
+}
+
+func TestDecodeFixedProviderRequiresTargetShape(t *testing.T) {
+	valid := `{"mode":"fixed_provider","model":"m","fixed_provider":{"base_url":"https://classifier.example","api_key":"k","protocol":"openai_responses","tls":{},"patches":[]}}`
+	decoded, err := DecodeAutoMode([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.FixedProvider == nil || decoded.FixedProvider.UseXAPIKey || decoded.FixedProvider.Patches == nil {
+		t.Fatalf("decoded fixed provider = %#v", decoded.FixedProvider)
+	}
+	for _, raw := range []string{
+		`{"mode":"fixed_provider","model":"m","fixed_provider":{"api_key":"k","protocol":"openai_responses","tls":{},"patches":[]}}`,
+		`{"mode":"fixed_provider","model":"m","fixed_provider":{"base_url":"https://classifier.example","protocol":"openai_responses","tls":{},"patches":[]}}`,
+		`{"mode":"fixed_provider","model":"m","fixed_provider":{"base_url":"https://classifier.example","api_key":"k","tls":{},"patches":[]}}`,
+		`{"mode":"fixed_provider","model":"m","fixed_provider":{"base_url":"https://classifier.example","api_key":"k","protocol":"openai_responses","patches":[]}}`,
+		`{"mode":"fixed_provider","model":"m","fixed_provider":{"base_url":"https://classifier.example","api_key":"k","protocol":"openai_responses","tls":{}}}`,
+	} {
+		if _, err := DecodeAutoMode([]byte(raw)); err == nil {
+			t.Fatalf("incomplete fixed provider accepted: %s", raw)
+		}
+	}
+}
+
 func TestDecodeAppliesOnlyDocumentedDefaults(t *testing.T) {
-	cfg, err := Decode([]byte(`{"schema_version":1,"auth":{"management_key":"m"}}`))
+	cfg, err := Decode([]byte(`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{"mode":"disabled","model":""}}`))
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -216,24 +367,25 @@ func TestValidateRejectsConflictingKeysAndListenAddresses(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsWhitespaceCredentialsAndInvalidBaseURLPorts(t *testing.T) {
+func TestValidateRejectsWhitespaceCredentialsAndUnparseableBaseURL(t *testing.T) {
 	cfg := validConfig()
 	cfg.Auth.GatewayKey = "   "
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("whitespace-only gateway key was accepted")
 	}
-	for _, raw := range []string{"https://example.test:", "https://example.test:0", "https://example.test:65536", "https://example.test:01", "https://example.test/path#"} {
+	for _, raw := range []string{"", "https://example.test/%zz"} {
 		cfg = validConfig()
 		cfg.Providers[0].BaseURL = raw
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("base URL %q was accepted", raw)
 		}
 	}
-	// An escaped hash is path data, not a fragment delimiter, and remains valid.
-	cfg = validConfig()
-	cfg.Providers[0].BaseURL = "https://example.test/path%23segment"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("escaped hash in base URL was rejected: %v", err)
+	for _, raw := range []string{"provider.example/prefix", "https://example.test:01/path#fragment", "https://example.test/path?configured=1"} {
+		cfg = validConfig()
+		cfg.Providers[0].BaseURL = raw
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("operator-supplied base URL %q was rejected: %v", raw, err)
+		}
 	}
 }
 

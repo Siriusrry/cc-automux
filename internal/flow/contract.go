@@ -26,7 +26,7 @@ const (
 type AutoModeSnapshot struct {
 	Mode            string
 	ClassifierModel string
-	FixedTarget     *provider.CompiledTarget
+	FixedTarget     *provider.CompiledFixedTarget
 }
 
 // SnapshotView is the read-only part of a runtime snapshot needed while
@@ -51,7 +51,7 @@ type ExecutionPlan struct {
 	PreparedRequest traffic.PreparedRequest
 	TargetMode      TargetMode
 	AttemptPolicy   scheduler.AttemptPolicy
-	FixedTarget     *provider.CompiledTarget
+	FixedTarget     *provider.CompiledFixedTarget
 }
 
 // Validate checks the structural invariants shared by all plans.
@@ -73,6 +73,10 @@ func (p ExecutionPlan) Validate() error {
 		return ErrInvalidExecutionPlan
 	}
 	if p.TargetMode == TargetModeProviderPool && p.FixedTarget != nil {
+		return ErrInvalidExecutionPlan
+	}
+	requestType := p.PreparedRequest.Plan.RequestType
+	if p.TargetMode == TargetModeFixedTarget && requestType != traffic.RequestTypeClassifier {
 		return ErrInvalidExecutionPlan
 	}
 	return nil

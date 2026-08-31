@@ -20,7 +20,14 @@ func (t *CompiledTarget) ApplyAuthHeaders(headers http.Header) error {
 		return errors.New("request headers are nil")
 	}
 	for key := range headers {
-		if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "X-Api-Key") {
+		switch {
+		case strings.EqualFold(key, "Authorization"),
+			strings.EqualFold(key, "Proxy-Authorization"),
+			strings.EqualFold(key, "X-Api-Key"),
+			strings.EqualFold(key, "Api-Key"),
+			strings.EqualFold(key, "X-Gateway-Key"),
+			strings.EqualFold(key, "X-Management-Key"),
+			strings.EqualFold(key, "X-Provider-Key"):
 			delete(headers, key)
 		}
 	}

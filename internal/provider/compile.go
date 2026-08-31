@@ -26,6 +26,49 @@ type CompiledTarget struct {
 	Generation  ProviderGeneration
 }
 
+// FixedTargetID is the stable internal identity used for a pool-external
+// classifier target.  It is deliberately not configurable and fixed targets
+// never enter the Provider Catalog, Scheduler, Health, or sticky assignments.
+const FixedTargetID = "auto-mode-fixed-provider"
+
+// CompiledFixedTarget is the runtime-ready fixed classifier target.  Protocol
+// belongs only to this pool-external target; ordinary pool targets cannot carry
+// a protocol identifier by construction.
+type CompiledFixedTarget struct {
+	CompiledTarget
+	Protocol string
+}
+
+// Clone returns a defensive copy of a compiled target. Patch plans retain the
+// immutable registry definitions and can be copied by value; URL and TLS
+// pointers are cloned so callers cannot mutate the target through them.
+func (t *CompiledTarget) Clone() *CompiledTarget {
+	if t == nil {
+		return nil
+	}
+	out := *t
+	if t.BaseURL != nil {
+		urlCopy := *t.BaseURL
+		out.BaseURL = &urlCopy
+	}
+	if t.TLS != nil {
+		out.TLS = t.TLS.Clone()
+	}
+	return &out
+}
+
+// Clone returns a defensive copy of a fixed target, including its protocol
+// identifier and the embedded common target.
+func (t *CompiledFixedTarget) Clone() *CompiledFixedTarget {
+	if t == nil {
+		return nil
+	}
+	return &CompiledFixedTarget{
+		CompiledTarget: *t.CompiledTarget.Clone(),
+		Protocol:       t.Protocol,
+	}
+}
+
 // RuntimeContext is the explicit, application-owned context required to
 // compile providers.  It carries the one immutable Patch Registry and its
 // process-local shared services (including the AliasStore).  Provider
@@ -83,6 +126,69 @@ func Compile(input config.ProviderConfig, context RuntimeContext) (*CompiledProv
 		return nil, err
 	}
 	return compileWithRegistry(input, context.Registry)
+}
+
+// CompileFixedTarget validates and compiles one pool-external classifier
+// target using the caller-owned RuntimeContext.  The classifier model is
+// supplied separately from the target object so it cannot be duplicated in
+// persisted configuration.  The target's patch plan is filtered to patches
+// applicable to classifier requests; normal-only IDs fail closed.
+func CompileFixedTarget(input config.FixedProviderConfig, classifierModel string, context RuntimeContext) (*CompiledFixedTarget, error) {
+	if err := context.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateFixedTargetInput(input, classifierModel); err != nil {
+		return nil, err
+	}
+	parsed, err := url.Parse(input.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("base_url: %w", err)
+	}
+	tlsConfig, err := compileTLS(input.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("tls: %w", err)
+	}
+	plan, err := context.Registry.Compile(input.Patches, patch.RequestTypeClassifier)
+	if err != nil {
+		return nil, err
+	}
+	return &CompiledFixedTarget{
+		CompiledTarget: CompiledTarget{
+			ID:          FixedTargetID,
+			BaseURL:     parsed,
+			APIKey:      input.APIKey,
+			UseXAPIKey:  input.UseXAPIKey,
+			TLS:         tlsConfig,
+			TLSSettings: input.TLS,
+			PatchPlan:   plan,
+			Generation:  fixedGenerationFor(input, classifierModel),
+		},
+		Protocol: input.Protocol,
+	}, nil
+}
+
+// CompileAutoModeTarget is a convenience wrapper for Runtime Manager callers
+// that already hold the complete validated Auto Mode value.  Disabled and
+// provider-pool modes intentionally produce no fixed target.
+func CompileAutoModeTarget(auto config.AutoModeConfig, context RuntimeContext) (*CompiledFixedTarget, error) {
+	auto = auto.Normalize()
+	if err := auto.Validate(); err != nil {
+		return nil, err
+	}
+	if auto.Mode != config.AutoModeFixedProvider {
+		return nil, nil
+	}
+	if auto.FixedProvider == nil {
+		return nil, errors.New("auto_mode.fixed_provider is required")
+	}
+	return CompileFixedTarget(*auto.FixedProvider, auto.Model, context)
+}
+
+func validateFixedTargetInput(input config.FixedProviderConfig, classifierModel string) error {
+	if err := input.Validate(); err != nil {
+		return err
+	}
+	return config.AutoModeConfig{Mode: config.AutoModeProviderPool, Model: classifierModel}.Validate()
 }
 
 func compileWithRegistry(input config.ProviderConfig, registry patch.Registry) (*CompiledProvider, error) {

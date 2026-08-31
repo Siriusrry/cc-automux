@@ -132,6 +132,150 @@ func TestSnapshotCarriesAttemptPolicyAcrossRevisions(t *testing.T) {
 	}
 }
 
+func TestSnapshotCompilesAutoModeAndFixedTargetAcrossHotUpdates(t *testing.T) {
+	manager, _, cfg := newRuntimeManager(t, Options{})
+	// Disabled is represented explicitly in every persisted v1 configuration.
+	if got := manager.Snapshot().AutoMode(); got.Mode != config.AutoModeDisabled || got.ClassifierModel != "" || got.FixedTarget != nil {
+		t.Fatalf("disabled Auto Mode snapshot = %#v", got)
+	}
+	context := manager.RuntimeContext()
+	next := cfg.Clone()
+	next.Auth.GatewayKey = "gateway-key"
+	next.AutoMode = config.AutoModeConfig{Mode: config.AutoModeFixedProvider, Model: "classifier-model", FixedProvider: &config.FixedProviderConfig{
+		BaseURL:  "https://classifier.example/openai",
+		APIKey:   "classifier-key",
+		Protocol: config.ProtocolOpenAIResponses,
+	}}
+	if _, err := manager.Apply(next); err != nil {
+		t.Fatalf("fixed Auto Mode Apply() error = %v", err)
+	}
+	snapshot := manager.Snapshot()
+	auto := snapshot.AutoMode()
+	if auto.Mode != config.AutoModeFixedProvider || auto.ClassifierModel != "classifier-model" || auto.FixedTarget == nil {
+		t.Fatalf("fixed Auto Mode snapshot = %#v", auto)
+	}
+	if auto.FixedTarget.Protocol != config.ProtocolOpenAIResponses || auto.FixedTarget.URLString() != next.AutoMode.FixedProvider.BaseURL {
+		t.Fatalf("fixed target = %#v", auto.FixedTarget)
+	}
+	if snapshot.RuntimeContext().Registry.AliasStore() != context.Registry.AliasStore() {
+		t.Fatal("hot update replaced shared runtime context")
+	}
+	oldGeneration := auto.FixedTarget.Generation
+	next2 := next.Clone()
+	next2.AutoMode.FixedProvider.Protocol = config.ProtocolOpenAICompatible
+	if _, err := manager.Apply(next2); err != nil {
+		t.Fatalf("protocol hot update error = %v", err)
+	}
+	newAuto := manager.Snapshot().AutoMode()
+	if newAuto.FixedTarget == nil || newAuto.FixedTarget.Generation == oldGeneration {
+		t.Fatal("fixed target generation did not change after protocol update")
+	}
+}
+
+func TestSnapshotAutoModeReturnsDefensiveFixedTargetCopies(t *testing.T) {
+	manager, _, cfg := newRuntimeManager(t, Options{})
+	next := cfg.Clone()
+	next.AutoMode = config.AutoModeConfig{Mode: config.AutoModeFixedProvider, Model: "classifier-model", FixedProvider: &config.FixedProviderConfig{
+		BaseURL:  "https://classifier.example/prefix",
+		APIKey:   "classifier-key",
+		Protocol: config.ProtocolOpenAIResponses,
+		TLS:      config.TLSConfig{InsecureSkipVerify: true},
+	}}
+	if _, err := manager.Apply(next); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := manager.Snapshot()
+	first := snapshot.AutoMode()
+	first.FixedTarget.BaseURL.Host = "mutated.invalid"
+	first.FixedTarget.TLS.InsecureSkipVerify = false
+	compiled := snapshot.CompiledAutoMode()
+	compiled.FixedTarget.BaseURL.Path = "/mutated"
+	compiled.FixedTarget.TLS.ServerName = "mutated.invalid"
+
+	again := snapshot.AutoMode()
+	if again.FixedTarget.URLString() != next.AutoMode.FixedProvider.BaseURL {
+		t.Fatalf("snapshot fixed URL was mutated: %q", again.FixedTarget.URLString())
+	}
+	if again.FixedTarget.TLS == nil || !again.FixedTarget.TLS.InsecureSkipVerify || again.FixedTarget.TLS.ServerName != "" {
+		t.Fatalf("snapshot fixed TLS was mutated: %#v", again.FixedTarget.TLS)
+	}
+}
+
+func TestFixedTargetCompileAndPersistFailuresDoNotPublishSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := runtimeConfig()
+	if err := store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	failing := &failingConfigStore{Store: store}
+	manager, err := NewManager(failing, cfg, Options{RuntimeContext: testRuntimeContext(t), Preflight: func(config.Config, config.Config) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := manager.Snapshot()
+
+	badCA := filepath.Join(t.TempDir(), "bad-ca.pem")
+	if err := os.WriteFile(badCA, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uncompilable := cfg.Clone()
+	uncompilable.AutoMode = config.AutoModeConfig{Mode: config.AutoModeFixedProvider, Model: "classifier-model", FixedProvider: &config.FixedProviderConfig{
+		BaseURL:  "https://classifier.example",
+		APIKey:   "classifier-key",
+		Protocol: config.ProtocolOpenAIResponses,
+		TLS:      config.TLSConfig{CAFile: badCA},
+	}}
+	if _, err := manager.Apply(uncompilable); err == nil {
+		t.Fatal("uncompilable fixed target was accepted")
+	}
+	if got := manager.Snapshot(); got != before || got.Revision() != before.Revision() || got.AutoMode().Mode != config.AutoModeDisabled {
+		t.Fatalf("compile failure published snapshot: before=%p after=%p auto=%#v", before, got, got.AutoMode())
+	}
+	loaded, err := store.Load()
+	if err != nil || loaded.AutoMode.Mode != config.AutoModeDisabled {
+		t.Fatalf("compile failure changed disk: %#v, %v", loaded.AutoMode, err)
+	}
+
+	valid := cfg.Clone()
+	valid.AutoMode = config.AutoModeConfig{Mode: config.AutoModeFixedProvider, Model: "classifier-model", FixedProvider: &config.FixedProviderConfig{
+		BaseURL:  "https://classifier.example",
+		APIKey:   "classifier-key",
+		Protocol: config.ProtocolOpenAIResponses,
+	}}
+	failing.failSave = true
+	if _, err := manager.Apply(valid); err == nil || !strings.Contains(err.Error(), "disk save failed") {
+		t.Fatalf("fixed target persistence failure = %v", err)
+	}
+	if got := manager.Snapshot(); got != before || got.Revision() != before.Revision() || got.AutoMode().Mode != config.AutoModeDisabled {
+		t.Fatalf("persistence failure published snapshot: before=%p after=%p auto=%#v", before, got, got.AutoMode())
+	}
+	loaded, err = store.Load()
+	if err != nil || loaded.AutoMode.Mode != config.AutoModeDisabled {
+		t.Fatalf("persistence failure changed disk: %#v, %v", loaded.AutoMode, err)
+	}
+}
+
+func TestCompileAutoModeRejectsFixedTargetPatchOutsideClassifier(t *testing.T) {
+	registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
+	context, err := provider.NewRuntimeContext(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auto := config.AutoModeConfig{Mode: config.AutoModeFixedProvider, Model: "classifier-model", FixedProvider: &config.FixedProviderConfig{
+		BaseURL:  "https://classifier.example",
+		APIKey:   "key",
+		Protocol: config.ProtocolOpenAIResponses,
+		Patches:  []string{patch.AnyRouterSubagentThinkingID},
+	}}
+	if _, err := CompileAutoMode(auto, context); err == nil || !strings.Contains(err.Error(), "not applicable") {
+		t.Fatalf("normal-only fixed patch error = %v", err)
+	}
+}
+
 func TestNewManagerRejectsInvalidAttemptPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	store, err := config.NewStore(path)

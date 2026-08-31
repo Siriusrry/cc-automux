@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
@@ -10,22 +11,83 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
+func compileAutoMode(auto config.AutoModeConfig, context provider.RuntimeContext) (CompiledAutoMode, error) {
+	auto = auto.Normalize()
+	if err := auto.Validate(); err != nil {
+		return CompiledAutoMode{}, err
+	}
+	compiled := CompiledAutoMode{Mode: auto.Mode, ClassifierModel: auto.Model}
+	if auto.Mode == config.AutoModeFixedProvider {
+		target, err := provider.CompileAutoModeTarget(auto, context)
+		if err != nil {
+			return CompiledAutoMode{}, fmt.Errorf("compile auto_mode.fixed_provider: %w", err)
+		}
+		compiled.FixedTarget = target
+	}
+	return compiled, nil
+}
+
+// CompileAutoMode validates and compiles the Auto Mode portion of a runtime
+// configuration using the supplied process-owned Provider context.
+func CompileAutoMode(auto config.AutoModeConfig, context provider.RuntimeContext) (CompiledAutoMode, error) {
+	return compileAutoMode(auto, context)
+}
+
 // Snapshot is one immutable, fully compiled runtime state.
 type Snapshot struct {
 	revision           uint64
 	config             config.Config
 	catalog            *provider.Catalog
+	autoMode           CompiledAutoMode
 	runtimeContext     provider.RuntimeContext
 	attempts           scheduler.AttemptPolicy
 	classifierAttempts scheduler.AttemptPolicy
 	created            time.Time
 }
 
+// CompiledAutoMode is the immutable runtime representation of Auto Mode.  It
+// carries the one shared classifier model and, only for fixed-provider mode,
+// the precompiled pool-external target.  The target is compiled before a
+// snapshot is published and is never constructed on a request path.
+type CompiledAutoMode struct {
+	Mode            string
+	ClassifierModel string
+	FixedTarget     *provider.CompiledFixedTarget
+}
+
+func (a CompiledAutoMode) Clone() CompiledAutoMode {
+	out := a
+	if a.FixedTarget != nil {
+		out.FixedTarget = cloneFixedTarget(a.FixedTarget)
+	}
+	return out
+}
+
+func cloneFixedTarget(target *provider.CompiledFixedTarget) *provider.CompiledFixedTarget {
+	if target == nil {
+		return nil
+	}
+	return target.Clone()
+}
+
+// newSnapshot is kept as a small compatibility wrapper for package-local
+// callers that construct snapshots in tests. Runtime Manager uses
+// newSnapshotWithAuto after compiling the candidate so publication cannot
+// hide a fixed-target compilation error.
 func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, runtimeContext provider.RuntimeContext, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
+	autoMode, err := compileAutoMode(cfg.AutoMode, runtimeContext)
+	if err != nil {
+		panic(err)
+	}
+	return newSnapshotWithAuto(revision, cfg, catalog, autoMode, runtimeContext, attempts, classifierAttempts, now)
+}
+
+func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.Catalog, autoMode CompiledAutoMode, runtimeContext provider.RuntimeContext, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
 	return &Snapshot{
 		revision:           revision,
 		config:             cfg.Clone(),
 		catalog:            catalog,
+		autoMode:           autoMode.Clone(),
 		runtimeContext:     runtimeContext,
 		attempts:           attempts,
 		classifierAttempts: classifierAttempts,
@@ -69,7 +131,27 @@ func (s *Snapshot) ClassifierAttemptPolicy() scheduler.AttemptPolicy {
 	return s.classifierAttempts
 }
 
-func (s *Snapshot) AutoMode() flow.AutoModeSnapshot { return flow.AutoModeSnapshot{} }
+func (s *Snapshot) AutoMode() flow.AutoModeSnapshot {
+	if s == nil {
+		return flow.AutoModeSnapshot{}
+	}
+	auto := s.autoMode.Clone()
+	return flow.AutoModeSnapshot{
+		Mode:            auto.Mode,
+		ClassifierModel: auto.ClassifierModel,
+		FixedTarget:     auto.FixedTarget,
+	}
+}
+
+// CompiledAutoMode returns a defensive copy of the precompiled Auto Mode
+// state.  It is useful to execution/management boundaries that need the
+// protocol identifier while flow planners consume the smaller flow contract.
+func (s *Snapshot) CompiledAutoMode() CompiledAutoMode {
+	if s == nil {
+		return CompiledAutoMode{}
+	}
+	return s.autoMode.Clone()
+}
 
 func (s *Snapshot) Revision() uint64 {
 	if s == nil {

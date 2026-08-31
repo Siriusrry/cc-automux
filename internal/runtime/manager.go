@@ -110,6 +110,10 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	if err != nil {
 		return nil, err
 	}
+	autoMode, err := compileAutoMode(initial.AutoMode, context)
+	if err != nil {
+		return nil, err
+	}
 	attempts := options.AttemptPolicy
 	if attempts == (scheduler.AttemptPolicy{}) {
 		attempts = scheduler.DefaultAttemptPolicy()
@@ -123,6 +127,9 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	}
 	if err := classifierAttempts.Validate(); err != nil {
 		return nil, fmt.Errorf("classifier attempt policy: %w", err)
+	}
+	if classifierAttempts.MaxAttempts != 1 {
+		return nil, errors.New("classifier attempt policy must allow exactly one attempt")
 	}
 	now := options.Now
 	if now == nil {
@@ -162,7 +169,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	m.current.Store(newSnapshot(m.revision, initial, catalog, m.runtimeContext, m.attempts, m.classifierAttempts, startedAt))
+	m.current.Store(newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.attempts, m.classifierAttempts, startedAt))
 	return m, nil
 }
 
@@ -253,6 +260,10 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	autoMode, err := compileAutoMode(next.AutoMode, m.runtimeContext)
+	if err != nil {
+		return ApplyResult{}, err
+	}
 	currentSnapshot := m.current.Load()
 	currentConfig := currentSnapshot.Config()
 	if reflect.DeepEqual(currentConfig, next) {
@@ -269,7 +280,7 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 			return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
 		}
 		m.revision++
-		m.current.Store(newSnapshot(m.revision, next, catalog, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
+		m.current.Store(newSnapshotWithAuto(m.revision, next, catalog, autoMode, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
 		m.restartStatus = RestartStatus{State: "idle"}
 		return ApplyResult{
 			Revision:   m.revision,
@@ -380,12 +391,17 @@ func (m *Manager) RestartSucceeded() error {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
+	autoMode, err := compileAutoMode(pending.AutoMode, m.runtimeContext)
+	if err != nil {
+		_ = m.restartFailedLocked(err)
+		return err
+	}
 	if err := m.store.PromotePending(); err != nil {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
 	m.revision++
-	m.current.Store(newSnapshot(m.revision, pending, catalog, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
+	m.current.Store(newSnapshotWithAuto(m.revision, pending, catalog, autoMode, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
 	m.restartTriggered = false
 	m.restartStatus = RestartStatus{State: "idle"}
 	return nil

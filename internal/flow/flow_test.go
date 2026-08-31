@@ -213,9 +213,12 @@ func TestExecutionPlanValidation(t *testing.T) {
 	if err := validPool.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	preparedClassifier := flowTestPrepared(t, traffic.RequestTypeClassifier)
 	validFixed := validPool
+	validFixed.PreparedRequest = preparedClassifier
 	validFixed.TargetMode = TargetModeFixedTarget
-	validFixed.FixedTarget = &provider.CompiledTarget{ID: "fixed"}
+	validFixed.FixedTarget = &provider.CompiledFixedTarget{CompiledTarget: provider.CompiledTarget{ID: "fixed"}, Protocol: "openai_responses"}
+	validFixed.AttemptPolicy = scheduler.AttemptPolicy{MaxAttempts: 1}
 	if err := validFixed.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +235,13 @@ func TestExecutionPlanValidation(t *testing.T) {
 		{name: "fixed target missing", plan: func() ExecutionPlan { p := validPool; p.TargetMode = TargetModeFixedTarget; return p }()},
 		{name: "pool has fixed target", plan: func() ExecutionPlan {
 			p := validPool
-			p.FixedTarget = &provider.CompiledTarget{ID: "unexpected"}
+			p.FixedTarget = &provider.CompiledFixedTarget{CompiledTarget: provider.CompiledTarget{ID: "unexpected"}, Protocol: "openai_responses"}
+			return p
+		}()},
+		{name: "fixed target with normal request", plan: func() ExecutionPlan {
+			p := validPool
+			p.TargetMode = TargetModeFixedTarget
+			p.FixedTarget = &provider.CompiledFixedTarget{CompiledTarget: provider.CompiledTarget{ID: "fixed"}, Protocol: "openai_responses"}
 			return p
 		}()},
 	}

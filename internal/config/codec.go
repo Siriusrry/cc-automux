@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 // Decode strictly parses a complete v1 configuration and applies documented
@@ -24,7 +25,14 @@ func Decode(data []byte) (Config, error) {
 	if _, ok := raw["schema_version"]; !ok {
 		return Config{}, validation("schema_version", "is required and must be 1")
 	}
-	for _, requiredObject := range []string{"service", "auth", "providers"} {
+	// Auto Mode is part of the v1 root contract even when disabled.  Keeping
+	// this presence check in the strict decoder (rather than the Go value
+	// validator) lets programmatic Config values use the documented default
+	// while rejecting an omitted persisted object.
+	if _, ok := raw["auto_mode"]; !ok {
+		return Config{}, validation("auto_mode", "is required and must be a JSON object")
+	}
+	for _, requiredObject := range []string{"service", "auth", "auto_mode", "providers"} {
 		if value, ok := raw[requiredObject]; ok && isJSONNull(value) {
 			return Config{}, &SyntaxError{Err: fmt.Errorf("%s must not be null", requiredObject)}
 		}
@@ -42,6 +50,45 @@ func Decode(data []byte) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// DecodeAutoMode strictly parses one Auto Mode object, applying the same
+// defaults and schema checks as the nested root field. It is used by focused
+// management/tests and intentionally does not compile registry-dependent patch
+// applicability.
+func DecodeAutoMode(data []byte) (AutoModeConfig, error) {
+	var raw map[string]json.RawMessage
+	if err := decodeObject(data, &raw); err != nil {
+		return AutoModeConfig{}, err
+	}
+	if raw == nil {
+		return AutoModeConfig{}, &SyntaxError{Err: errors.New("auto_mode must be a JSON object")}
+	}
+	if err := checkAutoModeKeys(raw); err != nil {
+		return AutoModeConfig{}, &SyntaxError{Err: err}
+	}
+	var value AutoModeConfig
+	if err := decodeObject(data, &value); err != nil {
+		return AutoModeConfig{}, err
+	}
+	value = value.Normalize()
+	if err := value.Validate(); err != nil {
+		return AutoModeConfig{}, err
+	}
+	return value, nil
+}
+
+// MarshalAutoMode emits the canonical representation of one Auto Mode object.
+func MarshalAutoMode(value AutoModeConfig) ([]byte, error) {
+	value = value.Normalize()
+	if err := value.Validate(); err != nil {
+		return nil, err
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal auto_mode: %w", err)
+	}
+	return append(data, '\n'), nil
 }
 
 // DecodeProvider strictly parses a provider object. The ID may be omitted by
@@ -91,6 +138,9 @@ func Marshal(cfg Config) ([]byte, error) {
 }
 
 func decodeObject(data []byte, target any) error {
+	if !utf8.Valid(data) {
+		return &SyntaxError{Err: errors.New("JSON must be valid UTF-8")}
+	}
 	if err := rejectDuplicateKeys(data); err != nil {
 		return &SyntaxError{Err: err}
 	}
@@ -170,7 +220,7 @@ func walkJSONValue(decoder *json.Decoder) error {
 
 func checkConfigKeys(raw map[string]json.RawMessage) error {
 	if err := rejectUnknownKeys(raw, map[string]struct{}{
-		"schema_version": {}, "service": {}, "auth": {}, "providers": {},
+		"schema_version": {}, "service": {}, "auth": {}, "auto_mode": {}, "providers": {},
 	}); err != nil {
 		return err
 	}
@@ -192,6 +242,15 @@ func checkConfigKeys(raw map[string]json.RawMessage) error {
 			return err
 		}
 	}
+	if value, ok := raw["auto_mode"]; ok {
+		object, err := rawObject(value, "auto_mode")
+		if err != nil {
+			return err
+		}
+		if err := checkAutoModeKeys(object); err != nil {
+			return err
+		}
+	}
 	if value, ok := raw["providers"]; ok {
 		var providers []json.RawMessage
 		if err := json.Unmarshal(value, &providers); err != nil {
@@ -204,6 +263,53 @@ func checkConfigKeys(raw map[string]json.RawMessage) error {
 			}
 			if err := checkProviderKeys(object); err != nil {
 				return fmt.Errorf("providers[%d]: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+func checkAutoModeKeys(object map[string]json.RawMessage) error {
+	if err := rejectUnknownKeys(object, map[string]struct{}{"mode": {}, "model": {}, "fixed_provider": {}}); err != nil {
+		return err
+	}
+	if mode, present := object["mode"]; present {
+		var decoded string
+		if err := json.Unmarshal(mode, &decoded); err != nil {
+			return fmt.Errorf("auto_mode.mode must be a string: %w", err)
+		}
+		if decoded == "" {
+			return errors.New("auto_mode.mode must not be empty")
+		}
+	}
+	if model, present := object["model"]; present {
+		var decoded string
+		if err := json.Unmarshal(model, &decoded); err != nil {
+			return fmt.Errorf("auto_mode.model must be a string: %w", err)
+		}
+	}
+	if fixed, present := object["fixed_provider"]; present {
+		fixedObject, err := rawObject(fixed, "auto_mode.fixed_provider")
+		if err != nil {
+			return err
+		}
+		if err := rejectUnknownKeys(fixedObject, map[string]struct{}{
+			"base_url": {}, "api_key": {}, "use_x_api_key": {}, "protocol": {}, "tls": {}, "patches": {},
+		}); err != nil {
+			return err
+		}
+		for _, required := range []string{"base_url", "api_key", "protocol", "tls", "patches"} {
+			if _, ok := fixedObject[required]; !ok {
+				return fmt.Errorf("auto_mode.fixed_provider.%s is required", required)
+			}
+		}
+		if tls, present := fixedObject["tls"]; present {
+			tlsObject, err := rawObject(tls, "auto_mode.fixed_provider.tls")
+			if err != nil {
+				return err
+			}
+			if err := rejectUnknownKeys(tlsObject, map[string]struct{}{"ca_file": {}, "insecure_skip_verify": {}}); err != nil {
+				return err
 			}
 		}
 	}

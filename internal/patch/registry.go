@@ -13,6 +13,7 @@ var (
 	ErrUnknownPatch       = errors.New("unknown provider patch")
 	ErrDuplicatePatch     = errors.New("duplicate provider patch")
 	ErrPatchConflict      = errors.New("provider patch conflict")
+	ErrPatchNotApplicable = errors.New("provider patch is not applicable to target request type")
 	ErrInvalidDefinition  = errors.New("invalid provider patch definition")
 	ErrFactoryUnavailable = errors.New("provider patch factory unavailable")
 	ErrHookUnavailable    = errors.New("provider patch hook unavailable")
@@ -348,7 +349,7 @@ func (r Registry) compile(ids []string, targetTypes []RequestType) (Plan, error)
 		if len(types) > 0 && !definitionAppliesToAny(d, types) {
 			// An ID that is valid globally but not applicable to this target is
 			// a static configuration error, not a silently ignored patch.
-			return Plan{}, fmt.Errorf("patch %q: not applicable to target request type", id)
+			return Plan{}, fmt.Errorf("patch %q: %w", id, ErrPatchNotApplicable)
 		}
 		selected = append(selected, cloneDefinition(d))
 	}

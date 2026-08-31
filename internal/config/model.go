@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Siriusrry/cc-automux/internal/modelname"
 )
@@ -26,12 +27,29 @@ const (
 	appConfigDir   = "cc-automux"
 )
 
+// Auto Mode values are intentionally small, closed vocabulary strings.  They
+// are exported so the runtime and flow layers do not duplicate literals.
+const (
+	AutoModeDisabled      = "disabled"
+	AutoModeProviderPool  = "provider_pool"
+	AutoModeFixedProvider = "fixed_provider"
+)
+
+// Fixed provider protocol identifiers are schema values, not an indication
+// that a protocol adapter is currently available at runtime.  Adapters are
+// looked up by the execution layer and a missing implementation fails closed.
+const (
+	ProtocolOpenAIResponses  = "openai_responses"
+	ProtocolOpenAICompatible = "openai_compatible"
+)
+
 // Config is the complete v1 persisted configuration. It intentionally has no
 // fields from the retired v0 configuration.
 type Config struct {
 	SchemaVersion int              `json:"schema_version"`
 	Service       ServiceConfig    `json:"service"`
 	Auth          AuthConfig       `json:"auth"`
+	AutoMode      AutoModeConfig   `json:"auto_mode"`
 	Providers     []ProviderConfig `json:"providers"`
 }
 
@@ -43,6 +61,45 @@ type ServiceConfig struct {
 type AuthConfig struct {
 	GatewayKey    string `json:"gateway_key"`
 	ManagementKey string `json:"management_key"`
+}
+
+// AutoModeConfig is the persisted classifier routing configuration.  The
+// classifier model is deliberately shared by provider-pool and fixed-provider
+// modes; FixedProvider never carries a second model field.
+type AutoModeConfig struct {
+	Mode          string               `json:"mode"`
+	Model         string               `json:"model"`
+	FixedProvider *FixedProviderConfig `json:"fixed_provider,omitempty"`
+}
+
+// FixedProviderConfig describes the pool-external classifier target.  It is a
+// target description only: scheduling, health, and protocol conversion remain
+// runtime concerns outside the config package.
+type FixedProviderConfig struct {
+	BaseURL    string    `json:"base_url"`
+	APIKey     string    `json:"api_key"`
+	UseXAPIKey bool      `json:"use_x_api_key"`
+	Protocol   string    `json:"protocol"`
+	TLS        TLSConfig `json:"tls"`
+	Patches    []string  `json:"patches"`
+}
+
+func (f FixedProviderConfig) Clone() FixedProviderConfig {
+	out := f
+	out.Patches = cloneStrings(f.Patches)
+	return out
+}
+
+func (f FixedProviderConfig) Normalize() FixedProviderConfig {
+	out := f.Clone()
+	if out.Patches == nil {
+		out.Patches = []string{}
+	}
+	return out
+}
+
+func (f FixedProviderConfig) Validate() error {
+	return validateFixedProvider("fixed_provider", f.Normalize())
 }
 
 type ProviderConfig struct {
@@ -74,6 +131,11 @@ func Default() Config {
 			ListenAddr:  DefaultListenAddr,
 			LogMaxBytes: DefaultLogMaxBytes,
 		},
+		AutoMode: AutoModeConfig{
+			Mode:          AutoModeDisabled,
+			Model:         "",
+			FixedProvider: nil,
+		},
 		Providers: []ProviderConfig{},
 	}
 }
@@ -82,6 +144,11 @@ func Default() Config {
 // boundary and must never share mutable slices with an active snapshot.
 func (c Config) Clone() Config {
 	out := c
+	if c.AutoMode.FixedProvider != nil {
+		fixed := *c.AutoMode.FixedProvider
+		fixed.Patches = cloneStrings(c.AutoMode.FixedProvider.Patches)
+		out.AutoMode.FixedProvider = &fixed
+	}
 	out.Providers = make([]ProviderConfig, len(c.Providers))
 	for i := range c.Providers {
 		out.Providers[i] = c.Providers[i]
@@ -96,6 +163,12 @@ func (c Config) Clone() Config {
 // names.
 func (c Config) Normalize() Config {
 	out := c.Clone()
+	if out.AutoMode.Mode == "" {
+		out.AutoMode.Mode = AutoModeDisabled
+	}
+	if out.AutoMode.FixedProvider != nil && out.AutoMode.FixedProvider.Patches == nil {
+		out.AutoMode.FixedProvider.Patches = []string{}
+	}
 	if out.Providers == nil {
 		out.Providers = []ProviderConfig{}
 	}
@@ -137,6 +210,9 @@ func (c Config) Validate() error {
 		if c.Auth.GatewayKey == c.Auth.ManagementKey {
 			return validation("auth", "gateway_key and management_key must be different")
 		}
+	}
+	if err := validateAutoMode(c.AutoMode); err != nil {
+		return err
 	}
 
 	seenIDs := make(map[string]int, len(c.Providers))
@@ -203,6 +279,118 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// ValidateAutoMode validates an Auto Mode object independently of the root
+// configuration.  Runtime compilation performs the additional registry-aware
+// patch applicability check for fixed targets.
+func (a AutoModeConfig) Validate() error {
+	return validateAutoMode(a.Normalize())
+}
+
+// Normalize applies the documented Auto Mode defaults and deep-copies the
+// optional fixed target.  It does not trim or rewrite user values.
+func (a AutoModeConfig) Normalize() AutoModeConfig {
+	out := a
+	if out.Mode == "" {
+		out.Mode = AutoModeDisabled
+	}
+	if out.FixedProvider != nil {
+		fixed := out.FixedProvider.Normalize()
+		out.FixedProvider = &fixed
+	}
+	return out
+}
+
+// Clone deep-copies the optional fixed target without applying defaults.  Use
+// Normalize when the documented disabled-mode default is desired.
+func (a AutoModeConfig) Clone() AutoModeConfig {
+	out := a
+	if a.FixedProvider != nil {
+		fixed := *a.FixedProvider
+		fixed.Patches = cloneStrings(a.FixedProvider.Patches)
+		out.FixedProvider = &fixed
+	}
+	return out
+}
+
+func validateAutoMode(a AutoModeConfig) error {
+	a = a.Normalize()
+	switch a.Mode {
+	case AutoModeDisabled:
+		if a.Model != "" {
+			return validation("auto_mode.model", "must be empty when mode is disabled")
+		}
+		if a.FixedProvider != nil {
+			return validation("auto_mode.fixed_provider", "must be omitted when mode is disabled")
+		}
+	case AutoModeProviderPool:
+		if err := validateClassifierModel("auto_mode.model", a.Model); err != nil {
+			return err
+		}
+		if a.FixedProvider != nil {
+			return validation("auto_mode.fixed_provider", "must be omitted in provider_pool mode")
+		}
+	case AutoModeFixedProvider:
+		if err := validateClassifierModel("auto_mode.model", a.Model); err != nil {
+			return err
+		}
+		if a.FixedProvider == nil {
+			return validation("auto_mode.fixed_provider", "is required in fixed_provider mode")
+		}
+		if err := validateFixedProvider("auto_mode.fixed_provider", *a.FixedProvider); err != nil {
+			return err
+		}
+	default:
+		return validation("auto_mode.mode", fmt.Sprintf("unsupported mode %q", a.Mode))
+	}
+	return nil
+}
+
+func validateClassifierModel(field, model string) error {
+	if model == "" {
+		return validation(field, "must not be empty")
+	}
+	if !utf8.ValidString(model) {
+		return validation(field, "must be valid UTF-8")
+	}
+	if len(model) > modelname.MaxBytes {
+		return validation(field, fmt.Sprintf("must not exceed %d UTF-8 bytes", modelname.MaxBytes))
+	}
+	if containsControl(model) {
+		return validation(field, "must not contain control characters")
+	}
+	return nil
+}
+
+func validateFixedProvider(prefix string, fixed FixedProviderConfig) error {
+	if err := validateBaseURL(fixed.BaseURL); err != nil {
+		return validation(prefix+".base_url", err.Error())
+	}
+	if err := validateCredential(prefix+".api_key", fixed.APIKey, true); err != nil {
+		return err
+	}
+	if fixed.Protocol != ProtocolOpenAIResponses && fixed.Protocol != ProtocolOpenAICompatible {
+		return validation(prefix+".protocol", fmt.Sprintf("unsupported protocol %q", fixed.Protocol))
+	}
+	if fixed.TLS.CAFile != "" && fixed.TLS.InsecureSkipVerify {
+		return validation(prefix+".tls", "ca_file and insecure_skip_verify are mutually exclusive")
+	}
+	seen := make(map[string]struct{}, len(fixed.Patches))
+	for i, id := range fixed.Patches {
+		field := fmt.Sprintf("%s.patches[%d]", prefix, i)
+		if id == "" || strings.TrimSpace(id) == "" {
+			return validation(field, "must not be empty")
+		}
+		if containsControl(id) {
+			return validation(field, "must not contain control characters")
+		}
+		if _, ok := seen[id]; ok {
+			return validation(field, "duplicates an earlier patch id")
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
 // ValidateProviderForRequest applies the complete schema-level checks that are
 // independent of the surrounding configuration. The management API uses it
 // after assigning a stable ID to a POST body and after resolving a PUT path.
@@ -245,45 +433,12 @@ func validateListenAddr(addr string) error {
 }
 
 func validateBaseURL(raw string) error {
-	if strings.TrimSpace(raw) == "" {
+	if raw == "" {
 		return errors.New("must not be empty")
 	}
-	u, err := url.Parse(raw)
+	_, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return errors.New("scheme must be http or https")
-	}
-	if u.Host == "" {
-		return errors.New("host is required")
-	}
-	if u.Hostname() == "" {
-		return errors.New("host is required")
-	}
-	if u.User != nil {
-		return errors.New("userinfo is not allowed")
-	}
-	// net/url represents a bare trailing fragment marker (for example,
-	// "https://host/path#") with an empty Fragment. Inspect the original URI
-	// as well so every literal fragment delimiter is rejected consistently.
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.IndexByte(raw, '#') >= 0 {
-		return errors.New("query and fragment are not allowed")
-	}
-	if u.Opaque != "" {
-		return errors.New("opaque URLs are not allowed")
-	}
-	if strings.ContainsAny(u.Host, " \t\r\n") {
-		return errors.New("host contains whitespace")
-	}
-	if strings.HasSuffix(u.Host, ":") {
-		return errors.New("port must not be empty")
-	}
-	if port := u.Port(); port != "" {
-		n, err := strconv.Atoi(port)
-		if err != nil || strconv.Itoa(n) != port || n < 1 || n > 65535 {
-			return errors.New("port must be a canonical decimal integer between 1 and 65535")
-		}
 	}
 	return nil
 }
