@@ -39,8 +39,9 @@ const (
 // that a protocol adapter is currently available at runtime.  Adapters are
 // looked up by the execution layer and a missing implementation fails closed.
 const (
-	ProtocolOpenAIResponses  = "openai_responses"
-	ProtocolOpenAICompatible = "openai_compatible"
+	ProtocolAnthropicMessages = "anthropic_messages"
+	ProtocolOpenAIResponses   = "openai_responses"
+	ProtocolOpenAICompatible  = "openai_compatible"
 )
 
 // Config is the complete v1 persisted configuration. It intentionally has no
@@ -368,7 +369,7 @@ func validateFixedProvider(prefix string, fixed FixedProviderConfig) error {
 	if err := validateCredential(prefix+".api_key", fixed.APIKey, true); err != nil {
 		return err
 	}
-	if fixed.Protocol != ProtocolOpenAIResponses && fixed.Protocol != ProtocolOpenAICompatible {
+	if fixed.Protocol != ProtocolAnthropicMessages && fixed.Protocol != ProtocolOpenAIResponses && fixed.Protocol != ProtocolOpenAICompatible {
 		return validation(prefix+".protocol", fmt.Sprintf("unsupported protocol %q", fixed.Protocol))
 	}
 	if fixed.TLS.CAFile != "" && fixed.TLS.InsecureSkipVerify {

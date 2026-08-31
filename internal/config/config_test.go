@@ -85,6 +85,27 @@ func TestAutoModeStrictModesAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFixedProviderAcceptsAllSupportedProtocols(t *testing.T) {
+	for _, protocol := range []string{
+		ProtocolAnthropicMessages,
+		ProtocolOpenAIResponses,
+		ProtocolOpenAICompatible,
+	} {
+		t.Run(protocol, func(t *testing.T) {
+			auto := validAutoModeFixed()
+			auto.FixedProvider.Protocol = protocol
+			if err := auto.Validate(); err != nil {
+				t.Fatalf("protocol %q rejected: %v", protocol, err)
+			}
+		})
+	}
+	auto := validAutoModeFixed()
+	auto.FixedProvider.Protocol = "unsupported"
+	if err := auto.Validate(); err == nil {
+		t.Fatal("unsupported protocol accepted")
+	}
+}
+
 func TestAutoModeModelValidationUsesDecodedUTF8ByteLimit(t *testing.T) {
 	valid := strings.Repeat("a", modelname.MaxBytes)
 	invalid := []string{
