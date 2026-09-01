@@ -47,35 +47,15 @@ const (
 // active profile state through a client configuration update.
 var ErrActiveProfileReadOnly = errors.New("active_profile_id is server-managed and read-only")
 
-// ClientConfigUpdate is the client-owned portion of a configuration PUT.
-// It is intentionally sealed: callers obtain one from DecodeClientUpdate (or
-// NewClientConfigUpdate), and the server-owned active profile ID is never part
-// of the value or its JSON representation. A Config returned by a GET is a
-// complete resource and must not be reused as a PUT body without first
-// creating this request value.
+// ClientConfigUpdate is the client-owned portion of a configuration PUT. The
+// server-owned active profile ID is intentionally absent.
 type ClientConfigUpdate struct {
-	value Config
-}
-
-// NewClientConfigUpdate validates and wraps a client-owned configuration
-// value. The active profile ID is rejected even when it is non-empty in the
-// source value; callers must not copy a resource response into a request.
-func NewClientConfigUpdate(value Config) (ClientConfigUpdate, error) {
-	value = value.Normalize()
-	if value.Harnesses.ClaudeCode.ActiveProfileID != "" {
-		return ClientConfigUpdate{}, ErrActiveProfileReadOnly
-	}
-	if err := value.Validate(); err != nil {
-		return ClientConfigUpdate{}, err
-	}
-	return ClientConfigUpdate{value: value}, nil
-}
-
-// Config returns a defensive copy of the client-owned candidate. Runtime
-// applies it against the currently published resource so server-owned state
-// can be preserved or invalidated atomically.
-func (u ClientConfigUpdate) Config() Config {
-	return u.value.Clone()
+	SchemaVersion int              `json:"schema_version"`
+	Service       ServiceConfig    `json:"service"`
+	Auth          AuthConfig       `json:"auth"`
+	AutoMode      AutoModeConfig   `json:"auto_mode"`
+	Harnesses     ClientHarnesses  `json:"harnesses"`
+	Providers     []ProviderConfig `json:"providers"`
 }
 
 // Fixed provider protocol identifiers are schema values, not an indication
@@ -115,6 +95,19 @@ type AuthConfig struct {
 // present in every normalized v1 configuration, even before activation.
 type HarnessesConfig struct {
 	ClaudeCode ClaudeCodeConfig `json:"claude_code"`
+}
+
+// ClientHarnesses and ClientClaudeCodeConfig contain only fields accepted in
+// a client update request.
+type ClientHarnesses struct {
+	ClaudeCode ClientClaudeCodeConfig `json:"claude_code"`
+}
+
+type ClientClaudeCodeConfig struct {
+	PathMode         string    `json:"path_mode"`
+	SettingsPath     string    `json:"settings_path"`
+	DisableTelemetry bool      `json:"disable_telemetry"`
+	Profiles         []Profile `json:"profiles"`
 }
 
 // HarnessMutation is the narrow server-side transaction surface used by the
@@ -457,7 +450,7 @@ func (current Config) ApplyClientUpdate(next Config) (Config, error) {
 // The active profile ID is inherited or invalidated according to the normal
 // active-input rules; it is never read from the request object.
 func (current Config) ApplyClientRequest(update ClientConfigUpdate) (Config, error) {
-	return current.ApplyClientUpdate(update.Config())
+	return current.ApplyClientUpdate(configFromClientUpdate(update))
 }
 
 // ValidateClientUpdate checks an in-process candidate's server-owned-state

@@ -294,7 +294,29 @@ func TestClientActiveProfileIsReadOnlyAndServerUpdatesReconcile(t *testing.T) {
 
 func TestClientConfigUpdateHasNoServerOwnedFields(t *testing.T) {
 	value := configWithProfileForTest()
-	update, err := NewClientConfigUpdate(value)
+	update, err := DecodeClientUpdate(func() []byte {
+		data, marshalErr := Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		var root map[string]json.RawMessage
+		if unmarshalErr := json.Unmarshal(data, &root); unmarshalErr != nil {
+			t.Fatal(unmarshalErr)
+		}
+		var harnesses map[string]json.RawMessage
+		if unmarshalErr := json.Unmarshal(root["harnesses"], &harnesses); unmarshalErr != nil {
+			t.Fatal(unmarshalErr)
+		}
+		var claude map[string]json.RawMessage
+		if unmarshalErr := json.Unmarshal(harnesses["claude_code"], &claude); unmarshalErr != nil {
+			t.Fatal(unmarshalErr)
+		}
+		delete(claude, "active_profile_id")
+		harnesses["claude_code"], _ = json.Marshal(claude)
+		root["harnesses"], _ = json.Marshal(harnesses)
+		result, _ := json.Marshal(root)
+		return result
+	}())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,8 +331,8 @@ func TestClientConfigUpdateHasNoServerOwnedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(decoded.Config(), value.Normalize()) {
-		t.Fatalf("decoded client update = %#v, want %#v", decoded.Config(), value.Normalize())
+	if !reflect.DeepEqual(configFromClientUpdate(decoded), value.Normalize()) {
+		t.Fatalf("decoded client update = %#v, want %#v", configFromClientUpdate(decoded), value.Normalize())
 	}
 	value.Harnesses.ClaudeCode.ActiveProfileID = value.Harnesses.ClaudeCode.Profiles[0].ID
 	prepared, err := value.ApplyClientRequest(decoded)
@@ -321,7 +343,4 @@ func TestClientConfigUpdateHasNoServerOwnedFields(t *testing.T) {
 		t.Fatalf("client request did not preserve active resource state: %q", prepared.Harnesses.ClaudeCode.ActiveProfileID)
 	}
 
-	if _, err := NewClientConfigUpdate(value); !errors.Is(err, ErrActiveProfileReadOnly) {
-		t.Fatalf("resource value accepted as client update: %v", err)
-	}
 }

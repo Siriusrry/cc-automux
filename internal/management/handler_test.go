@@ -163,15 +163,8 @@ func TestConfigAndProviderCRUDAndKeyRotation(t *testing.T) {
 	if rec := request(handler, http.MethodPut, "/api/v1/config", auth, get.Body.String()); rec.Code != http.StatusConflict {
 		t.Fatalf("resource response accepted as PUT request: %d %s", rec.Code, rec.Body.String())
 	}
-	clientUpdate, err := config.NewClientConfigUpdate(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientBody, err := json.Marshal(clientUpdate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec := request(handler, http.MethodPut, "/api/v1/config", auth, string(clientBody)); rec.Code != http.StatusOK {
+	clientBody := marshalManagementClientConfig(t, got)
+	if rec := request(handler, http.MethodPut, "/api/v1/config", auth, clientBody); rec.Code != http.StatusOK {
 		t.Fatalf("client update without server-owned field = %d %s", rec.Code, rec.Body.String())
 	}
 

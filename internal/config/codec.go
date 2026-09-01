@@ -73,11 +73,13 @@ func DecodeClientUpdate(data []byte) (ClientConfigUpdate, error) {
 	if err := checkConfigKeys(raw); err != nil {
 		return ClientConfigUpdate{}, &SyntaxError{Err: err}
 	}
+	// Reuse the persisted schema decoder for defaults and semantic validation,
+	// then copy only client-owned fields into the request value.
 	cfg, err := Decode(data)
 	if err != nil {
 		return ClientConfigUpdate{}, err
 	}
-	return NewClientConfigUpdate(cfg)
+	return clientUpdateFromConfig(cfg), nil
 }
 
 // hasActiveProfileField performs the read-only presence check before regular
@@ -106,72 +108,52 @@ func hasActiveProfileField(raw map[string]json.RawMessage) bool {
 	return present
 }
 
-// DecodeClient is retained for older in-process callers that still consume a
-// Config value. New HTTP code should use DecodeClientUpdate so the resource
-// and request shapes remain explicit.
+func clientUpdateFromConfig(value Config) ClientConfigUpdate {
+	value = value.Normalize()
+	return ClientConfigUpdate{
+		SchemaVersion: value.SchemaVersion,
+		Service:       value.Service,
+		Auth:          value.Auth,
+		AutoMode:      value.AutoMode.Clone(),
+		Harnesses: ClientHarnesses{ClaudeCode: ClientClaudeCodeConfig{
+			PathMode:         value.Harnesses.ClaudeCode.PathMode,
+			SettingsPath:     value.Harnesses.ClaudeCode.SettingsPath,
+			DisableTelemetry: value.Harnesses.ClaudeCode.DisableTelemetry,
+			Profiles:         cloneProfiles(value.Harnesses.ClaudeCode.Profiles),
+		}},
+		Providers: value.Clone().Providers,
+	}
+}
+
+// DecodeClient is retained for older in-process callers.
 func DecodeClient(data []byte) (Config, error) {
 	update, err := DecodeClientUpdate(data)
 	if err != nil {
 		return Config{}, err
 	}
-	return update.Config(), nil
+	return configFromClientUpdate(update), nil
 }
 
-// MarshalJSON makes a client update safe to use as a PUT body: the
-// server-owned active profile field is never emitted.
-func (u ClientConfigUpdate) MarshalJSON() ([]byte, error) {
-	return marshalClientUpdate(u.value)
-}
-
-// UnmarshalJSON keeps the request type strict even when callers use the
-// standard encoding/json package directly. In particular, a resource response
-// cannot be silently decoded into a client update.
-func (u *ClientConfigUpdate) UnmarshalJSON(data []byte) error {
-	if u == nil {
-		return errors.New("client configuration update is nil")
+func configFromClientUpdate(update ClientConfigUpdate) Config {
+	next := Config{
+		SchemaVersion: update.SchemaVersion,
+		Service:       update.Service,
+		Auth:          update.Auth,
+		AutoMode:      update.AutoMode.Clone(),
+		Harnesses: HarnessesConfig{ClaudeCode: ClaudeCodeConfig{
+			PathMode:         update.Harnesses.ClaudeCode.PathMode,
+			SettingsPath:     update.Harnesses.ClaudeCode.SettingsPath,
+			DisableTelemetry: update.Harnesses.ClaudeCode.DisableTelemetry,
+			Profiles:         cloneProfiles(update.Harnesses.ClaudeCode.Profiles),
+		}},
+		Providers: make([]ProviderConfig, len(update.Providers)),
 	}
-	decoded, err := DecodeClientUpdate(data)
-	if err != nil {
-		return err
+	for index := range update.Providers {
+		next.Providers[index] = update.Providers[index]
+		next.Providers[index].Models = cloneStrings(update.Providers[index].Models)
+		next.Providers[index].Patches = cloneStrings(update.Providers[index].Patches)
 	}
-	*u = decoded
-	return nil
-}
-
-func marshalClientUpdate(value Config) ([]byte, error) {
-	value = value.Normalize()
-	if value.Harnesses.ClaudeCode.ActiveProfileID != "" {
-		return nil, ErrActiveProfileReadOnly
-	}
-	if err := value.Validate(); err != nil {
-		return nil, err
-	}
-	data, err := json.Marshal(value)
-	if err != nil {
-		return nil, fmt.Errorf("marshal client configuration: %w", err)
-	}
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("marshal client configuration: %w", err)
-	}
-	var harnesses map[string]json.RawMessage
-	if err := json.Unmarshal(root["harnesses"], &harnesses); err != nil {
-		return nil, fmt.Errorf("marshal client configuration: %w", err)
-	}
-	var claudeCode map[string]json.RawMessage
-	if err := json.Unmarshal(harnesses["claude_code"], &claudeCode); err != nil {
-		return nil, fmt.Errorf("marshal client configuration: %w", err)
-	}
-	delete(claudeCode, "active_profile_id")
-	harnesses["claude_code"], err = json.Marshal(claudeCode)
-	if err != nil {
-		return nil, fmt.Errorf("marshal client configuration: %w", err)
-	}
-	root["harnesses"], err = json.Marshal(harnesses)
-	if err != nil {
-		return nil, fmt.Errorf("marshal client configuration: %w", err)
-	}
-	return json.MarshalIndent(root, "", "  ")
+	return next
 }
 
 // DecodeAutoMode strictly parses one Auto Mode object, applying the same
