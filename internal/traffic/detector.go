@@ -40,6 +40,7 @@ type DetectorRegistry interface {
 // as normal in production.
 type Registry struct {
 	detectors  []Detector
+	types      []RequestType
 	scanPaths  []string
 	rawMarkers []string
 }
@@ -50,6 +51,7 @@ type Registry struct {
 func NewRegistry(detectors ...Detector) (*Registry, error) {
 	entries := append([]Detector(nil), detectors...)
 	seen := make(map[RequestType]struct{}, len(entries))
+	types := make([]RequestType, 0, len(entries))
 	seenPaths := make(map[string]struct{})
 	var scanPaths []string
 	var rawMarkers []string
@@ -72,6 +74,7 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 			return nil, fmt.Errorf("%w: %q", ErrDuplicateDetector, requestType)
 		}
 		seen[requestType] = struct{}{}
+		types = append(types, requestType)
 		paths, pathErr := detectorPathsSafely(detector)
 		if pathErr != nil {
 			return nil, fmt.Errorf("detector %d: %w", index, pathErr)
@@ -104,7 +107,7 @@ func NewRegistry(detectors ...Detector) (*Registry, error) {
 	if err := (bodyfile.ScanSpec{RawMarkers: rawMarkers}).Validate(); err != nil {
 		return nil, fmt.Errorf("invalid raw markers: %w", err)
 	}
-	return &Registry{detectors: entries, scanPaths: scanPaths, rawMarkers: rawMarkers}, nil
+	return &Registry{detectors: entries, types: types, scanPaths: scanPaths, rawMarkers: rawMarkers}, nil
 }
 
 // NewDetectorRegistry is an alias for NewRegistry.
@@ -288,16 +291,13 @@ func (r *Registry) RequiredRawMarkers() []string {
 func (r *Registry) RawMarkers() []string { return r.RequiredRawMarkers() }
 
 // Types returns registered specialised types in deterministic registration
-// order.  It is useful for discovery/testing and never includes normal.
+// order. The cached result is used when compiling the immutable ingress scan
+// contract and never includes normal.
 func (r *Registry) Types() []RequestType {
-	if r == nil {
+	if r == nil || len(r.types) == 0 {
 		return []RequestType{}
 	}
-	result := make([]RequestType, 0, len(r.detectors))
-	for _, detector := range r.detectors {
-		result = append(result, detector.Type())
-	}
-	return result
+	return append([]RequestType(nil), r.types...)
 }
 
 // Len reports the number of specialised detectors.
