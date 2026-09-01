@@ -382,19 +382,6 @@ func (m *Manager) Update(mutator func(*config.Config) error) (ApplyResult, error
 	return m.applyLocked(prepared)
 }
 
-// UpdateHarness performs a standalone server-side mutation of the harness
-// subtree. Callers already inside WithHarnessMutation must use the supplied
-// transaction instead; invoking this method from that callback would attempt
-// to acquire the same mutex again.
-func (m *Manager) UpdateHarness(mutator func(*config.HarnessesConfig) error) (ApplyResult, error) {
-	if mutator == nil {
-		return ApplyResult{}, errors.New("harness configuration mutator is required")
-	}
-	return m.Update(func(next *config.Config) error {
-		return mutator(&next.Harnesses)
-	})
-}
-
 // ProtectedConfigPaths returns the active and pending configuration paths when
 // the underlying store exposes them. The slice is a fresh copy; stores used by
 // focused tests may intentionally omit path metadata.
@@ -437,32 +424,6 @@ func (m *Manager) PendingConfigPath() string {
 		return ""
 	}
 	return paths[1]
-}
-
-// ClearActiveProfileID performs a standalone server-owned active-state clear.
-// Use config.HarnessMutation.ClearActiveProfileID inside a transaction.
-func (m *Manager) ClearActiveProfileID() (ApplyResult, error) {
-	return m.setActiveProfileID("")
-}
-
-// SetActiveProfileID performs a standalone server-owned active-state update.
-// Use config.HarnessMutation.SetActiveProfileID inside a transaction.
-func (m *Manager) SetActiveProfileID(id string) (ApplyResult, error) {
-	return m.setActiveProfileID(id)
-}
-
-func (m *Manager) setActiveProfileID(id string) (ApplyResult, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.restartStatus.InProgress {
-		return ApplyResult{}, ErrRestartInProgress
-	}
-	current := m.current.Load().Config()
-	next, err := current.WithActiveProfileID(id)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	return m.applyLocked(next)
 }
 
 func (m *Manager) applyClientLocked(next config.Config) (ApplyResult, error) {
