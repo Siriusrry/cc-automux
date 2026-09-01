@@ -691,6 +691,7 @@ type faultOps struct {
 	failBackupOpen    error
 	failBackupWrite   error
 	failBackupSync    error
+	failTargetOpen    error
 	failTempCreate    error
 	failTempSync      error
 	failRename        error
@@ -699,7 +700,12 @@ type faultOps struct {
 
 func (o *faultOps) Lstat(path string) (fs.FileInfo, error) { return o.base.Lstat(path) }
 
-func (o *faultOps) Open(path string) (FileHandle, error) { return o.base.Open(path) }
+func (o *faultOps) Open(path string) (FileHandle, error) {
+	if o.failTargetOpen != nil {
+		return nil, o.failTargetOpen
+	}
+	return o.base.Open(path)
+}
 
 func (o *faultOps) OpenFile(path string, flag int, perm fs.FileMode) (FileHandle, error) {
 	if filepath.Base(path) == BackupFileName && o.failBackupOpen != nil {

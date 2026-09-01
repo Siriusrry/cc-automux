@@ -45,7 +45,10 @@ type harnessTestFixture struct {
 	profiles []config.Profile
 }
 
-func newHarnessFixture(t *testing.T, gatewayKey string) harnessTestFixture {
+// newHarnessFixture builds a manager over a temporary runtime configuration and
+// a temporary home directory. An optional FileOps replaces the target file
+// backend so read failures can be injected after a successful activation.
+func newHarnessFixture(t *testing.T, gatewayKey string, files ...FileOps) harnessTestFixture {
 	t.Helper()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "runtime", "config.json")
@@ -81,7 +84,7 @@ func newHarnessFixture(t *testing.T, gatewayKey string) harnessTestFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	harness, err := NewManager(runtimeManager, adapterRegistry)
+	harness, err := NewManager(runtimeManager, adapterRegistry, managerOptionsForFixture(files))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +105,13 @@ func newHarnessFixture(t *testing.T, gatewayKey string) harnessTestFixture {
 		adapter:  adapter,
 		profiles: profiles,
 	}
+}
+
+func managerOptionsForFixture(files []FileOps) ManagerOptions {
+	if len(files) == 0 || files[0] == nil {
+		return ManagerOptions{}
+	}
+	return ManagerOptions{FileStore: NewFileStore(FileStoreOptions{FS: files[0]})}
 }
 
 func writeSettingsFixture(t *testing.T, path string, data []byte) {
@@ -621,6 +631,93 @@ func TestManagerStateClassificationAndDiscovery(t *testing.T) {
 	if _, err := fixture.harness.GetProfile(ClaudeCodeAdapterID, "missing"); !errors.Is(err, ErrProfileNotFound) {
 		t.Fatalf("missing profile error = %v", err)
 	}
+}
+
+// A target that is still present but unusable must clear the active record and
+// report the specific reason. Type, size and path rejections are structural and
+// stay invalid; every other read failure is transient and stays unreadable.
+func TestManagerClassifiesUnusableTargetStates(t *testing.T) {
+	structural := []struct {
+		name    string
+		prepare func(t *testing.T, target string)
+	}{
+		{name: "symlink", prepare: func(t *testing.T, target string) {
+			elsewhere := filepath.Join(filepath.Dir(target), "elsewhere.json")
+			if err := os.WriteFile(elsewhere, []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, target); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}},
+		{name: "directory", prepare: func(t *testing.T, target string) {
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "oversized", prepare: func(t *testing.T, target string) {
+			oversized := make([]byte, MaxExistingTargetBytes+1)
+			oversized[0] = '{'
+			oversized[len(oversized)-1] = '}'
+			if err := os.WriteFile(target, oversized, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range structural {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newHarnessFixture(t, "gateway-key")
+			if _, err := fixture.harness.Activate(ClaudeCodeAdapterID, testProfileOneID); err != nil {
+				t.Fatal(err)
+			}
+			tc.prepare(t, fixture.target)
+			status, err := fixture.harness.Status(ClaudeCodeAdapterID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.State != StateInvalid || status.ActiveProfileID != "" || status.LastInvalidationReason != reasonTargetInvalid {
+				t.Fatalf("status for %s target = %#v", tc.name, status)
+			}
+			if got := fixture.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID; got != "" {
+				t.Fatalf("runtime active ID for %s target = %q", tc.name, got)
+			}
+		})
+	}
+
+	t.Run("unreadable", func(t *testing.T) {
+		ops := &faultOps{}
+		fixture := newHarnessFixture(t, "gateway-key", ops)
+		if _, err := fixture.harness.Activate(ClaudeCodeAdapterID, testProfileOneID); err != nil {
+			t.Fatal(err)
+		}
+		ops.failTargetOpen = errors.New("injected target open failure")
+		status, err := fixture.harness.Status(ClaudeCodeAdapterID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != StateUnreadable || status.ActiveProfileID != "" || status.LastInvalidationReason != reasonTargetUnreadable {
+			t.Fatalf("unreadable target status = %#v", status)
+		}
+		if got := fixture.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID; got != "" {
+			t.Fatalf("runtime active ID for unreadable target = %q", got)
+		}
+		// The target itself is untouched, so restoring readability leaves the
+		// file matching the projection while the cleared record stays cleared.
+		ops.failTargetOpen = nil
+		status, err = fixture.harness.Status(ClaudeCodeAdapterID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != StateInactive || status.ActiveProfileID != "" {
+			t.Fatalf("recovered target status = %#v", status)
+		}
+	})
 }
 
 func TestManagerProfileCRUDPreservesActiveNonTargetProfile(t *testing.T) {

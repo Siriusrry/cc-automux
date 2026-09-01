@@ -520,13 +520,17 @@ func classifyProjectionError(err error) (HarnessState, string) {
 	return StateInvalid, reasonProjectionInvalid
 }
 
+// classifyReadError maps a target read failure onto the externally visible
+// state. The listed categories are exactly the rejections FileStore.Read can
+// produce: its own path validation plus the ordinary-file and size checks.
+// Every other failure is an I/O condition and stays unreadable, so a transient
+// read error is never reported as a structurally invalid target.
 func classifyReadError(err error) (HarnessState, string) {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return StateMissing, reasonTargetMissing
 	case errors.Is(err, ErrTargetSymlink), errors.Is(err, ErrTargetNotRegular),
-		errors.Is(err, ErrTargetTooLarge), errors.Is(err, ErrInvalidTargetPath),
-		errors.Is(err, ErrPathConflict):
+		errors.Is(err, ErrTargetTooLarge), errors.Is(err, ErrInvalidTargetPath):
 		return StateInvalid, reasonTargetInvalid
 	default:
 		return StateUnreadable, reasonTargetUnreadable
