@@ -47,6 +47,37 @@ const (
 // active profile state through a client configuration update.
 var ErrActiveProfileReadOnly = errors.New("active_profile_id is server-managed and read-only")
 
+// ClientConfigUpdate is the client-owned portion of a configuration PUT.
+// It is intentionally sealed: callers obtain one from DecodeClientUpdate (or
+// NewClientConfigUpdate), and the server-owned active profile ID is never part
+// of the value or its JSON representation. A Config returned by a GET is a
+// complete resource and must not be reused as a PUT body without first
+// creating this request value.
+type ClientConfigUpdate struct {
+	value Config
+}
+
+// NewClientConfigUpdate validates and wraps a client-owned configuration
+// value. The active profile ID is rejected even when it is non-empty in the
+// source value; callers must not copy a resource response into a request.
+func NewClientConfigUpdate(value Config) (ClientConfigUpdate, error) {
+	value = value.Normalize()
+	if value.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		return ClientConfigUpdate{}, ErrActiveProfileReadOnly
+	}
+	if err := value.Validate(); err != nil {
+		return ClientConfigUpdate{}, err
+	}
+	return ClientConfigUpdate{value: value}, nil
+}
+
+// Config returns a defensive copy of the client-owned candidate. Runtime
+// applies it against the currently published resource so server-owned state
+// can be preserved or invalidated atomically.
+func (u ClientConfigUpdate) Config() Config {
+	return u.value.Clone()
+}
+
 // Fixed provider protocol identifiers are schema values, not an indication
 // that a protocol adapter is currently available at runtime.  Adapters are
 // looked up by the execution layer and a missing implementation fails closed.
@@ -56,8 +87,10 @@ const (
 	ProtocolOpenAICompatible  = "openai_compatible"
 )
 
-// Config is the complete v1 persisted configuration. It intentionally has no
-// fields from the retired v0 configuration.
+// Config is the complete persisted configuration and management resource
+// representation. It intentionally has no fields from the retired v0
+// configuration; server-owned state is visible here and is excluded from
+// ClientConfigUpdate requests.
 type Config struct {
 	SchemaVersion int              `json:"schema_version"`
 	Service       ServiceConfig    `json:"service"`
@@ -404,10 +437,9 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// ApplyClientUpdate prepares a complete configuration received from a client.
-// The active profile ID is server-owned: a non-empty value is never accepted
-// from the client, while an omitted value inherits the current server state
-// unless an active-profile input changed and therefore invalidates it.
+// ApplyClientUpdate prepares a complete in-process candidate. The HTTP layer
+// should use ApplyClientRequest with ClientConfigUpdate so the request shape
+// cannot contain server-owned fields.
 func (current Config) ApplyClientUpdate(next Config) (Config, error) {
 	current = current.Normalize()
 	next = next.Normalize()
@@ -421,8 +453,16 @@ func (current Config) ApplyClientUpdate(next Config) (Config, error) {
 	return next, nil
 }
 
-// ValidateClientUpdate checks the same server-owned-state rules as
-// ApplyClientUpdate without returning the normalized candidate.
+// ApplyClientRequest applies a client-owned request to the current resource.
+// The active profile ID is inherited or invalidated according to the normal
+// active-input rules; it is never read from the request object.
+func (current Config) ApplyClientRequest(update ClientConfigUpdate) (Config, error) {
+	return current.ApplyClientUpdate(update.Config())
+}
+
+// ValidateClientUpdate checks an in-process candidate's server-owned-state
+// rules without returning the normalized candidate. HTTP callers should use
+// DecodeClientUpdate and ClientConfigUpdate instead.
 func ValidateClientUpdate(current, next Config) error {
 	_, err := current.ApplyClientUpdate(next)
 	return err

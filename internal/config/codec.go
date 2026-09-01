@@ -55,37 +55,123 @@ func Decode(data []byte) (Config, error) {
 	return cfg, nil
 }
 
-// DecodeClient parses a complete configuration submitted by a client. The
-// server-owned active profile field is rejected by presence, including an
-// explicit empty value; callers must use the runtime mutation boundary to
-// preserve or change that state.
-func DecodeClient(data []byte) (Config, error) {
+// DecodeClientUpdate parses the client-owned portion of a configuration PUT.
+// A resource response from GET is deliberately a different object: it
+// includes active_profile_id, while this request decoder rejects that field by
+// presence (including an explicit empty value).
+func DecodeClientUpdate(data []byte) (ClientConfigUpdate, error) {
 	var raw map[string]json.RawMessage
 	if err := decodeObject(data, &raw); err != nil {
-		return Config{}, err
+		return ClientConfigUpdate{}, err
 	}
 	if raw == nil {
-		return Config{}, &SyntaxError{Err: errors.New("configuration must be a JSON object")}
+		return ClientConfigUpdate{}, &SyntaxError{Err: errors.New("configuration must be a JSON object")}
+	}
+	if hasActiveProfileField(raw) {
+		return ClientConfigUpdate{}, ErrActiveProfileReadOnly
 	}
 	if err := checkConfigKeys(raw); err != nil {
-		return Config{}, &SyntaxError{Err: err}
+		return ClientConfigUpdate{}, &SyntaxError{Err: err}
 	}
-	if harnesses, ok := raw["harnesses"]; ok {
-		object, err := rawObject(harnesses, "harnesses")
-		if err != nil {
-			return Config{}, &SyntaxError{Err: err}
-		}
-		if claudeCode, ok := object["claude_code"]; ok {
-			profileConfig, err := rawObject(claudeCode, "harnesses.claude_code")
-			if err != nil {
-				return Config{}, &SyntaxError{Err: err}
-			}
-			if _, present := profileConfig["active_profile_id"]; present {
-				return Config{}, ErrActiveProfileReadOnly
-			}
-		}
+	cfg, err := Decode(data)
+	if err != nil {
+		return ClientConfigUpdate{}, err
 	}
-	return Decode(data)
+	return NewClientConfigUpdate(cfg)
+}
+
+// hasActiveProfileField performs the read-only presence check before regular
+// schema validation. This keeps an explicitly supplied null or empty value in
+// the server-owned field from being mistaken for an ordinary client field
+// error, while malformed surrounding objects still flow through syntax
+// validation below.
+func hasActiveProfileField(raw map[string]json.RawMessage) bool {
+	harnesses, ok := raw["harnesses"]
+	if !ok || isJSONNull(harnesses) {
+		return false
+	}
+	var harnessObject map[string]json.RawMessage
+	if err := json.Unmarshal(harnesses, &harnessObject); err != nil || harnessObject == nil {
+		return false
+	}
+	claudeCode, ok := harnessObject["claude_code"]
+	if !ok || isJSONNull(claudeCode) {
+		return false
+	}
+	var claudeObject map[string]json.RawMessage
+	if err := json.Unmarshal(claudeCode, &claudeObject); err != nil || claudeObject == nil {
+		return false
+	}
+	_, present := claudeObject["active_profile_id"]
+	return present
+}
+
+// DecodeClient is retained for older in-process callers that still consume a
+// Config value. New HTTP code should use DecodeClientUpdate so the resource
+// and request shapes remain explicit.
+func DecodeClient(data []byte) (Config, error) {
+	update, err := DecodeClientUpdate(data)
+	if err != nil {
+		return Config{}, err
+	}
+	return update.Config(), nil
+}
+
+// MarshalJSON makes a client update safe to use as a PUT body: the
+// server-owned active profile field is never emitted.
+func (u ClientConfigUpdate) MarshalJSON() ([]byte, error) {
+	return marshalClientUpdate(u.value)
+}
+
+// UnmarshalJSON keeps the request type strict even when callers use the
+// standard encoding/json package directly. In particular, a resource response
+// cannot be silently decoded into a client update.
+func (u *ClientConfigUpdate) UnmarshalJSON(data []byte) error {
+	if u == nil {
+		return errors.New("client configuration update is nil")
+	}
+	decoded, err := DecodeClientUpdate(data)
+	if err != nil {
+		return err
+	}
+	*u = decoded
+	return nil
+}
+
+func marshalClientUpdate(value Config) ([]byte, error) {
+	value = value.Normalize()
+	if value.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		return nil, ErrActiveProfileReadOnly
+	}
+	if err := value.Validate(); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal client configuration: %w", err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("marshal client configuration: %w", err)
+	}
+	var harnesses map[string]json.RawMessage
+	if err := json.Unmarshal(root["harnesses"], &harnesses); err != nil {
+		return nil, fmt.Errorf("marshal client configuration: %w", err)
+	}
+	var claudeCode map[string]json.RawMessage
+	if err := json.Unmarshal(harnesses["claude_code"], &claudeCode); err != nil {
+		return nil, fmt.Errorf("marshal client configuration: %w", err)
+	}
+	delete(claudeCode, "active_profile_id")
+	harnesses["claude_code"], err = json.Marshal(claudeCode)
+	if err != nil {
+		return nil, fmt.Errorf("marshal client configuration: %w", err)
+	}
+	root["harnesses"], err = json.Marshal(harnesses)
+	if err != nil {
+		return nil, fmt.Errorf("marshal client configuration: %w", err)
+	}
+	return json.MarshalIndent(root, "", "  ")
 }
 
 // DecodeAutoMode strictly parses one Auto Mode object, applying the same

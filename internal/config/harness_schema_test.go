@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -244,6 +246,7 @@ func TestClientActiveProfileIsReadOnlyAndServerUpdatesReconcile(t *testing.T) {
 	for _, raw := range []string{
 		`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{},"harnesses":{"claude_code":{"active_profile_id":""}}}`,
 		`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{},"harnesses":{"claude_code":{"active_profile_id":"22222222-2222-4222-8222-222222222222"}}}`,
+		`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{},"harnesses":{"claude_code":{"active_profile_id":null}}}`,
 	} {
 		if _, err := DecodeClient([]byte(raw)); !errors.Is(err, ErrActiveProfileReadOnly) {
 			t.Fatalf("DecodeClient(%s) error = %v, want read-only error", raw, err)
@@ -286,5 +289,39 @@ func TestClientActiveProfileIsReadOnlyAndServerUpdatesReconcile(t *testing.T) {
 	set, err := cleared.WithActiveProfileID(profileID)
 	if err != nil || set.Harnesses.ClaudeCode.ActiveProfileID != profileID {
 		t.Fatalf("WithActiveProfileID(set) = %#v, %v", set.Harnesses.ClaudeCode, err)
+	}
+}
+
+func TestClientConfigUpdateHasNoServerOwnedFields(t *testing.T) {
+	value := configWithProfileForTest()
+	update, err := NewClientConfigUpdate(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"active_profile_id"`)) {
+		t.Fatalf("client update encoded a server-owned field: %s", encoded)
+	}
+	decoded, err := DecodeClientUpdate(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Config(), value.Normalize()) {
+		t.Fatalf("decoded client update = %#v, want %#v", decoded.Config(), value.Normalize())
+	}
+	value.Harnesses.ClaudeCode.ActiveProfileID = value.Harnesses.ClaudeCode.Profiles[0].ID
+	prepared, err := value.ApplyClientRequest(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Harnesses.ClaudeCode.ActiveProfileID != value.Harnesses.ClaudeCode.ActiveProfileID {
+		t.Fatalf("client request did not preserve active resource state: %q", prepared.Harnesses.ClaudeCode.ActiveProfileID)
+	}
+
+	if _, err := NewClientConfigUpdate(value); !errors.Is(err, ErrActiveProfileReadOnly) {
+		t.Fatalf("resource value accepted as client update: %v", err)
 	}
 }

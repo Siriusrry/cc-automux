@@ -145,6 +145,35 @@ func TestConfigAndProviderCRUDAndKeyRotation(t *testing.T) {
 	if got.Auth.ManagementKey != "management-key" {
 		t.Fatalf("GET config did not return full management key")
 	}
+	var resourceFields map[string]json.RawMessage
+	if err := json.Unmarshal(get.Body.Bytes(), &resourceFields); err != nil {
+		t.Fatal(err)
+	}
+	var resourceHarnesses map[string]json.RawMessage
+	if err := json.Unmarshal(resourceFields["harnesses"], &resourceHarnesses); err != nil {
+		t.Fatal(err)
+	}
+	var resourceClaude map[string]json.RawMessage
+	if err := json.Unmarshal(resourceHarnesses["claude_code"], &resourceClaude); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resourceClaude["active_profile_id"]; !ok {
+		t.Fatal("GET config omitted server-owned active_profile_id")
+	}
+	if rec := request(handler, http.MethodPut, "/api/v1/config", auth, get.Body.String()); rec.Code != http.StatusConflict {
+		t.Fatalf("resource response accepted as PUT request: %d %s", rec.Code, rec.Body.String())
+	}
+	clientUpdate, err := config.NewClientConfigUpdate(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientBody, err := json.Marshal(clientUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := request(handler, http.MethodPut, "/api/v1/config", auth, string(clientBody)); rec.Code != http.StatusOK {
+		t.Fatalf("client update without server-owned field = %d %s", rec.Code, rec.Body.String())
+	}
 
 	providerBody := `{"name":"test-provider","base_url":"https://provider.example/anthropic","api_key":"provider-key","models":["Model"],"enabled":true,"disable_health":true}`
 	created := request(handler, http.MethodPost, "/api/v1/providers", auth, providerBody)

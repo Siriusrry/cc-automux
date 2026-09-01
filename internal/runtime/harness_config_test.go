@@ -19,13 +19,17 @@ func TestHarnessRuntimePersistsActiveIDAndReconcilesClientUpdates(t *testing.T) 
 		OpusModel:   "opus",
 		FableModel:  "fable",
 	}
-	if _, err := manager.UpdateHarness(func(h *config.HarnessesConfig) error {
-		h.ClaudeCode.Profiles = []config.Profile{profile}
-		return nil
+	if err := manager.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		return tx.UpdateHarness(func(h *config.HarnessesConfig) error {
+			h.ClaudeCode.Profiles = []config.Profile{profile}
+			return nil
+		})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.SetActiveProfileID(profile.ID); err != nil {
+	if err := manager.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		return tx.SetActiveProfileID(profile.ID)
+	}); err != nil {
 		t.Fatalf("SetActiveProfileID() error = %v", err)
 	}
 	if got := manager.Config().Harnesses.ClaudeCode.ActiveProfileID; got != profile.ID {
@@ -67,13 +71,17 @@ func TestHarnessRuntimeRejectsClientAndServerActiveIDReplacement(t *testing.T) {
 		OpusModel:   "opus",
 		FableModel:  "fable",
 	}
-	if _, err := manager.UpdateHarness(func(h *config.HarnessesConfig) error {
-		h.ClaudeCode.Profiles = []config.Profile{profile}
-		return nil
+	if err := manager.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		return tx.UpdateHarness(func(h *config.HarnessesConfig) error {
+			h.ClaudeCode.Profiles = []config.Profile{profile}
+			return nil
+		})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.SetActiveProfileID(profile.ID); err != nil {
+	if err := manager.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		return tx.SetActiveProfileID(profile.ID)
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,9 +89,11 @@ func TestHarnessRuntimeRejectsClientAndServerActiveIDReplacement(t *testing.T) {
 	if _, err := manager.Apply(client); !errors.Is(err, config.ErrActiveProfileReadOnly) {
 		t.Fatalf("client active ID error = %v", err)
 	}
-	if _, err := manager.UpdateHarness(func(h *config.HarnessesConfig) error {
-		h.ClaudeCode.ActiveProfileID = "33333333-3333-4333-8333-333333333333"
-		return nil
+	if err := manager.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		return tx.UpdateHarness(func(h *config.HarnessesConfig) error {
+			h.ClaudeCode.ActiveProfileID = "33333333-3333-4333-8333-333333333333"
+			return nil
+		})
 	}); !errors.Is(err, config.ErrActiveProfileReadOnly) {
 		t.Fatalf("server active ID replacement error = %v", err)
 	}

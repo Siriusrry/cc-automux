@@ -164,13 +164,15 @@ func writeUnauthorized(w http.ResponseWriter) {
 func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// A GET is a complete resource response. It intentionally includes
+		// server-owned state such as active_profile_id for display.
 		writeJSON(w, http.StatusOK, h.manager.Snapshot().Config())
 	case http.MethodPut:
-		cfg, err := h.decodeConfig(w, r)
+		update, err := h.decodeClientConfigUpdate(w, r)
 		if err != nil {
 			return
 		}
-		result, err := h.manager.Apply(cfg)
+		result, err := h.manager.ApplyClientUpdate(update)
 		if err != nil {
 			h.writeApplyError(w, err)
 			return
@@ -610,17 +612,17 @@ func diagnosticResponse(item health.Diagnostic) healthDiagnosticResponse {
 	}
 }
 
-func (h *Handler) decodeConfig(w http.ResponseWriter, r *http.Request) (config.Config, error) {
+func (h *Handler) decodeClientConfigUpdate(w http.ResponseWriter, r *http.Request) (config.ClientConfigUpdate, error) {
 	data, err := readBody(w, r, h.maxBodyBytes)
 	if err != nil {
-		return config.Config{}, err
+		return config.ClientConfigUpdate{}, err
 	}
-	cfg, err := config.DecodeClient(data)
+	update, err := config.DecodeClientUpdate(data)
 	if err != nil {
 		h.writeDecodeError(w, err)
-		return config.Config{}, err
+		return config.ClientConfigUpdate{}, err
 	}
-	return cfg, nil
+	return update, nil
 }
 
 func (h *Handler) decodeProvider(w http.ResponseWriter, r *http.Request) (config.ProviderConfig, error) {

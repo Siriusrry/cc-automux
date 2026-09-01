@@ -76,16 +76,13 @@ type ConfigStore interface {
 	RemovePending() error
 }
 
-// HarnessConfigRuntime is the narrow runtime boundary used by the harness
-// configuration service. Harness mutations are scoped to the harness subtree;
-// the active profile ID has dedicated server-side operations and cannot be
-// changed through a client-style configuration update.
+// HarnessConfigRuntime is the read/transaction boundary used by the harness
+// configuration service. It intentionally exposes only the transaction form;
+// callers must use the transaction-scoped methods on config.HarnessMutation
+// and cannot accidentally acquire the Runtime lock a second time.
 type HarnessConfigRuntime interface {
 	Config() config.Config
 	WithHarnessMutation(func(config.HarnessMutation) error) error
-	UpdateHarness(func(*config.HarnessesConfig) error) (ApplyResult, error)
-	ClearActiveProfileID() (ApplyResult, error)
-	SetActiveProfileID(string) (ApplyResult, error)
 }
 
 // HarnessMutation is the transaction-scoped, server-side configuration
@@ -336,13 +333,30 @@ func (m *Manager) RestartStatus() RestartStatus {
 	return m.restartStatus
 }
 
-// Apply applies a complete client configuration transactionally. The
-// server-owned active profile ID is preserved or invalidated according to the
-// active-input comparison rules; clients cannot supply it directly.
+// Apply applies a complete in-process configuration value transactionally.
+// HTTP callers should use ApplyClientUpdate, whose request type cannot carry
+// the server-owned active profile ID.
 func (m *Manager) Apply(next config.Config) (ApplyResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.applyClientLocked(next)
+}
+
+// ApplyClientUpdate applies the client-owned portion of a configuration PUT.
+// The request object has no active profile field; the current server-owned
+// state is preserved or invalidated by the same atomic transaction.
+func (m *Manager) ApplyClientUpdate(update config.ClientConfigUpdate) (ApplyResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.restartStatus.InProgress {
+		return ApplyResult{}, ErrRestartInProgress
+	}
+	current := m.current.Load().Config()
+	prepared, err := current.ApplyClientRequest(update)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	return m.applyLocked(prepared)
 }
 
 // Update serializes read-modify-write operations such as Provider CRUD so two
@@ -368,30 +382,17 @@ func (m *Manager) Update(mutator func(*config.Config) error) (ApplyResult, error
 	return m.applyLocked(prepared)
 }
 
-// UpdateHarness serializes a server-side mutation of the harness subtree.
-// Changing an input that can make an active profile stale clears the active ID
-// in the same persisted configuration transaction. The mutator cannot write
-// the active ID directly; use SetActiveProfileID or ClearActiveProfileID for
-// that server-owned transition.
+// UpdateHarness performs a standalone server-side mutation of the harness
+// subtree. Callers already inside WithHarnessMutation must use the supplied
+// transaction instead; invoking this method from that callback would attempt
+// to acquire the same mutex again.
 func (m *Manager) UpdateHarness(mutator func(*config.HarnessesConfig) error) (ApplyResult, error) {
 	if mutator == nil {
 		return ApplyResult{}, errors.New("harness configuration mutator is required")
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.restartStatus.InProgress {
-		return ApplyResult{}, ErrRestartInProgress
-	}
-	current := m.current.Load().Config()
-	next := current.Clone()
-	if err := mutator(&next.Harnesses); err != nil {
-		return ApplyResult{}, err
-	}
-	prepared, err := current.ApplyServerUpdate(next)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	return m.applyLocked(prepared)
+	return m.Update(func(next *config.Config) error {
+		return mutator(&next.Harnesses)
+	})
 }
 
 // ProtectedConfigPaths returns the active and pending configuration paths when
@@ -438,14 +439,14 @@ func (m *Manager) PendingConfigPath() string {
 	return paths[1]
 }
 
-// ClearActiveProfileID atomically persists the server-owned inactive state.
+// ClearActiveProfileID performs a standalone server-owned active-state clear.
+// Use config.HarnessMutation.ClearActiveProfileID inside a transaction.
 func (m *Manager) ClearActiveProfileID() (ApplyResult, error) {
 	return m.setActiveProfileID("")
 }
 
-// SetActiveProfileID atomically persists a server-owned active profile ID.
-// The config package validates that the ID is canonical and references an
-// existing profile before the candidate can be published.
+// SetActiveProfileID performs a standalone server-owned active-state update.
+// Use config.HarnessMutation.SetActiveProfileID inside a transaction.
 func (m *Manager) SetActiveProfileID(id string) (ApplyResult, error) {
 	return m.setActiveProfileID(id)
 }
