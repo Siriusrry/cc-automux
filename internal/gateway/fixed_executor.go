@@ -22,11 +22,6 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
-const (
-	fixedResponsesPath  = ResponsesPath
-	fixedCompatiblePath = ChatCompletionsPath
-)
-
 type fixedDiagnosticContextKey struct{}
 
 // fixedLifecycle carries request-local ownership and terminal-event state
@@ -356,14 +351,18 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	}
 	own(prepared.BaseBody)
 	var execution *patch.Execution
+	closeExecution := func() error {
+		if execution == nil {
+			return nil
+		}
+		current := execution
+		execution = nil
+		return current.Close()
+	}
 	lifecycle := &fixedLifecycle{}
 	upstream := ""
 	lifecycle.cleanup = func() error {
-		patchErr := error(nil)
-		if execution != nil {
-			patchErr = execution.Close()
-			execution = nil
-		}
+		patchErr := closeExecution()
 		bodyErr := errors.Join(lifecycle.closeRequestBody(), closeFixedBodies(ownedBodies...))
 		lifecycle.mu.Lock()
 		lifecycle.bodyErr = bodyErr
@@ -661,7 +660,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		h.handleFixedUpstreamFailure(ctx, w, response, target, sessionID, model, upstream, execution)
+		h.handleFixedUpstreamFailure(ctx, w, response, target, sessionID, model, upstream)
 		return
 	}
 
@@ -712,19 +711,21 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 
 	if target.PatchPlan.HasStage(patch.StageResponse, prepared.Plan.RequestType) {
 		h.finishFixedPatchedResponse(w, ctx, target, sessionID, model, upstream,
-			response.StatusCode, response.Header, decoded, rawBody, execution, own)
+			response.StatusCode, response.Header, decoded, rawBody, execution, closeExecution, own)
 		return
 	}
-	if err := execution.Close(); err != nil {
-		execution = nil
+	if err := closeExecution(); err != nil {
 		rawText, rawErr := fixedBodyText(rawBody)
 		err = errors.Join(err, rawErr)
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch failed", err, response.StatusCode, response.Header, "", rawText)
 		return
 	}
-	execution = nil
-	h.streamFixedBody(w, ctx, target, sessionID, model, upstream, response.StatusCode, response.StatusCode, decoded.Body, decoded.Headers)
+	responseHeaders := decoded.Headers
+	if adapter != nil {
+		responseHeaders = fixedRepresentationHeaders(responseHeaders, decoded.Body)
+	}
+	h.streamFixedBody(w, ctx, target, sessionID, model, upstream, response.StatusCode, response.StatusCode, decoded.Body, responseHeaders)
 }
 
 func requestURL(request *http.Request) *url.URL {
@@ -737,7 +738,7 @@ func requestURL(request *http.Request) *url.URL {
 // handleFixedUpstreamFailure reads the complete non-2xx response, records raw
 // upstream facts, and either preserves or maps the client-facing status.
 // DecodeResponse and response patches are deliberately not called here.
-func (h *Handler) handleFixedUpstreamFailure(ctx context.Context, w http.ResponseWriter, response *http.Response, target *provider.CompiledFixedTarget, sessionID, model, upstream string, execution *patch.Execution) {
+func (h *Handler) handleFixedUpstreamFailure(ctx context.Context, w http.ResponseWriter, response *http.Response, target *provider.CompiledFixedTarget, sessionID, model, upstream string) {
 	if response == nil {
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"bad_gateway", "fixed target returned no response", errors.New("nil upstream response"), 0, nil, "", "")
@@ -774,7 +775,7 @@ func (h *Handler) handleFixedUpstreamFailure(ctx context.Context, w http.Respons
 		facts.status, facts.headers, string(data))
 }
 
-func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status int, upstreamHeaders http.Header, decoded protocol.ProtocolMessage, rawUpstream bodyfile.Body, execution *patch.Execution, own func(bodyfile.Body)) {
+func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status int, upstreamHeaders http.Header, decoded protocol.ProtocolMessage, rawUpstream bodyfile.Body, execution *patch.Execution, closeExecution func() error, own func(bodyfile.Body)) {
 	if decoded.Body == nil {
 		rawText, rawErr := fixedBodyText(rawUpstream)
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
@@ -848,7 +849,7 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 			"patch_failed", "fixed target response patch failed", errors.Join(err, rawErr), status, upstreamHeaders, "", rawText)
 		return
 	}
-	if err := execution.Close(); err != nil {
+	if err := closeExecution(); err != nil {
 		rawText, rawErr := fixedBodyText(rawUpstream)
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch failed", errors.Join(err, rawErr), status, upstreamHeaders, "", rawText)
@@ -858,10 +859,16 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 		h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, status, upstreamHeaders, "", contextError(ctx, nil))
 		return
 	}
+	headers = fixedRepresentationHeaders(headers, mutable.Body)
+	h.streamFixedBody(w, ctx, target, sessionID, model, upstream, mutable.Status, status, mutable.Body, headers)
+}
+
+func fixedRepresentationHeaders(headers http.Header, body bodyfile.Body) http.Header {
+	headers = cloneOrEmptyHeaders(headers)
 	deleteHeaderFold(headers, "Content-Encoding")
 	deleteHeaderFold(headers, "Content-Length")
-	headers.Set("Content-Length", strconv.FormatInt(mutable.Body.Size(), 10))
-	h.streamFixedBody(w, ctx, target, sessionID, model, upstream, mutable.Status, status, mutable.Body, headers)
+	headers.Set("Content-Length", strconv.FormatInt(body.Size(), 10))
+	return headers
 }
 
 func responseScanSpecForFixed(target *provider.CompiledFixedTarget) (bodyfile.ScanSpec, error) {
@@ -1061,16 +1068,6 @@ func fixedTransportError(error) (string, int) {
 	return "bad_gateway", http.StatusBadGateway
 }
 
-// fixedTerminal is retained as a small compatibility helper for package-local
-// callers; production execution uses fixedTerminalForModel so diagnostics keep
-// the effective classifier model.
-func (h *Handler) fixedTerminal(w http.ResponseWriter, base bodyfile.Body, target *provider.CompiledFixedTarget, sessionID, upstream string, status int, code, message string, cause error, upstreamStatus int, upstreamHeaders http.Header, patchInfo string) {
-	h.fixedTerminalForModel(w, "", target, sessionID, upstream, status, code, message, cause, upstreamStatus, upstreamHeaders, patchInfo)
-	if base != nil {
-		_ = base.Close()
-	}
-}
-
 // fixedTerminalForContext applies the client-cancellation boundary before a
 // local error is exposed. Once a fixed call has started, cancellation is still
 // recorded as a failure, but no response status is written to the closed
@@ -1085,10 +1082,6 @@ func (h *Handler) fixedTerminalForContext(ctx context.Context, w http.ResponseWr
 		return
 	}
 	h.fixedTerminalForModelWithRaw(ctx, w, model, target, sessionID, upstream, status, code, message, cause, upstreamStatus, upstreamHeaders, patchInfo, upstreamBody)
-}
-
-func (h *Handler) fixedTerminalForModel(w http.ResponseWriter, model string, target *provider.CompiledFixedTarget, sessionID, upstream string, status int, code, message string, cause error, upstreamStatus int, upstreamHeaders http.Header, patchInfo string) {
-	h.fixedTerminalForModelWithRaw(context.Background(), w, model, target, sessionID, upstream, status, code, message, cause, upstreamStatus, upstreamHeaders, patchInfo, "")
 }
 
 func (h *Handler) fixedTerminalForModelWithRaw(ctx context.Context, w http.ResponseWriter, model string, target *provider.CompiledFixedTarget, sessionID, upstream string, status int, code, message string, cause error, upstreamStatus int, upstreamHeaders http.Header, patchInfo, upstreamBody string) {
@@ -1178,10 +1171,6 @@ func fixedBodyText(body bodyfile.Body) (string, error) {
 	return string(data), errors.Join(readErr, closeErr)
 }
 
-func (h *Handler) fixedTerminalAfterWrite(ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status, upstreamStatus int, cause error) {
-	h.fixedTerminalAfterWriteWithFacts(ctx, target, sessionID, model, upstream, status, upstreamStatus, nil, "", cause)
-}
-
 func (h *Handler) fixedTerminalAfterWriteWithFacts(ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status, upstreamStatus int, upstreamHeaders http.Header, upstreamBody string, cause error) {
 	lifecycle := fixedLifecycleFromContext(ctx)
 	if lifecycle != nil && !lifecycle.beginTerminal() {
@@ -1250,10 +1239,6 @@ func (h *Handler) fixedSuccess(ctx context.Context, target *provider.CompiledFix
 	}
 	h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: status, UpstreamStatus: upstreamStatus, SessionID: sessionID})
 	h.recordFixedEvent(EventSuccess, target, sessionID, model, upstream, 1, upstreamStatus, "")
-}
-
-func (h *Handler) fixedCanceled(ctx context.Context, target *provider.CompiledFixedTarget, model, sessionID, upstream string, cause error) {
-	h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, 0, nil, "", cause)
 }
 
 func (h *Handler) fixedCanceledWithFacts(ctx context.Context, target *provider.CompiledFixedTarget, model, sessionID, upstream string, upstreamStatus int, upstreamHeaders http.Header, upstreamBody string, cause error) {

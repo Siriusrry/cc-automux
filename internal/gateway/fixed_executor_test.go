@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -260,6 +261,7 @@ func TestFixedExecutionAnthropicMessagesSkipsProtocolAdapter(t *testing.T) {
 			t.Errorf("Authorization = %q", request.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "identity")
 		_, _ = io.WriteString(w, `{"type":"message","content":[]}`)
 	}))
 	defer upstream.Close()
@@ -272,6 +274,9 @@ func TestFixedExecutionAnthropicMessagesSkipsProtocolAdapter(t *testing.T) {
 	if response.Code != http.StatusOK || response.Body.String() != `{"type":"message","content":[]}` {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
+	if response.Header().Get("Content-Encoding") != "identity" {
+		t.Fatalf("Content-Encoding = %q, want direct upstream value", response.Header().Get("Content-Encoding"))
+	}
 	if gotPath != MessagesPath || gotQuery != "beta=true&beta=false" {
 		t.Fatalf("upstream URL path/query = %q?%s", gotPath, gotQuery)
 	}
@@ -280,6 +285,50 @@ func TestFixedExecutionAnthropicMessagesSkipsProtocolAdapter(t *testing.T) {
 	}
 	if encodeCalls.Load() != 0 || decodeCalls.Load() != 0 {
 		t.Fatalf("adapter calls encode=%d decode=%d", encodeCalls.Load(), decodeCalls.Load())
+	}
+}
+
+func TestFixedExecutionConvertedResponseRebuildsRepresentationHeaders(t *testing.T) {
+	const converted = `{"type":"message","content":[{"type":"text","text":"converted"}]}`
+	decoded := fixedTestTrackingBody(t, converted)
+	adapter := &fixedTestAdapter{
+		protocol: config.ProtocolOpenAIResponses,
+		encode: func(body bodyfile.Body, headers http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{Body: body, Headers: headers}, nil
+		},
+		decode: func(bodyfile.Body, http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{
+				Body: decoded,
+				Headers: http.Header{
+					"Content-Encoding": []string{"gzip"},
+					"Content-Length":   []string{"1"},
+					"X-Converted":      []string{"yes"},
+				},
+			}, nil
+		},
+	}
+	registry, err := protocol.NewRegistry(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"wire":true}`)
+	}))
+	defer upstream.Close()
+	handler := NewWithOptions(nil, &fakeSelector{}, Options{ProtocolAdapters: registry})
+	defer handler.Close()
+	response := httptest.NewRecorder()
+	handler.forwardFixedExecution(response, fixedTestIncoming(""), nil,
+		fixedTestExecutionPlan(t, fixedTestTarget(t, upstream.URL, config.ProtocolOpenAIResponses, patch.Plan{})))
+
+	if response.Code != http.StatusOK || response.Body.String() != converted || response.Header().Get("X-Converted") != "yes" {
+		t.Fatalf("response = %d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	if got := response.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty", got)
+	}
+	if got, want := response.Header().Get("Content-Length"), strconv.Itoa(len(converted)); got != want {
+		t.Fatalf("Content-Length = %q, want %q", got, want)
 	}
 }
 
