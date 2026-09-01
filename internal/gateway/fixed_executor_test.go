@@ -990,3 +990,56 @@ func fixedTestIncoming(rawQuery string) *http.Request {
 	request.Header.Set("Content-Type", "application/json")
 	return request
 }
+
+func TestFixedExecutionPinsUncompressedUpstreamOnlyWhenRewritingResponse(t *testing.T) {
+	adapter := &fixedTestAdapter{
+		protocol: config.ProtocolOpenAIResponses,
+		encode: func(body bodyfile.Body, headers http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{Body: body, Headers: headers}, nil
+		},
+		decode: func(body bodyfile.Body, headers http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{Body: body, Headers: headers}, nil
+		},
+	}
+	registry, err := protocol.NewRegistry(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name        string
+		protocolID  string
+		responsable bool
+		want        string
+	}{
+		{"anthropic passthrough keeps client negotiation", config.ProtocolAnthropicMessages, false, "gzip"},
+		{"anthropic response patch pins identity", config.ProtocolAnthropicMessages, true, "identity"},
+		{"protocol conversion pins identity", config.ProtocolOpenAIResponses, false, "identity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var received http.Header
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				received = request.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"type":"message","content":[]}`)
+			}))
+			defer upstream.Close()
+			plan := patch.Plan{}
+			if test.responsable {
+				plan = fixedTestPatchPlan(t, nil, fixedTestResponsePatch(func(patch.PatchContext, *patch.MutableResponse) error { return nil }))
+			}
+			target := fixedTestTarget(t, upstream.URL, test.protocolID, plan)
+			handler := NewWithOptions(nil, &fakeSelector{}, Options{ProtocolAdapters: registry})
+			defer handler.Close()
+			response := httptest.NewRecorder()
+			incoming := fixedTestIncoming("")
+			incoming.Header.Set("Accept-Encoding", "gzip")
+			handler.forwardFixedExecution(response, incoming, nil, fixedTestExecutionPlan(t, target))
+			if response.Code != http.StatusOK {
+				t.Fatalf("response = %d %q", response.Code, response.Body.String())
+			}
+			if got := received.Get("Accept-Encoding"); got != test.want {
+				t.Fatalf("upstream Accept-Encoding = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

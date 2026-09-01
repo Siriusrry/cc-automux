@@ -95,6 +95,22 @@ func prepareUpstreamHeaders(source http.Header, item *provider.CompiledProvider)
 	return headers, nil
 }
 
+// forceUncompressedUpstreamResponse pins the upstream response to an
+// unencoded representation for targets whose response this gateway will
+// rewrite. A rewritten response has to be parsed as JSON, and the gateway
+// never decodes a transfer encoding, so an upstream that honored the client's
+// gzip negotiation would make protocol conversion or a response patch fail on
+// compressed bytes. An absent Accept-Encoding would leave any coding
+// acceptable, so the value is set explicitly rather than deleted. Pure
+// passthrough requests keep the client's own negotiation untouched.
+func forceUncompressedUpstreamResponse(headers http.Header) {
+	if headers == nil {
+		return
+	}
+	deleteHeaderFold(headers, "Accept-Encoding")
+	headers.Set("Accept-Encoding", "identity")
+}
+
 func copyResponseHeaders(destination http.Header, source http.Header) {
 	headers := source.Clone()
 	removeHopByHop(headers)

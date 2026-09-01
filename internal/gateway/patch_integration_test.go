@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -495,7 +496,8 @@ func TestGatewayExplicitClassifierPlanRunsGPTRequestAndResponseHooks(t *testing.
 	request.Header.Set("Accept-Encoding", "gzip")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || acceptEncoding != "" || response.Header().Get("Content-Encoding") != "" || response.Header().Get("X-Upstream") != "kept" {
+	// The gateway, not the response hook, pins the upstream representation.
+	if response.Code != http.StatusOK || acceptEncoding != "identity" || response.Header().Get("Content-Encoding") != "" || response.Header().Get("X-Upstream") != "kept" {
 		t.Fatalf("response=%d headers=%v accept_encoding=%q body=%s", response.Code, response.Header(), acceptEncoding, response.Body.String())
 	}
 	if length, err := strconv.Atoi(response.Header().Get("Content-Length")); err != nil || length != response.Body.Len() {
@@ -636,5 +638,100 @@ func TestGatewayGPTResponsePatchHandlesMoreThan64MiB(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(tempDir); err != nil || len(entries) != 0 {
 		t.Fatalf("temporary response bodies remain: %v, err=%v", entries, err)
+	}
+}
+
+func TestGatewayPinsUncompressedUpstreamOnlyWhenRewritingResponse(t *testing.T) {
+	const responsePatchID = "test-response-compression"
+	registry, err := patch.NewRegistry([]patch.PatchDefinition{{
+		ID:            responsePatchID,
+		Name:          responsePatchID,
+		Description:   "response hook that requires a parseable upstream body",
+		RequestTypes:  []patch.RequestType{patch.RequestTypeNormal},
+		Stages:        []patch.Stage{patch.StageResponse},
+		Conflicts:     []string{},
+		ResponsePaths: []string{"/ok"},
+		Idempotence:   patch.Idempotent,
+		Factory: func(patch.FactoryContext) (patch.PatchInstance, error) {
+			return patch.NewHooksInstance(patch.Hooks{Response: responsePatchFunc(func(_ patch.PatchContext, response *patch.MutableResponse) error {
+				if _, ok := response.Index().Lookup("/ok"); !ok {
+					return errors.New("response body was not scannable")
+				}
+				response.Headers.Set("X-Response-Patched", "true")
+				return nil
+			})}), nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const payload = `{"ok":true}`
+	for _, test := range []struct {
+		name       string
+		patchIDs   []string
+		wantAccept string
+		wantCoding string
+	}{
+		{"response patch forces an unencoded upstream body", []string{responsePatchID}, "identity", ""},
+		{"passthrough preserves the client negotiation", nil, "gzip", "gzip"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var received http.Header
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				received = request.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				if !strings.Contains(request.Header.Get("Accept-Encoding"), "gzip") {
+					_, _ = io.WriteString(w, payload)
+					return
+				}
+				w.Header().Set("Content-Encoding", "gzip")
+				writer := gzip.NewWriter(w)
+				_, _ = io.WriteString(writer, payload)
+				if closeErr := writer.Close(); closeErr != nil {
+					t.Errorf("close gzip writer: %v", closeErr)
+				}
+			}))
+			defer upstream.Close()
+			item := compileWithRegistry(t, registry, "11111111-1111-4111-8111-111111111111", "compression", upstream.URL, "key", "m", test.patchIDs...)
+			selector := &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(item, "m")}}
+			handler := New(func() scheduler.Snapshot {
+				return &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}}
+			}, selector)
+			defer handler.Close()
+			request := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`)
+			request.Header.Set("Accept-Encoding", "gzip")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("response = %d %q", response.Code, response.Body.String())
+			}
+			if got := received.Get("Accept-Encoding"); got != test.wantAccept {
+				t.Fatalf("upstream Accept-Encoding = %q, want %q", got, test.wantAccept)
+			}
+			if got := response.Header().Get("Content-Encoding"); got != test.wantCoding {
+				t.Fatalf("client Content-Encoding = %q, want %q", got, test.wantCoding)
+			}
+			body := response.Body.Bytes()
+			if test.wantCoding == "gzip" {
+				reader, gzipErr := gzip.NewReader(bytes.NewReader(body))
+				if gzipErr != nil {
+					t.Fatalf("client body is not gzip: %v", gzipErr)
+				}
+				body, gzipErr = io.ReadAll(reader)
+				if gzipErr != nil {
+					t.Fatal(gzipErr)
+				}
+				if closeErr := reader.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
+			}
+			if string(body) != payload {
+				t.Fatalf("client body = %q, want %q", string(body), payload)
+			}
+			patched := response.Header().Get("X-Response-Patched") == "true"
+			if want := len(test.patchIDs) > 0; patched != want {
+				t.Fatalf("response patch applied = %v, want %v", patched, want)
+			}
+		})
 	}
 }

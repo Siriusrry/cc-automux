@@ -813,8 +813,10 @@ func TestGPTClassifierResponseReassembly(t *testing.T) {
 	if err := execution.ApplyRequestOnly(request); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := requestHeaders.Get("Accept-Encoding"); ok {
-		t.Fatal("Accept-Encoding not removed")
+	// Transfer encoding belongs to the gateway, not to a patch: the hook must
+	// leave the client's negotiation header exactly as it found it.
+	if value, ok := requestHeaders.Get("Accept-Encoding"); !ok || value != "gzip" {
+		t.Fatalf("Accept-Encoding = %q present=%v, want the hook to leave it untouched", value, ok)
 	}
 	responseHeaders := NewHTTPHeaderSet(http.Header{"Content-Encoding": []string{"gzip"}})
 	response := selectiveResponse(t, plan, RequestTypeClassifier, 200, `{"type":"message","model":"m","content":[{"type":"thinking","thinking":"secret"},{"type":"text","text":"<block>yes</block><reason>x</reason>"},{"type":"text","text":"discard"}],"stop_reason":"end_turn","stop_sequence":null}`, responseHeaders.Header)

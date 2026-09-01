@@ -540,6 +540,13 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	deleteCredentialHeaders(requestHeaders)
 	deleteHeaderFold(requestHeaders, "Content-Length")
 	deleteHeaderFold(requestHeaders, "Host")
+	// A converted response is decoded, and a patched response is scanned; both
+	// need the upstream representation unencoded. Decided after request patches
+	// and after Encode so neither can reintroduce compression.
+	_, patchesResponse := target.PatchPlan.ResponseScanSpec(prepared.Plan.RequestType)
+	if adapter != nil || patchesResponse {
+		forceUncompressedUpstreamResponse(requestHeaders)
+	}
 	if err := target.ApplyAuthHeaders(requestHeaders); err != nil {
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"bad_gateway", "fixed target request could not be authenticated", err, 0, nil, "", "")

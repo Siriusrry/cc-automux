@@ -29,7 +29,9 @@ func (p *gptClassifierResponsePatch) ApplyRequest(_ PatchContext, request *Mutab
 	if request.Headers == nil {
 		request.Headers = NewHTTPHeaderSet(nil)
 	}
-	request.Headers.Delete("Accept-Encoding")
+	// Transfer encoding is not this hook's concern: the gateway owns the
+	// upstream Accept-Encoding negotiation for every call whose response it
+	// will rewrite, so reassembly always receives an unencoded body.
 	index, err := requestIndex(request)
 	if err != nil {
 		return err

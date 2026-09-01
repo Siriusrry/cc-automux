@@ -336,6 +336,11 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	if err != nil {
 		return h.requestPatchFailure(w, base, lease, sessionID, attempt, url.String(), execution, mutable.Body, err)
 	}
+	// Decided after request patches so a hook cannot reintroduce a compressed
+	// representation that the response patch would then fail to parse.
+	if _, rewritesResponse := item.PatchPlan.ResponseScanSpec(prepared.Plan.RequestType); rewritesResponse {
+		forceUncompressedUpstreamResponse(outboundHeaders)
+	}
 	if err := item.ApplyAuthHeaders(outboundHeaders); err != nil {
 		cleanupErr := closeRequestAttempt(base, mutable.Body, execution, false)
 		return nil, h.terminalLocalAttempt(w, base, lease, sessionID, attempt, url.String(), http.StatusBadGateway, "bad_gateway", "provider request could not be authenticated", errors.Join(err, cleanupErr), "", "")
