@@ -27,7 +27,11 @@ func newPlan(definitions []PatchDefinition, services Services) (Plan, error) {
 		services:     services,
 		responseScan: make(map[RequestType]*bodyfile.CompiledScanSpec),
 	}
-	for _, requestType := range []RequestType{RequestTypeNormal, RequestTypeClassifier} {
+	// Enumerating the authoritative supported-type list is what keeps a
+	// precompiled contract from silently going missing: any type a definition
+	// may legally declare is a type compiled here, so a caller can treat a
+	// missing entry as "no response hook" rather than "not prepared".
+	for _, requestType := range supportedRequestTypes {
 		if !plan.HasStage(StageResponse, requestType) {
 			continue
 		}

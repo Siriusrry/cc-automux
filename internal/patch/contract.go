@@ -272,17 +272,33 @@ func newHooksInstance(h Hooks) PatchInstance { return hooksInstance{Hooks: h} }
 // registries and focused tests.
 func NewHooksInstance(h Hooks) PatchInstance { return newHooksInstance(h) }
 
-func validRequestType(t RequestType) bool {
-	// The registry currently has two concrete flows plus the wildcard metadata
-	// value. Future request types must be added with their traffic/flow contracts
-	// before a patch definition can reference them; silently accepting an
-	// arbitrary string would create a discoverable-but-unexecutable patch.
-	switch t {
-	case RequestTypeNormal, RequestTypeClassifier, RequestTypeAny:
-		return true
-	default:
-		return false
+// supportedRequestTypes is the single authoritative list of concrete request
+// types this build can execute. Definition validation and every precompiled
+// per-type artifact derive from it, so a new flow is added here exactly once,
+// alongside its Detector/Planner registration. Accepting an arbitrary string
+// instead would create a discoverable-but-unexecutable patch, and enumerating
+// the types a second time elsewhere would let a precomputed artifact silently
+// omit a type that definitions may legally declare.
+var supportedRequestTypes = []RequestType{RequestTypeNormal, RequestTypeClassifier}
+
+// SupportedRequestTypes returns a copy of the concrete request types this build
+// supports. The wildcard metadata value is deliberately excluded: it selects
+// every entry of this list rather than being a type of its own.
+func SupportedRequestTypes() []RequestType {
+	return append([]RequestType(nil), supportedRequestTypes...)
+}
+
+func supportedRequestType(t RequestType) bool {
+	for _, supported := range supportedRequestTypes {
+		if t == supported {
+			return true
+		}
 	}
+	return false
+}
+
+func validRequestType(t RequestType) bool {
+	return t == RequestTypeAny || supportedRequestType(t)
 }
 
 func validStage(s Stage) bool { return s == StageRequest || s == StageResponse }

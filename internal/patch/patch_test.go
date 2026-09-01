@@ -1179,3 +1179,59 @@ func TestExecutionReturnsStructuredHookError(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanResponseScanCoversEverySupportedRequestType(t *testing.T) {
+	supported := SupportedRequestTypes()
+	if len(supported) == 0 {
+		t.Fatal("supported request types must not be empty")
+	}
+	definition := PatchDefinition{
+		ID:            "wildcard-response-scan",
+		Name:          "wildcard-response-scan",
+		RequestTypes:  []RequestType{RequestTypeAny},
+		Stages:        []Stage{StageResponse},
+		ResponsePaths: []string{"/content"},
+		Idempotence:   Idempotent,
+		Factory: func(FactoryContext) (PatchInstance, error) {
+			return NewHooksInstance(Hooks{Response: failingResponsePatch{}}), nil
+		},
+	}
+	registry, err := NewRegistry([]PatchDefinition{definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := registry.Compile([]string{definition.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A hook applicable to every type must have a compiled contract for every
+	// type the build supports; otherwise a future flow would silently skip its
+	// response patches instead of failing.
+	for _, requestType := range supported {
+		spec, ok := plan.ResponseScanSpec(requestType)
+		if !ok || spec == nil {
+			t.Fatalf("response scan contract missing for supported request type %q", requestType)
+		}
+	}
+
+	scoped := definition
+	scoped.ID = "normal-only-response-scan"
+	scoped.Name = "normal-only-response-scan"
+	scoped.RequestTypes = []RequestType{RequestTypeNormal}
+	scopedRegistry, err := NewRegistry([]PatchDefinition{scoped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopedPlan, err := scopedRegistry.Compile([]string{scoped.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The complement of the invariant: a missing contract always means "this
+	// plan has no response hook for that type", never "it was not prepared".
+	for _, requestType := range supported {
+		_, ok := scopedPlan.ResponseScanSpec(requestType)
+		if want := requestType == RequestTypeNormal; ok != want {
+			t.Fatalf("response scan contract for %q present = %v, want %v", requestType, ok, want)
+		}
+	}
+}
