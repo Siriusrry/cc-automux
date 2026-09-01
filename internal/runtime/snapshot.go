@@ -142,17 +142,20 @@ func (s *Snapshot) AutoMode() flow.AutoModeSnapshot {
 	if s == nil {
 		return flow.AutoModeSnapshot{}
 	}
-	auto := s.autoMode.Clone()
+	// Snapshot publication has already cloned and validated the target.  The
+	// flow boundary is read-only, so return that immutable runtime object
+	// directly instead of deep-copying its URL/TLS state on every request.
 	return flow.AutoModeSnapshot{
-		Mode:            auto.Mode,
-		ClassifierModel: auto.ClassifierModel,
-		FixedTarget:     auto.FixedTarget,
+		Mode:            s.autoMode.Mode,
+		ClassifierModel: s.autoMode.ClassifierModel,
+		FixedTarget:     s.autoMode.FixedTarget,
 	}
 }
 
 // CompiledAutoMode returns a defensive copy of the precompiled Auto Mode
-// state.  It is useful to execution/management boundaries that need the
-// protocol identifier while flow planners consume the smaller flow contract.
+// state. It is the copy boundary for management or diagnostic callers that
+// need to mutate an inspection value; flow planners use AutoMode, which shares
+// the immutable published target.
 func (s *Snapshot) CompiledAutoMode() CompiledAutoMode {
 	if s == nil {
 		return CompiledAutoMode{}

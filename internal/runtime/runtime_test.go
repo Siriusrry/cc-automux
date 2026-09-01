@@ -172,7 +172,7 @@ func TestSnapshotCompilesAutoModeAndFixedTargetAcrossHotUpdates(t *testing.T) {
 	}
 }
 
-func TestSnapshotAutoModeReturnsDefensiveFixedTargetCopies(t *testing.T) {
+func TestSnapshotAutoModeSharesPublishedFixedTarget(t *testing.T) {
 	manager, _, cfg := newRuntimeManager(t, Options{})
 	next := cfg.Clone()
 	next.AutoMode = config.AutoModeConfig{Mode: config.AutoModeFixedProvider, Model: "classifier-model", FixedProvider: &config.FixedProviderConfig{
@@ -186,13 +186,16 @@ func TestSnapshotAutoModeReturnsDefensiveFixedTargetCopies(t *testing.T) {
 	}
 	snapshot := manager.Snapshot()
 	first := snapshot.AutoMode()
-	first.FixedTarget.BaseURL.Host = "mutated.invalid"
-	first.FixedTarget.TLS.InsecureSkipVerify = false
+	again := snapshot.AutoMode()
+	if first.FixedTarget == nil || again.FixedTarget != first.FixedTarget {
+		t.Fatal("AutoMode returned a per-call fixed-target copy")
+	}
+	// CompiledAutoMode is the explicit defensive-copy boundary for callers that
+	// need to inspect or mutate a detached runtime value.
 	compiled := snapshot.CompiledAutoMode()
 	compiled.FixedTarget.BaseURL.Path = "/mutated"
 	compiled.FixedTarget.TLS.ServerName = "mutated.invalid"
 
-	again := snapshot.AutoMode()
 	if again.FixedTarget.URLString() != next.AutoMode.FixedProvider.BaseURL {
 		t.Fatalf("snapshot fixed URL was mutated: %q", again.FixedTarget.URLString())
 	}

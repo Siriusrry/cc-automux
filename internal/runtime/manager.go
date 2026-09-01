@@ -185,8 +185,9 @@ func (m *Manager) Snapshot() *Snapshot {
 	if current == nil {
 		return &Snapshot{}
 	}
-	// Snapshot itself is immutable and its getters are defensive, so sharing the
-	// pointer is safe and avoids rebuilding a catalog on every request.
+	// Snapshot itself is immutable; ordinary data getters are defensive and the
+	// AutoMode flow view references the already-published immutable target. Sharing
+	// the pointer avoids rebuilding runtime objects on every request.
 	return current
 }
 
