@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
@@ -33,6 +34,11 @@ type fakeSnapshot struct {
 	attemptPolicyCalls atomic.Int32
 	providers          []*provider.CompiledProvider
 	providerCalls      atomic.Int32
+	scanOnce           sync.Once
+	scanPaths          []string
+	rawMarkers         []string
+	fixedTarget        *provider.CompiledFixedTarget
+	requestScan        *bodyfile.CompiledScanSpec
 }
 
 func (s *fakeSnapshot) Revision() uint64 { return s.revision }
@@ -58,6 +64,58 @@ func (s *fakeSnapshot) Candidates(model string) []*provider.CompiledProvider {
 func (s *fakeSnapshot) Providers() []*provider.CompiledProvider {
 	s.providerCalls.Add(1)
 	return append([]*provider.CompiledProvider(nil), s.providers...)
+}
+
+func (s *fakeSnapshot) RequestScanSpec() *bodyfile.CompiledScanSpec {
+	if s == nil {
+		return nil
+	}
+	s.scanOnce.Do(func() {
+		paths := append([]string(nil), s.scanPaths...)
+		for _, item := range s.providers {
+			if item == nil || !item.Enabled || len(item.Models) == 0 {
+				continue
+			}
+			for _, requestType := range []traffic.RequestType{traffic.RequestTypeNormal, traffic.RequestTypeClassifier} {
+				required, err := item.PatchPlan.RequiredPaths(patch.StageRequest, requestType)
+				if err != nil {
+					panic(err)
+				}
+				paths = appendFakeScanPaths(paths, required...)
+			}
+		}
+		if s.fixedTarget != nil {
+			required, err := s.fixedTarget.PatchPlan.RequiredPaths(patch.StageRequest, traffic.RequestTypeClassifier)
+			if err != nil {
+				panic(err)
+			}
+			paths = appendFakeScanPaths(paths, required...)
+		}
+		spec, err := bodyfile.RequestScanSpecWithRawMarkers(paths, s.rawMarkers...)
+		if err != nil {
+			panic(err)
+		}
+		s.requestScan, err = bodyfile.CompileScanSpec(spec)
+		if err != nil {
+			panic(err)
+		}
+	})
+	return s.requestScan
+}
+
+func appendFakeScanPaths(paths []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(paths)+len(additions))
+	for _, path := range paths {
+		seen[path] = struct{}{}
+	}
+	for _, path := range additions {
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 type fakeSelector struct {
@@ -240,23 +298,16 @@ func TestRequestScanSpecUsesOnlyReachableProviderPlans(t *testing.T) {
 	disabled.Enabled = false
 	noModels := compileTestProviderWithPatches(t, "33333333-3333-4333-8333-333333333333", "no-models", "https://empty.example", "key", "m", false, patch.AnyRouterSubagentThinkingID)
 	noModels.Models = nil
-	handler := NewWithOptions(nil, nil, Options{})
-	paths, err := handler.requestScanSpec(&fakeSnapshot{providers: []*provider.CompiledProvider{active, disabled, noModels}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !containsPath(paths.Paths, "/thinking/type") {
-		t.Fatalf("active provider path missing: %#v", paths)
+	snapshot := &fakeSnapshot{providers: []*provider.CompiledProvider{active, disabled, noModels}}
+	if !fakeSnapshotRetainsPath(t, snapshot, "/thinking/type") {
+		t.Fatal("active provider path missing")
 	}
 	// The active provider still contributes the path; remove it and ensure the
 	// same disabled/no-model plans cannot do so on their own.
 	active.Enabled = false
-	paths, err = handler.requestScanSpec(&fakeSnapshot{providers: []*provider.CompiledProvider{active, disabled, noModels}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if containsPath(paths.Paths, "/thinking/type") {
-		t.Fatalf("unreachable provider path retained: %#v", paths)
+	snapshot = &fakeSnapshot{providers: []*provider.CompiledProvider{active, disabled, noModels}}
+	if fakeSnapshotRetainsPath(t, snapshot, "/thinking/type") {
+		t.Fatal("unreachable provider path retained")
 	}
 }
 
@@ -286,31 +337,29 @@ func TestRequestScanSpecIncludesFixedClassifierTargetRequestPaths(t *testing.T) 
 	}
 	target := &provider.CompiledFixedTarget{PatchPlan: plan, Protocol: config.ProtocolOpenAIResponses}
 	snapshot := &fixedTargetScanSnapshot{
-		fakeSnapshot: &fakeSnapshot{revision: 1, gatewayKey: "gateway"},
+		fakeSnapshot: &fakeSnapshot{revision: 1, gatewayKey: "gateway", fixedTarget: target},
 		auto:         flow.AutoModeSnapshot{Mode: "fixed_provider", FixedTarget: target},
 	}
-	handler := NewWithOptions(nil, nil, Options{})
-	paths, err := handler.requestScanSpec(snapshot)
-	if err != nil {
-		t.Fatal(err)
+	if !fakeSnapshotRetainsPath(t, snapshot.fakeSnapshot, "/system/0/text") || !fakeSnapshotRetainsPath(t, snapshot.fakeSnapshot, "/stop_sequences/0") {
+		t.Fatal("fixed-target request paths missing")
 	}
-	if !containsPath(paths.Paths, "/system/*/text") || !containsPath(paths.Paths, "/stop_sequences/*") {
-		t.Fatalf("fixed-target request paths missing: %#v", paths.Paths)
-	}
-	for _, responsePath := range []string{"/type", "/content", "/content/*/text", "/stop_reason", "/stop_sequence"} {
-		if containsPath(paths.Paths, responsePath) {
-			t.Fatalf("response path %q leaked into request scan: %#v", responsePath, paths.Paths)
+	for _, responsePath := range []string{"/type", "/content", "/content/0/text", "/stop_reason", "/stop_sequence"} {
+		if fakeSnapshotRetainsPath(t, snapshot.fakeSnapshot, responsePath) {
+			t.Fatalf("response path %q leaked into request scan", responsePath)
 		}
 	}
 }
 
-func containsPath(paths []string, target string) bool {
-	for _, path := range paths {
-		if path == target {
-			return true
-		}
+func fakeSnapshotRetainsPath(t *testing.T, snapshot *fakeSnapshot, path string) bool {
+	t.Helper()
+	input := `{"model":"m","thinking":{"type":"enabled"},"system":[{"text":"classifier"}],"stop_sequences":["STOP"],"type":"message","content":[{"text":"response"}],"stop_reason":"end_turn","stop_sequence":null}`
+	body, index, err := bodyfile.CaptureAndScanCompiled(strings.NewReader(input), snapshot.RequestScanSpec(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	defer body.Close()
+	_, ok := index.Lookup(path)
+	return ok
 }
 
 func leaseFor(item *provider.CompiledProvider, model string) scheduler.AttemptLease {
@@ -770,9 +819,9 @@ func TestBufferedResponseCancellationAfterPatchStopsBeforeWriteHeader(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := responseScanSpec(plan, traffic.RequestTypeNormal)
-	if err != nil {
-		t.Fatal(err)
+	spec, ok := plan.ResponseScanSpec(traffic.RequestTypeNormal)
+	if !ok {
+		t.Fatal("compiled response scan missing")
 	}
 	handler.executeBufferedResponse(w, request, leaseFor(item, "m"), "session", 1, &http.Response{
 		StatusCode: http.StatusCreated,

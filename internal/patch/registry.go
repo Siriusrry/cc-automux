@@ -365,7 +365,7 @@ func (r Registry) compile(ids []string, targetTypes []RequestType) (Plan, error)
 		}
 		selected = filtered
 	}
-	return newPlan(selected, r.services), nil
+	return newPlan(selected, r.services)
 }
 
 func (r Registry) CompileForType(ids []string, requestType RequestType) (Plan, error) {

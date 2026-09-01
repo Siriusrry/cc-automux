@@ -6,6 +6,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -43,6 +44,37 @@ func TestCaptureAndScanSelectsOnlyRequiredPaths(t *testing.T) {
 	if got := index.Find("/system/0/text"); len(got) != 1 {
 		t.Fatalf("Find = %#v", got)
 	}
+}
+
+func TestCompiledScanSpecCanBeSharedAcrossConcurrentCaptures(t *testing.T) {
+	spec, err := RequestScanSpecWithRawMarkers([]string{"/payload", "/payload/value"}, "marker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := CompileScanSpec(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			body, index, captureErr := CaptureAndScanCompiled(strings.NewReader(`{"model":"m","payload":{"value":"marker"}}`), compiled, t.TempDir())
+			if captureErr != nil {
+				t.Errorf("CaptureAndScanCompiled() error = %v", captureErr)
+				return
+			}
+			defer body.Close()
+			if _, ok := index.Lookup("/payload/value"); !ok {
+				t.Error("compiled scanner lost selected value")
+			}
+			if found, tracked := index.RawMarkerStatus("marker"); !tracked || !found {
+				t.Errorf("marker status found=%v tracked=%v", found, tracked)
+			}
+		}()
+	}
+	wait.Wait()
 }
 
 func TestCaptureAndScanEmptyPathsRetainsOnlyRequiredModel(t *testing.T) {

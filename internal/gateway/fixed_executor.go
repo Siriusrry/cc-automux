@@ -709,9 +709,9 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 
-	if target.PatchPlan.HasStage(patch.StageResponse, prepared.Plan.RequestType) {
+	if responseSpec, hasResponsePatch := target.PatchPlan.ResponseScanSpec(prepared.Plan.RequestType); hasResponsePatch {
 		h.finishFixedPatchedResponse(w, ctx, target, sessionID, model, upstream,
-			response.StatusCode, response.Header, decoded, rawBody, execution, closeExecution, own)
+			response.StatusCode, response.Header, decoded, rawBody, responseSpec, execution, closeExecution, own)
 		return
 	}
 	if err := closeExecution(); err != nil {
@@ -775,7 +775,7 @@ func (h *Handler) handleFixedUpstreamFailure(ctx context.Context, w http.Respons
 		facts.status, facts.headers, string(data))
 }
 
-func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status int, upstreamHeaders http.Header, decoded protocol.ProtocolMessage, rawUpstream bodyfile.Body, execution *patch.Execution, closeExecution func() error, own func(bodyfile.Body)) {
+func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status int, upstreamHeaders http.Header, decoded protocol.ProtocolMessage, rawUpstream bodyfile.Body, responseSpec *bodyfile.CompiledScanSpec, execution *patch.Execution, closeExecution func() error, own func(bodyfile.Body)) {
 	if decoded.Body == nil {
 		rawText, rawErr := fixedBodyText(rawUpstream)
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
@@ -786,11 +786,10 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 		h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, status, upstreamHeaders, "", contextError(ctx, nil))
 		return
 	}
-	responseSpec, err := responseScanSpecForFixed(target)
-	if err != nil {
+	if responseSpec == nil {
 		rawText, rawErr := fixedBodyText(rawUpstream)
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
-			"patch_failed", "fixed target response patch could not be prepared", errors.Join(err, rawErr), status, upstreamHeaders, "", rawText)
+			"patch_failed", "fixed target response patch could not be prepared", errors.Join(errors.New("compiled response scan is unavailable"), rawErr), status, upstreamHeaders, "", rawText)
 		return
 	}
 	reader, err := decoded.Body.OpenReader()
@@ -802,7 +801,7 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 			"fixed target response could not be replayed", errors.Join(err, rawErr), status, upstreamHeaders, "", rawText)
 		return
 	}
-	body, index, captureErr := bodyfile.CaptureAndScan(reader, responseSpec, h.replayDirectory)
+	body, index, captureErr := bodyfile.CaptureAndScanCompiled(reader, responseSpec, h.replayDirectory)
 	readerCloseErr := closeFixedReader(reader)
 	if own != nil {
 		own(body)
@@ -869,17 +868,6 @@ func fixedRepresentationHeaders(headers http.Header, body bodyfile.Body) http.He
 	deleteHeaderFold(headers, "Content-Length")
 	headers.Set("Content-Length", strconv.FormatInt(body.Size(), 10))
 	return headers
-}
-
-func responseScanSpecForFixed(target *provider.CompiledFixedTarget) (bodyfile.ScanSpec, error) {
-	if target == nil {
-		return bodyfile.ScanSpec{}, errors.New("fixed target is nil")
-	}
-	paths, err := target.PatchPlan.RequiredPaths(patch.StageResponse, traffic.RequestTypeClassifier)
-	if err != nil {
-		return bodyfile.ScanSpec{}, err
-	}
-	return bodyfile.ResponseScanSpec(paths...)
 }
 
 func cloneOrEmptyHeaders(headers http.Header) http.Header {

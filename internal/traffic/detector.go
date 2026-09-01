@@ -290,9 +290,9 @@ func (r *Registry) RequiredRawMarkers() []string {
 // RawMarkers is a descriptive alias for RequiredRawMarkers.
 func (r *Registry) RawMarkers() []string { return r.RequiredRawMarkers() }
 
-// Types returns registered specialised types in deterministic registration
-// order. The cached result is used when compiling the immutable ingress scan
-// contract and never includes normal.
+// Types returns the specialised types validated and cached at construction in
+// deterministic registration order. It never calls Detector.Type again and
+// never includes normal.
 func (r *Registry) Types() []RequestType {
 	if r == nil || len(r.types) == 0 {
 		return []RequestType{}

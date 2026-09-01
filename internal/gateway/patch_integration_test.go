@@ -410,10 +410,10 @@ func TestGatewayRetainsIngressRequestUnionWithoutPostClassificationProjection(t 
 			t.Fatalf("request %d response = %d %q", attempt, response.Code, response.Body.String())
 		}
 	}
-	// The scan contract and client-pool reconciliation reuse one defensive
-	// Provider snapshot per request.
-	if got := snapshot.providerCalls.Load(); got != 2 {
-		t.Fatalf("Providers calls = %d, want 2", got)
+	// Client-pool reconciliation copies Providers only once per runtime
+	// revision; the request scan contract is already compiled on the snapshot.
+	if got := snapshot.providerCalls.Load(); got != 1 {
+		t.Fatalf("Providers calls = %d, want 1", got)
 	}
 }
 

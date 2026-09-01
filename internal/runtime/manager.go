@@ -50,6 +50,7 @@ type Options struct {
 	// Manager requires it explicitly and reuses it for every published
 	// snapshot; it never constructs replacement runtime state.
 	RuntimeContext          provider.RuntimeContext
+	ScanRequirements        ScanRequirements
 	AttemptPolicy           scheduler.AttemptPolicy
 	ClassifierAttemptPolicy scheduler.AttemptPolicy
 	// Preflight runs after full schema/provider compilation but before the
@@ -79,6 +80,7 @@ type Manager struct {
 	mu                 sync.Mutex
 	store              ConfigStore
 	runtimeContext     provider.RuntimeContext
+	scanRequirements   ScanRequirements
 	current            atomic.Pointer[Snapshot]
 	revision           uint64
 	attempts           scheduler.AttemptPolicy
@@ -143,6 +145,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	m := &Manager{
 		store:              store,
 		runtimeContext:     context,
+		scanRequirements:   options.ScanRequirements,
 		revision:           1,
 		attempts:           attempts,
 		classifierAttempts: classifierAttempts,
@@ -169,7 +172,11 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	m.current.Store(newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.attempts, m.classifierAttempts, startedAt))
+	initialSnapshot, err := newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.scanRequirements, m.attempts, m.classifierAttempts, startedAt)
+	if err != nil {
+		return nil, err
+	}
+	m.current.Store(initialSnapshot)
 	return m, nil
 }
 
@@ -276,11 +283,15 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 
 	restartRequired := serviceRestartRequired(currentConfig.Service, next.Service)
 	if !restartRequired {
+		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, m.attempts, m.classifierAttempts, m.now())
+		if err != nil {
+			return ApplyResult{}, err
+		}
 		if err := m.store.Save(next); err != nil {
 			return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
 		}
 		m.revision++
-		m.current.Store(newSnapshotWithAuto(m.revision, next, catalog, autoMode, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
+		m.current.Store(nextSnapshot)
 		m.restartStatus = RestartStatus{State: "idle"}
 		return ApplyResult{
 			Revision:   m.revision,
@@ -396,12 +407,17 @@ func (m *Manager) RestartSucceeded() error {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
+	nextSnapshot, err := newSnapshotWithAuto(m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, m.attempts, m.classifierAttempts, m.now())
+	if err != nil {
+		_ = m.restartFailedLocked(err)
+		return err
+	}
 	if err := m.store.PromotePending(); err != nil {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
 	m.revision++
-	m.current.Store(newSnapshotWithAuto(m.revision, pending, catalog, autoMode, m.runtimeContext, m.attempts, m.classifierAttempts, m.now()))
+	m.current.Store(nextSnapshot)
 	m.restartTriggered = false
 	m.restartStatus = RestartStatus{State: "idle"}
 	return nil

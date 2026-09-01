@@ -11,7 +11,6 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
-	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
@@ -68,87 +67,6 @@ func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, r
 		return traffic.IngressRequest{}, traffic.ErrNilDetectorRegistry
 	}
 	return h.detectors.ClassifyDetection(detection)
-}
-
-// requestScanSpec computes the single ingress scan contract before the model
-// and request type are known. Normal fallback and every specialised detector
-// type are possible at this point, so the scanner retains the union of their
-// request-patch paths (plus detector-declared paths). The resulting index is
-// retained after classification; the request path never performs a second
-// projection pass.
-func (h *Handler) requestScanSpec(snapshot scheduler.Snapshot) (bodyfile.ScanSpec, error) {
-	spec, _, err := h.requestScanSpecWithProviders(snapshot)
-	return spec, err
-}
-
-// requestScanSpecWithProviders returns the ingress scan contract and the one
-// defensive Provider snapshot used to compute it. The Gateway reuses that
-// exact slice for client-pool reconciliation, avoiding a second provider-list
-// copy on accepted requests.
-func (h *Handler) requestScanSpecWithProviders(snapshot scheduler.Snapshot) (bodyfile.ScanSpec, []*provider.CompiledProvider, error) {
-	types := []traffic.RequestType{traffic.RequestTypeNormal}
-	paths := make([]string, 0)
-	var providers []*provider.CompiledProvider
-	if h != nil && h.detectors != nil {
-		paths = appendUniquePaths(paths, h.detectors.RequiredPaths()...)
-		types = append(types, h.detectors.Types()...)
-	}
-	if snapshot != nil {
-		providers = snapshot.Providers()
-		for _, item := range providers {
-			// Only providers that can be selected in this immutable snapshot
-			// contribute to the ingress union. Disabled/no-model entries are not
-			// reachable and must not force unrelated patch fields into every index.
-			if item == nil || !item.Enabled || len(item.Models) == 0 {
-				continue
-			}
-			for _, requestType := range types {
-				required, err := item.PatchPlan.RequiredPaths(patch.StageRequest, requestType)
-				if err != nil {
-					return bodyfile.ScanSpec{}, providers, err
-				}
-				paths = appendUniquePaths(paths, required...)
-			}
-		}
-	}
-	// A fixed classifier target is outside the scheduler Provider catalog, but
-	// its request hooks are still a possible ingress consumer. Include its
-	// classifier paths in the same pre-receive union so fixed-target execution
-	// never depends on a post-capture rescan.
-	if flowView, ok := snapshot.(flow.SnapshotView); ok {
-		fixed := flowView.AutoMode().FixedTarget
-		if fixed != nil {
-			// Fixed targets are classifier-only by contract. Their request paths
-			// belong to the same ingress union even though the target is outside
-			// scheduler.Snapshot.Providers().
-			required, err := fixed.PatchPlan.RequiredPaths(patch.StageRequest, traffic.RequestTypeClassifier)
-			if err != nil {
-				return bodyfile.ScanSpec{}, providers, err
-			}
-			paths = appendUniquePaths(paths, required...)
-		}
-	}
-	var markers []string
-	if h != nil && h.detectors != nil {
-		markers = h.detectors.RequiredRawMarkers()
-	}
-	spec, err := bodyfile.RequestScanSpecWithRawMarkers(paths, markers...)
-	return spec, providers, err
-}
-
-func appendUniquePaths(paths []string, additions ...string) []string {
-	seen := make(map[string]struct{}, len(paths)+len(additions))
-	for _, path := range paths {
-		seen[path] = struct{}{}
-	}
-	for _, path := range additions {
-		if _, exists := seen[path]; exists {
-			continue
-		}
-		seen[path] = struct{}{}
-		paths = append(paths, path)
-	}
-	return paths
 }
 
 func (h *Handler) dispatchIngress(ctx context.Context, snapshot flow.SnapshotView, ingress traffic.IngressRequest) (flow.ExecutionPlan, error) {
@@ -560,13 +478,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), response.StatusCode, attempt, nil)
 		return nil, true
 	}
-	if item.PatchPlan.HasStage(patch.StageResponse, prepared.Plan.RequestType) && response.StatusCode >= 200 && response.StatusCode < 300 {
-		responseSpec, specErr := responseScanSpec(item.PatchPlan, prepared.Plan.RequestType)
-		if specErr != nil {
-			_ = response.Body.Close()
-			_ = execution.Close()
-			return nil, h.terminalPatchFailure(w, nil, lease, sessionID, attempt, url.String(), specErr, "", patch.StageResponse)
-		}
+	if responseSpec, hasResponsePatch := item.PatchPlan.ResponseScanSpec(prepared.Plan.RequestType); hasResponsePatch && response.StatusCode >= 200 && response.StatusCode < 300 {
 		return h.executeBufferedResponse(w, incoming, lease, sessionID, attempt, response, execution, url.String(), responseSpec)
 	}
 	if err := execution.Close(); err != nil {
@@ -610,7 +522,7 @@ func (h *Handler) handlePlanTransportError(w http.ResponseWriter, ctx context.Co
 	return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, transport: true}, false
 }
 
-func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.Request, lease scheduler.AttemptLease, sessionID string, attempt int, response *http.Response, execution *patch.Execution, upstream string, spec bodyfile.ScanSpec) (*capturedFailure, bool) {
+func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.Request, lease scheduler.AttemptLease, sessionID string, attempt int, response *http.Response, execution *patch.Execution, upstream string, spec *bodyfile.CompiledScanSpec) (*capturedFailure, bool) {
 	if response == nil || response.Body == nil {
 		if requestCanceled(incomingContext(incoming)) {
 			h.reportClientCanceledWithAttempt(lease, sessionID, upstream, responseStatus(response), attempt, nil)
@@ -654,7 +566,7 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 		cancel(nil, false)
 		return nil, true
 	}
-	body, index, captureErr := bodyfile.CaptureAndScan(response.Body, spec, h.replayDirectory)
+	body, index, captureErr := bodyfile.CaptureAndScanCompiled(response.Body, spec, h.replayDirectory)
 	closeErr := closeResponse()
 	if requestCanceled(ctx) {
 		bodyErr := error(nil)
@@ -801,14 +713,6 @@ func incomingContext(incoming *http.Request) context.Context {
 		return context.Background()
 	}
 	return incoming.Context()
-}
-
-func responseScanSpec(plan patch.Plan, requestType traffic.RequestType) (bodyfile.ScanSpec, error) {
-	paths, err := plan.RequiredPaths(patch.StageResponse, requestType)
-	if err != nil {
-		return bodyfile.ScanSpec{}, err
-	}
-	return bodyfile.ResponseScanSpec(paths...)
 }
 
 func cleanUpstreamHeaders(source http.Header) (http.Header, error) {

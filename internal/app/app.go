@@ -94,6 +94,15 @@ func New(options Options) (*App, error) {
 	if contextErr != nil {
 		return nil, contextErr
 	}
+	classifierDetector := automode.NewClassifierDetector()
+	detectorRegistry, detectorErr := traffic.NewRegistry(classifierDetector)
+	if detectorErr != nil {
+		return nil, fmt.Errorf("initialize detector registry: %w", detectorErr)
+	}
+	scanRequirements, scanErr := runtime.NewScanRequirements(detectorRegistry.RequiredPaths(), detectorRegistry.RequiredRawMarkers())
+	if scanErr != nil {
+		return nil, fmt.Errorf("initialize request scan requirements: %w", scanErr)
+	}
 	startup, err := runtime.LoadStartup(store, runtimeContext)
 	if err != nil {
 		return nil, err
@@ -129,6 +138,7 @@ func New(options Options) (*App, error) {
 	policy := scheduler.DefaultPolicy()
 	managerOptions := runtime.Options{
 		RuntimeContext:          runtimeContext,
+		ScanRequirements:        scanRequirements,
 		AttemptPolicy:           scheduler.DefaultAttemptPolicy(),
 		ClassifierAttemptPolicy: scheduler.DefaultClassifierAttemptPolicy(),
 		RestartDelay:            options.RestartDelay,
@@ -221,12 +231,6 @@ func New(options Options) (*App, error) {
 	}
 	app.health = healthStore
 	app.selector = selector
-	classifierDetector := automode.NewClassifierDetector()
-	detectorRegistry, detectorErr := traffic.NewRegistry(classifierDetector)
-	if detectorErr != nil {
-		closeResources(app.logs, app.listener)
-		return nil, fmt.Errorf("initialize detector registry: %w", detectorErr)
-	}
 	flowRegistry, flowErr := flow.NewRegistry(flow.NewNormalPlanner(), automode.NewClassifierPlanner())
 	if flowErr != nil {
 		closeResources(app.logs, app.listener)

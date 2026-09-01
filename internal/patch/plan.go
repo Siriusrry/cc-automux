@@ -2,6 +2,8 @@ package patch
 
 import (
 	"fmt"
+
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 )
 
 // Plan is an immutable ordered collection of patch definitions. It can be
@@ -10,16 +12,40 @@ import (
 // here belongs to the process-owned RuntimeContext; Plan construction never
 // allocates a replacement AliasStore.
 type Plan struct {
-	definitions []PatchDefinition
-	services    Services
+	definitions  []PatchDefinition
+	services     Services
+	responseScan map[RequestType]*bodyfile.CompiledScanSpec
 }
 
-func newPlan(definitions []PatchDefinition, services Services) Plan {
+func newPlan(definitions []PatchDefinition, services Services) (Plan, error) {
 	cloned := make([]PatchDefinition, len(definitions))
 	for i, definition := range definitions {
 		cloned[i] = cloneDefinition(definition)
 	}
-	return Plan{definitions: cloned, services: services}
+	plan := Plan{
+		definitions:  cloned,
+		services:     services,
+		responseScan: make(map[RequestType]*bodyfile.CompiledScanSpec),
+	}
+	for _, requestType := range []RequestType{RequestTypeNormal, RequestTypeClassifier} {
+		if !plan.HasStage(StageResponse, requestType) {
+			continue
+		}
+		paths, err := plan.RequiredPaths(StageResponse, requestType)
+		if err != nil {
+			return Plan{}, fmt.Errorf("compile response scan paths: %w", err)
+		}
+		spec, err := bodyfile.ResponseScanSpec(paths...)
+		if err != nil {
+			return Plan{}, fmt.Errorf("compile response scan: %w", err)
+		}
+		compiled, err := bodyfile.CompileScanSpec(spec)
+		if err != nil {
+			return Plan{}, fmt.Errorf("compile response scanner: %w", err)
+		}
+		plan.responseScan[requestType] = compiled
+	}
+	return plan, nil
 }
 
 func (p Plan) Empty() bool { return len(p.definitions) == 0 }
@@ -73,6 +99,17 @@ func (p Plan) HasStage(stage Stage, requestType RequestType) bool {
 	return false
 }
 
+// ResponseScanSpec returns the immutable scan contract compiled with this
+// selected Plan. A missing result means the Plan has no response hook for that
+// request type.
+func (p Plan) ResponseScanSpec(requestType RequestType) (*bodyfile.CompiledScanSpec, bool) {
+	if !validRequestType(requestType) || requestType == RequestTypeAny {
+		return nil, false
+	}
+	spec, ok := p.responseScan[requestType]
+	return spec, ok
+}
+
 // IDs returns the configured order of this plan.
 func (p Plan) IDs() []string {
 	ids := make([]string, len(p.definitions))
@@ -123,7 +160,7 @@ func (p Plan) ForRequestType(requestType RequestType) (Plan, error) {
 	if err := validateSelectedConflicts(selected, []RequestType{requestType}); err != nil {
 		return Plan{}, err
 	}
-	return newPlan(selected, p.services), nil
+	return newPlan(selected, p.services)
 }
 
 // NewInstance creates one request-scoped execution. Every selected definition

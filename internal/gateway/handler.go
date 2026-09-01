@@ -25,6 +25,10 @@ import (
 
 type SnapshotFunc func() scheduler.Snapshot
 
+type requestScanSnapshot interface {
+	RequestScanSpec() *bodyfile.CompiledScanSpec
+}
+
 type Options struct {
 	ClientPool       *ClientPool
 	Recorder         EventRecorder
@@ -168,17 +172,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	// Keep the original runtime snapshot for scan-contract discovery so its
-	// optional flow view (including a fixed classifier target) remains visible;
-	// the policy wrapper intentionally exposes only the scheduler interface.
-	requestSpec, scanProviders, specErr := h.requestScanSpecWithProviders(runtimeSnapshot)
-	if specErr != nil {
+	scanSnapshot, ok := runtimeSnapshot.(requestScanSnapshot)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request scan could not be prepared")
+		return
+	}
+	requestScan := scanSnapshot.RequestScanSpec()
+	if requestScan == nil {
 		writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request scan could not be prepared")
 		return
 	}
 	// Capture and JSON scanning consume exactly the same ingress chunks.  The
 	// sealed body is never reopened merely to build the index.
-	captured, index, err := bodyfile.CaptureAndScan(r.Body, requestSpec, h.replayDirectory)
+	captured, index, err := bodyfile.CaptureAndScanCompiled(r.Body, requestScan, h.replayDirectory)
 	if err != nil {
 		if requestCanceled(r.Context()) {
 			return
@@ -228,18 +234,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reconcile against the rich runtime view, not the attempt-policy wrapper,
 	// so a fixed target remains part of the active transport set.
-	h.reconcileClientsWithProviders(runtimeSnapshot, scanProviders)
+	h.reconcileClients(runtimeSnapshot)
 	h.forwardExecution(w, r, snapshot, plan)
 }
 
 func (h *Handler) reconcileClients(snapshot scheduler.Snapshot) {
-	if h == nil || snapshot == nil {
-		return
-	}
-	h.reconcileClientsWithProviders(snapshot, snapshot.Providers())
-}
-
-func (h *Handler) reconcileClientsWithProviders(snapshot scheduler.Snapshot, providers []*provider.CompiledProvider) {
 	if h == nil || snapshot == nil {
 		return
 	}
@@ -248,6 +247,7 @@ func (h *Handler) reconcileClientsWithProviders(snapshot scheduler.Snapshot, pro
 	if snapshot.Revision() <= h.clientRevision {
 		return
 	}
+	providers := snapshot.Providers()
 	var fixed *provider.CompiledFixedTarget
 	if view, ok := snapshot.(flow.SnapshotView); ok {
 		fixed = view.AutoMode().FixedTarget

@@ -43,6 +43,17 @@ type ScanSpec struct {
 	SelectAll     bool
 }
 
+// CompiledScanSpec is an immutable scan contract with its selector trie,
+// marker automata, and key-size bound prepared once. It is safe to share across
+// concurrent scanners; each scanner receives only its own mutable parse and
+// marker-match state.
+type CompiledScanSpec struct {
+	spec        ScanSpec
+	trie        *selectorTrie
+	keyRawLimit int
+	rawMatchers []rawMarkerMatcher
+}
+
 // NewScanSpec validates and copies a selective path set.
 func NewScanSpec(paths ...string) (ScanSpec, error) {
 	spec := ScanSpec{Paths: append([]string(nil), paths...), RequireObject: true}
@@ -215,8 +226,6 @@ func makeJSONIndex(body Body, spec ScanSpec, model string, modelRange ByteRange,
 	for _, container := range containers {
 		byContainer[container.Path] = append(byContainer[container.Path], container)
 	}
-	spec.Paths = append([]string(nil), spec.Paths...)
-	spec.RawMarkers = append([]string(nil), spec.RawMarkers...)
 	return JSONIndex{Model: model, ModelRange: modelRange, body: body, bodySize: body.Size(), fields: fields, byPath: byPath, containers: byContainer, children: children, spec: spec, valid: true, modelSeen: modelSeen, rawMarkers: cloneRawMarkerMatches(rawMarkers)}
 }
 
@@ -301,8 +310,8 @@ func cloneRawMarkerMatches(values map[string]bool) map[string]bool {
 // Scanner is a concise alias.
 type Scanner = JSONScanner
 
-// NewJSONScanner constructs an incremental scanner.
-func NewJSONScanner(spec ScanSpec) (*JSONScanner, error) {
+// CompileScanSpec validates and compiles an immutable scanner contract.
+func CompileScanSpec(spec ScanSpec) (*CompiledScanSpec, error) {
 	// Object-only is the stable bodyfile contract. Treat a zero value as the
 	// default rather than exposing a scalar mode callers could misuse.
 	spec.RequireObject = true
@@ -315,13 +324,34 @@ func NewJSONScanner(spec ScanSpec) (*JSONScanner, error) {
 	for index, marker := range spec.RawMarkers {
 		rawMatchers[index] = newRawMarkerMatcher(marker)
 	}
-	return &JSONScanner{
+	return &CompiledScanSpec{
 		spec:        spec,
 		trie:        newSelectorTrie(spec.Paths, spec.SelectAll),
-		digest:      sha256.New(),
 		keyRawLimit: selectorKeyRawLimit(spec),
 		rawMatchers: rawMatchers,
 	}, nil
+}
+
+// NewJSONScanner constructs an incremental scanner.
+func NewJSONScanner(spec ScanSpec) (*JSONScanner, error) {
+	compiled, err := CompileScanSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	return compiled.newScanner(), nil
+}
+
+func (s *CompiledScanSpec) newScanner() *JSONScanner {
+	if s == nil {
+		return nil
+	}
+	return &JSONScanner{
+		spec:        s.spec,
+		trie:        s.trie,
+		digest:      sha256.New(),
+		keyRawLimit: s.keyRawLimit,
+		rawMatchers: append([]rawMarkerMatcher(nil), s.rawMatchers...),
+	}
 }
 
 // NewScanner is an ergonomic alias.
@@ -1505,17 +1535,36 @@ func CaptureAndScan(source io.Reader, spec ScanSpec, directory ...string) (body 
 	return captureAndScanWithBuilder(source, spec, func() (Builder, error) { return NewBuilder(dir) })
 }
 
+// CaptureAndScanCompiled captures and scans with a precompiled immutable
+// contract, avoiding per-request path/marker copying, validation, selector
+// trie construction, and marker automaton construction.
+func CaptureAndScanCompiled(source io.Reader, spec *CompiledScanSpec, directory ...string) (body Body, index JSONIndex, returnErr error) {
+	dir := ""
+	if len(directory) > 0 {
+		dir = directory[0]
+	}
+	return captureAndScanWithCompiledBuilder(source, spec, func() (Builder, error) { return NewBuilder(dir) })
+}
+
 func captureAndScanWithBuilder(source io.Reader, spec ScanSpec, create func() (Builder, error)) (body Body, index JSONIndex, returnErr error) {
+	compiled, err := CompileScanSpec(spec)
+	if err != nil {
+		return nil, JSONIndex{}, err
+	}
+	return captureAndScanWithCompiledBuilder(source, compiled, create)
+}
+
+func captureAndScanWithCompiledBuilder(source io.Reader, spec *CompiledScanSpec, create func() (Builder, error)) (body Body, index JSONIndex, returnErr error) {
 	if source == nil {
 		return nil, JSONIndex{}, fmt.Errorf("capture body: %w", ErrNilBody)
+	}
+	if spec == nil {
+		return nil, JSONIndex{}, errors.New("bodyfile: nil compiled scan spec")
 	}
 	if create == nil {
 		return nil, JSONIndex{}, errors.New("bodyfile: nil builder factory")
 	}
-	scanner, err := NewJSONScanner(spec)
-	if err != nil {
-		return nil, JSONIndex{}, err
-	}
+	scanner := spec.newScanner()
 	builder, err := create()
 	if err != nil {
 		return nil, JSONIndex{}, err

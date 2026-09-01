@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
@@ -42,6 +43,7 @@ type Snapshot struct {
 	runtimeContext     provider.RuntimeContext
 	attempts           scheduler.AttemptPolicy
 	classifierAttempts scheduler.AttemptPolicy
+	requestScan        *bodyfile.CompiledScanSpec
 	created            time.Time
 }
 
@@ -74,15 +76,19 @@ func cloneFixedTarget(target *provider.CompiledFixedTarget) *provider.CompiledFi
 // callers that construct snapshots in tests. Runtime Manager uses
 // newSnapshotWithAuto after compiling the candidate so publication cannot
 // hide a fixed-target compilation error.
-func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, runtimeContext provider.RuntimeContext, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
+func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, runtimeContext provider.RuntimeContext, requirements ScanRequirements, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
 	autoMode, err := compileAutoMode(cfg.AutoMode, runtimeContext)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return newSnapshotWithAuto(revision, cfg, catalog, autoMode, runtimeContext, attempts, classifierAttempts, now)
+	return newSnapshotWithAuto(revision, cfg, catalog, autoMode, runtimeContext, requirements, attempts, classifierAttempts, now)
 }
 
-func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.Catalog, autoMode CompiledAutoMode, runtimeContext provider.RuntimeContext, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) *Snapshot {
+func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.Catalog, autoMode CompiledAutoMode, runtimeContext provider.RuntimeContext, requirements ScanRequirements, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
+	requestScan, err := compileRequestScan(catalog, autoMode, requirements)
+	if err != nil {
+		return nil, err
+	}
 	return &Snapshot{
 		revision:           revision,
 		config:             cfg.Clone(),
@@ -91,8 +97,9 @@ func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.C
 		runtimeContext:     runtimeContext,
 		attempts:           attempts,
 		classifierAttempts: classifierAttempts,
+		requestScan:        requestScan,
 		created:            now,
-	}
+	}, nil
 }
 
 // RuntimeContext returns the shared, process-owned preparation context used to
