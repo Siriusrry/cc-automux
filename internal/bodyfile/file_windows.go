@@ -50,10 +50,6 @@ func createBodyFile(directory string) (*os.File, error) {
 			_ = syscall.CloseHandle(handle)
 			return nil, errors.New("could not wrap body file handle")
 		}
-		if err := file.Chmod(0o600); err != nil {
-			_ = file.Close()
-			return nil, err
-		}
 		return file, nil
 	}
 	return nil, errors.New("could not create a unique body file")

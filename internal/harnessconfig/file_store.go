@@ -43,9 +43,6 @@ type atomicFileReplacer interface {
 	AtomicReplace(string, string) error
 }
 
-// FileSystem is a descriptive alias for the injected filesystem boundary.
-type FileSystem = FileOps
-
 // OSFileOps is the production FileOps implementation.
 type OSFileOps struct{}
 
@@ -125,14 +122,6 @@ func NewFileStore(options ...FileStoreOptions) *FileStore {
 	return &FileStore{fs: option.FS, clock: option.Clock}
 }
 
-func NewFileStoreWithDependencies(files FileOps, clock Clock) *FileStore {
-	return NewFileStore(FileStoreOptions{FS: files, Clock: clock})
-}
-
-func NewTargetStore(options ...FileStoreOptions) *FileStore {
-	return NewFileStore(options...)
-}
-
 type targetState struct {
 	exists bool
 	info   fs.FileInfo
@@ -177,9 +166,6 @@ func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjec
 		return nil, ErrPathConflict
 	}
 	directory := filepath.Dir(path)
-	if err := s.fs.MkdirAll(directory, 0o700); err != nil {
-		return nil, fileError("create target directory", directory, ErrTargetIO, err)
-	}
 
 	original, targetExists, err := s.readExisting(path)
 	if err != nil {
@@ -206,6 +192,19 @@ func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjec
 	if err := adapter.Verify(merged, projection); err != nil {
 		return nil, fmt.Errorf("%w: pre-write verification: %w", ErrVerification, err)
 	}
+	// Do not create parent directories until all validation and merge work has
+	// succeeded. If a later pre-commit operation fails, remove only the empty
+	// directories created by this attempt.
+	cleanupDirectories, err := s.prepareDirectory(directory)
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			cleanupDirectories()
+		}
+	}()
 
 	if targetExists && !backupExists {
 		if _, err := s.createBackup(backupPath, original); err != nil {
@@ -232,6 +231,7 @@ func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjec
 	// Rename is the committed state transition. Directory synchronization is
 	// best effort and must not turn a successful replacement into a false error.
 	temporaryOwned = false
+	committed = true
 	_ = s.fs.SyncDirectory(directory)
 
 	final, exists, err := s.readExisting(path)
@@ -247,19 +247,58 @@ func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjec
 	return final, nil
 }
 
+// prepareDirectory creates the target's parent and returns a cleanup function
+// for directories that did not exist before this operation. The cleanup uses
+// plain Remove calls, so it never removes a directory containing a file that
+// appeared concurrently (including a one-time backup).
+func (s *FileStore) prepareDirectory(path string) (func(), error) {
+	missing, err := s.missingDirectories(path)
+	if err != nil {
+		return nil, fileError("inspect target directory", path, ErrTargetIO, err)
+	}
+	if err := s.fs.MkdirAll(path, harnessDirectoryMode()); err != nil {
+		removeDirectories(s.fs, missing)
+		return nil, fileError("create target directory", path, ErrTargetIO, err)
+	}
+	return func() { removeDirectories(s.fs, missing) }, nil
+}
+
+func (s *FileStore) missingDirectories(path string) ([]string, error) {
+	path = filepath.Clean(path)
+	missing := make([]string, 0, 2)
+	for current := path; ; current = filepath.Dir(current) {
+		info, err := s.fs.Lstat(current)
+		if err == nil {
+			// An existing path (including a symlink or non-directory) is left
+			// for MkdirAll to validate according to the platform's semantics.
+			_ = info
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	return missing, nil
+}
+
+func removeDirectories(files FileOps, paths []string) {
+	// missingDirectories records the deepest path first, so removing in the
+	// same order lets each parent become empty before it is considered.
+	for _, path := range paths {
+		_ = files.Remove(path)
+	}
+}
+
 // Write is the error-only form used by callers that do not need the final
 // verified bytes.
 func (s *FileStore) Write(path string, adapter Adapter, projection ManagedProjection) error {
 	_, err := s.Apply(path, adapter, projection)
 	return err
-}
-
-func (s *FileStore) Update(path string, adapter Adapter, projection ManagedProjection) ([]byte, error) {
-	return s.Apply(path, adapter, projection)
-}
-
-func ApplyTarget(path string, adapter Adapter, projection ManagedProjection) ([]byte, error) {
-	return NewFileStore().Apply(path, adapter, projection)
 }
 
 // BackupPath returns the fixed sibling backup path for a target. It does not
@@ -388,7 +427,7 @@ func (s *FileStore) createBackup(path string, original []byte) (bool, error) {
 			_ = s.fs.Remove(path)
 		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
+	if err := setPrivateFileMode(file); err != nil {
 		return false, fileError("chmod backup", path, ErrBackupIO, err)
 	}
 	if err := writeAll(file, original); err != nil {
@@ -415,8 +454,8 @@ func (s *FileStore) createBackup(path string, original []byte) (bool, error) {
 	if !info.Mode().IsRegular() {
 		return false, fileError("verify backup", path, ErrBackupNotRegular, nil)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return false, fileError("verify backup", path, ErrBackupIO, errors.New("backup permissions are not private"))
+	if err := verifyPrivateFileMode(info); err != nil {
+		return false, fileError("verify backup", path, ErrBackupIO, err)
 	}
 	committed = true
 	return true, nil
@@ -450,7 +489,7 @@ func (s *FileStore) writeTemporary(directory string, data []byte) (string, error
 			_ = s.fs.Remove(path)
 		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
+	if err := setPrivateFileMode(file); err != nil {
 		return "", fileError("chmod temporary target", path, ErrTemporaryIO, err)
 	}
 	if err := writeAll(file, data); err != nil {
@@ -474,8 +513,8 @@ func (s *FileStore) writeTemporary(directory string, data []byte) (string, error
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return "", fileError("verify temporary target", path, ErrTempNotRegular, nil)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fileError("verify temporary target", path, ErrTemporaryIO, errors.New("temporary permissions are not private"))
+	if err := verifyPrivateFileMode(info); err != nil {
+		return "", fileError("verify temporary target", path, ErrTemporaryIO, err)
 	}
 	committed = true
 	return path, nil
@@ -483,10 +522,7 @@ func (s *FileStore) writeTemporary(directory string, data []byte) (string, error
 
 func (s *FileStore) checkTargetBeforeReplace(path string, expected targetState) error {
 	current, exists, err := s.readExisting(path)
-	if errors.Is(err, os.ErrNotExist) {
-		exists = false
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		if errors.Is(err, ErrTargetSymlink) || errors.Is(err, ErrTargetNotRegular) || errors.Is(err, ErrTargetTooLarge) {
 			return err
 		}
@@ -520,7 +556,7 @@ func (s *FileStore) checkTargetBeforeReplace(path string, expected targetState) 
 	if !bytes.Equal(current, expected.data) {
 		return fileError("check target", path, ErrTargetChanged, errors.New("target contents changed during write"))
 	}
-	if expected.info != nil && info.Mode().Perm() != expected.info.Mode().Perm() {
+	if expected.info != nil && fileModeChanged(expected.info, info) {
 		return fileError("check target", path, ErrTargetChanged, errors.New("target permissions changed during write"))
 	}
 	return nil

@@ -47,23 +47,6 @@ const (
 	TopLevelTeammateDefaultModel = "teammateDefaultModel"
 )
 
-// Short aliases make the managed-field names convenient at integration
-// boundaries without creating a second set of field semantics.
-const (
-	ManagedEnvBaseURL           = EnvAnthropicBaseURL
-	ManagedEnvAuthToken         = EnvAnthropicAuthToken
-	ManagedEnvHaikuModel        = EnvAnthropicDefaultHaikuModel
-	ManagedEnvSonnetModel       = EnvAnthropicDefaultSonnetModel
-	ManagedEnvOpusModel         = EnvAnthropicDefaultOpusModel
-	ManagedEnvFableModel        = EnvAnthropicDefaultFableModel
-	ManagedEnvSubagentModel     = EnvClaudeCodeSubagentModel
-	ManagedEnvAttributionHeader = EnvClaudeCodeAttributionHeader
-	ManagedEnvFeedbackCommand   = EnvDisableFeedbackCommand
-	ManagedEnvErrorReporting    = EnvDisableErrorReporting
-	ManagedEnvTelemetry         = EnvDisableTelemetry
-	ManagedTeammateDefaultModel = TopLevelTeammateDefaultModel
-)
-
 var (
 	ErrNilAdapter         = errors.New("harnessconfig: nil adapter")
 	ErrDuplicateAdapter   = errors.New("harnessconfig: duplicate adapter")
@@ -152,7 +135,7 @@ func (p PathConfig) Validate() error {
 			return fmt.Errorf("%w: default mode requires an empty settings path", ErrInvalidPathConfig)
 		}
 	case PathModeCustom:
-		if p.SettingsPath == "" || !isAbsolutePath(p.SettingsPath) || hasControlBytes(p.SettingsPath) {
+		if p.SettingsPath == "" || !isAbsolutePath(p.SettingsPath) || hasControl(p.SettingsPath) {
 			return fmt.Errorf("%w: custom settings path must be a literal absolute path", ErrInvalidPathConfig)
 		}
 	default:
@@ -174,11 +157,6 @@ type Profile struct {
 	SubagentModel        string `json:"subagent_model,omitempty"`
 	TeammateDefaultModel string `json:"teammate_default_model,omitempty"`
 }
-
-// These aliases let the schema package and management layer name the same
-// value according to their local responsibility without duplicating it.
-type ProfileInput = Profile
-type ModelProfile = Profile
 
 // ActivationInput is the explicit, snapshot-derived input to an adapter. It
 // contains no Runtime Snapshot, persistence handle, HTTP request, or route
@@ -227,8 +205,6 @@ type ManagedProjection struct {
 	TopLevel map[string]string `json:"top_level"`
 }
 
-type Projection = ManagedProjection
-
 func (p ManagedProjection) Clone() ManagedProjection {
 	out := p
 	if p.Env != nil {
@@ -244,16 +220,6 @@ func (p ManagedProjection) Clone() ManagedProjection {
 		}
 	}
 	return out
-}
-
-func (p ManagedProjection) EnvValue(key string) (string, bool) {
-	value, ok := p.Env[key]
-	return value, ok
-}
-
-func (p ManagedProjection) TopLevelValue(key string) (string, bool) {
-	value, ok := p.TopLevel[key]
-	return value, ok
 }
 
 // RequiredManagedEnvKeys returns the ten non-optional fields in the
@@ -280,10 +246,6 @@ func OptionalManagedEnvKeys() []string {
 func ManagedEnvKeys() []string {
 	keys := RequiredManagedEnvKeys()
 	return append(keys, OptionalManagedEnvKeys()...)
-}
-
-func ManagedTopLevelKeys() []string {
-	return []string{TopLevelTeammateDefaultModel}
 }
 
 // Adapter is the generic harness file-semantics boundary. It does not read
@@ -341,10 +303,6 @@ func NewRegistryFromSlice(adapters []Adapter) (*Registry, error) {
 
 func EmptyRegistry() *Registry {
 	return &Registry{entries: map[string]Adapter{}}
-}
-
-func NewEmptyRegistry() *Registry {
-	return EmptyRegistry()
 }
 
 func DefaultRegistry() *Registry {
@@ -407,7 +365,7 @@ func isAbsolutePath(value string) bool {
 	return filepath.IsAbs(value)
 }
 
-func hasControlBytes(value string) bool {
+func hasControl(value string) bool {
 	for _, r := range value {
 		if unicode.IsControl(r) {
 			return true

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -423,7 +424,7 @@ func TestInitializeAndAtomicStorePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat config: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("config mode = %o, want 600", info.Mode().Perm())
 	}
 	store, _ := NewStore(path)
@@ -435,11 +436,13 @@ func TestInitializeAndAtomicStorePermissions(t *testing.T) {
 		t.Fatalf("existing config changed: %#v, %v", loaded, err)
 	}
 
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	if _, err := store.Load(); !errors.Is(err, ErrInsecurePermissions) {
-		t.Fatalf("insecure mode error = %v", err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		if _, err := store.Load(); !errors.Is(err, ErrInsecurePermissions) {
+			t.Fatalf("insecure mode error = %v", err)
+		}
 	}
 }
 
@@ -473,7 +476,7 @@ func TestPendingFileUsesPrivatePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("pending mode = %v", info.Mode().Perm())
 	}
 }

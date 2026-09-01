@@ -505,11 +505,15 @@ func TestFileStoreExistingTargetCreatesOneTimeBackupAndUsesPrivateFiles(t *testi
 	if !bytes.Equal(final, mustReadFile(t, target)) {
 		t.Fatal("Apply result differs from committed target")
 	}
-	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("target mode = %v, err %v; want 0600", info.Mode().Perm(), err)
-	}
-	if info, err := os.Stat(backup); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("backup mode = %v, err %v; want 0600", info.Mode().Perm(), err)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(target)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("target mode = %v, err %v; want 0600", info.Mode().Perm(), err)
+		}
+		info, err = os.Stat(backup)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("backup mode = %v, err %v; want 0600", info.Mode().Perm(), err)
+		}
 	}
 	if runtime.GOOS != "windows" {
 		if info, err := os.Stat(targetDir); err != nil || info.Mode().Perm() != 0o700 {
@@ -551,8 +555,26 @@ func TestFileStoreMissingTargetCreatesNoBackup(t *testing.T) {
 	if _, err := os.Stat(BackupPath(target)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("backup stat error = %v, want not exist", err)
 	}
-	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("new target mode = %v, err %v; want 0600", info.Mode().Perm(), err)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(target)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("new target mode = %v, err %v; want 0600", info.Mode().Perm(), err)
+		}
+	}
+}
+
+func TestFileStoreFailureRemovesNewEmptyParentDirectories(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "new", "nested", "settings.json")
+	ops := &faultOps{failTempCreate: errors.New("temporary create failure")}
+	store := NewFileStore(FileStoreOptions{FS: ops})
+	if _, err := store.Apply(target, NewClaudeCodeAdapter(), testProjection(t, true, false)); !errors.Is(err, ErrTemporaryIO) {
+		t.Fatalf("Apply error = %v, want temporary I/O failure", err)
+	}
+	for _, directory := range []string{filepath.Dir(target), filepath.Dir(filepath.Dir(target))} {
+		if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("created directory %q remains after failed Apply: %v", directory, err)
+		}
 	}
 }
 

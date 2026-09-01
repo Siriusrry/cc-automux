@@ -55,19 +55,6 @@ const (
 	stateReasonEmpty              = ""
 )
 
-// State is a short alias for callers that prefer the generic name.
-type State = HarnessState
-
-const (
-	Inactive   = StateInactive
-	InSync     = StateInSync
-	Missing    = StateMissing
-	Invalid    = StateInvalid
-	Unreadable = StateUnreadable
-	OutOfSync  = StateOutOfSync
-	StateErr   = StateError
-)
-
 const (
 	reasonActiveProfileMissing = "active_profile_missing"
 	reasonTargetMissing        = "target_missing"
@@ -77,6 +64,7 @@ const (
 	reasonStatePersistence     = "active_profile_state_failed"
 	reasonPathConflict         = "protected_path_conflict"
 	reasonPathInvalid          = "path_invalid"
+	reasonProjectionInvalid    = "projection_invalid"
 	reasonGatewayMissing       = "gateway_not_configured"
 	reasonConfigurationChanged = "configuration_changed"
 )
@@ -95,9 +83,6 @@ type HarnessStatus struct {
 	ProfileCount           int          `json:"profile_count"`
 	LastInvalidationReason string       `json:"last_invalidation_reason"`
 }
-
-// Status is an alias retained for generic callers of Manager.Status.
-type Status = HarnessStatus
 
 // ProfileView adds the derived active bit to a persisted profile. The bit is
 // never persisted and is true only when the manager has verified the complete
@@ -137,16 +122,6 @@ type AdapterInfo struct {
 	DefaultPathMode string   `json:"default_path_mode"`
 }
 
-// HarnessUpdate is the complete trusted harness-level input used by the
-// compatibility-style Update method. active_profile_id and profiles are
-// intentionally absent; server-side profile transitions have dedicated
-// Manager methods. HTTP callers use HarnessUpdatePatch for partial updates.
-type HarnessUpdate struct {
-	PathMode         string `json:"path_mode"`
-	SettingsPath     string `json:"settings_path"`
-	DisableTelemetry bool   `json:"disable_telemetry"`
-}
-
 // HarnessUpdatePatch is the transaction-safe partial form used by HTTP PUT.
 // A nil field means that the currently persisted value is retained.
 type HarnessUpdatePatch struct {
@@ -161,9 +136,6 @@ type ManagerOptions struct {
 	FileStore      *FileStore
 	ProtectedPaths []string
 }
-
-// Options is a concise alias for ManagerOptions.
-type Options = ManagerOptions
 
 // Manager owns harness semantics and active reconciliation. It does not own a
 // second runtime snapshot or any data-plane state.
@@ -209,12 +181,6 @@ func NewManager(runtimeBoundary RuntimeBoundary, registry AdapterRegistry, optio
 		protected:  protected,
 		lastReason: make(map[string]string),
 	}, nil
-}
-
-// NewManagerWithOptions is the options-first constructor used by composition
-// roots that want the registry inside one options value.
-func NewManagerWithOptions(runtimeBoundary RuntimeBoundary, options ManagerOptions) (*Manager, error) {
-	return NewManager(runtimeBoundary, options.Registry, options)
 }
 
 // New is a short constructor alias.
@@ -284,9 +250,6 @@ func (m *Manager) Discover() []AdapterInfo {
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
 }
-
-// ListAdapters is a discovery alias.
-func (m *Manager) ListAdapters() []AdapterInfo { return m.Discover() }
 
 func (m *Manager) lookup(id string) (Adapter, error) {
 	if m == nil || m.registry == nil {
@@ -433,16 +396,12 @@ func (m *Manager) Status(id string) (HarnessStatus, error) {
 	return status, nil
 }
 
-// GetStatus is an explicit alias for callers that prefer resource-oriented
-// naming.
-func (m *Manager) GetStatus(id string) (HarnessStatus, error) { return m.Status(id) }
-
 // Reconcile is the lifecycle-oriented alias used by the application startup
 // hook and tests.
 func (m *Manager) Reconcile(id string) (HarnessStatus, error) { return m.Status(id) }
 
-// ReconcileAll reconciles all registered adapters. v1 has one stateful
-// adapter, but the result shape keeps the operation generic for future ones.
+// ReconcileAll reconciles the adapters registered by the application. The
+// configured registry currently contains only the Claude Code adapter.
 func (m *Manager) ReconcileAll() ([]HarnessStatus, error) {
 	if m == nil || m.registry == nil {
 		return nil, ErrManagerNotInitialized
@@ -554,7 +513,11 @@ func classifyProjectionError(err error) (HarnessState, string) {
 	if errors.Is(err, ErrGatewayKeyRequired) {
 		return StateOutOfSync, reasonGatewayMissing
 	}
-	return StateInvalid, reasonPathInvalid
+	// Projection construction validates listener, credential, model and
+	// telemetry values. These are configuration/projection failures, not path
+	// failures; keep their diagnostic reason distinct so callers do not infer a
+	// filesystem problem.
+	return StateInvalid, reasonProjectionInvalid
 }
 
 func classifyReadError(err error) (HarnessState, string) {
@@ -693,11 +656,6 @@ func (m *Manager) Activate(id, profileID string) (ActivationResult, error) {
 	return result, nil
 }
 
-// ActivateProfile is the descriptive activation alias.
-func (m *Manager) ActivateProfile(id, profileID string) (ActivationResult, error) {
-	return m.Activate(id, profileID)
-}
-
 func activationPathError(err error) error {
 	if errors.Is(err, ErrInvalidPathConfig) {
 		return err
@@ -731,24 +689,6 @@ func isFileConflict(err error) bool {
 		}
 	}
 	return false
-}
-
-func (m *Manager) withClaudeMutation(id string, fn func(config.HarnessMutation, Adapter, config.Config) error) error {
-	adapter, err := m.lookup(id)
-	if err != nil {
-		return err
-	}
-	if m == nil {
-		return ErrManagerNotInitialized
-	}
-	if fn == nil {
-		return ErrManagerNotInitialized
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		return fn(tx, adapter, tx.Config().Normalize())
-	})
 }
 
 func (m *Manager) reconciledOperationState(tx config.HarnessMutation, id string, adapter Adapter, cfg config.Config) (HarnessStatus, config.Config, error) {
@@ -793,9 +733,6 @@ func (m *Manager) Profiles(id string) ([]ProfileView, error) {
 	}
 	return result, nil
 }
-
-// ListProfiles is the collection-oriented alias.
-func (m *Manager) ListProfiles(id string) ([]ProfileView, error) { return m.Profiles(id) }
 
 // GetProfile returns one profile after the required status reconciliation.
 func (m *Manager) GetProfile(id, profileID string) (ProfileView, error) {
@@ -1006,19 +943,6 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 	})
 }
 
-// Update applies a path/telemetry harness-level update and immediately runs
-// the required post-update reconciliation.
-func (m *Manager) Update(id string, update HarnessUpdate) (HarnessStatus, error) {
-	pathMode := update.PathMode
-	settingsPath := update.SettingsPath
-	disableTelemetry := update.DisableTelemetry
-	return m.UpdatePatch(id, HarnessUpdatePatch{
-		PathMode:         &pathMode,
-		SettingsPath:     &settingsPath,
-		DisableTelemetry: &disableTelemetry,
-	})
-}
-
 // UpdatePatch applies only the supplied harness-level fields while retaining
 // all omitted values from the same transaction snapshot.
 func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStatus, error) {
@@ -1062,14 +986,4 @@ func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStat
 		return HarnessStatus{}, err
 	}
 	return result, nil
-}
-
-// UpdateConfig and UpdateHarnessConfig are explicit aliases for the generic
-// harness-level update operation.
-func (m *Manager) UpdateConfig(id string, update HarnessUpdate) (HarnessStatus, error) {
-	return m.Update(id, update)
-}
-
-func (m *Manager) UpdateHarnessConfig(id string, update HarnessUpdate) (HarnessStatus, error) {
-	return m.Update(id, update)
 }

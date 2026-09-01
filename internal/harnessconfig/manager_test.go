@@ -231,6 +231,157 @@ func TestManagerReconcileClearsManualManagedChangesButPreservesUnknownFields(t *
 	}
 }
 
+func TestManagerReconcileClearsEveryManagedField(t *testing.T) {
+	cases := []struct {
+		name       string
+		optional   bool
+		mutateJSON func(t *testing.T, top map[string]json.RawMessage)
+	}{
+		{name: EnvAnthropicBaseURL, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvAnthropicBaseURL, `"http://127.0.0.1:9999"`)
+		}},
+		{name: EnvAnthropicAuthToken, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvAnthropicAuthToken, `"manually-changed"`)
+		}},
+		{name: EnvAnthropicDefaultHaikuModel, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvAnthropicDefaultHaikuModel, `"manually-changed"`)
+		}},
+		{name: EnvAnthropicDefaultSonnetModel, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvAnthropicDefaultSonnetModel, `"manually-changed"`)
+		}},
+		{name: EnvAnthropicDefaultOpusModel, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvAnthropicDefaultOpusModel, `"manually-changed"`)
+		}},
+		{name: EnvAnthropicDefaultFableModel, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvAnthropicDefaultFableModel, `"manually-changed"`)
+		}},
+		{name: EnvClaudeCodeAttributionHeader, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvClaudeCodeAttributionHeader, `"manually-changed"`)
+		}},
+		{name: EnvDisableFeedbackCommand, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvDisableFeedbackCommand, `"manually-changed"`)
+		}},
+		{name: EnvDisableErrorReporting, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvDisableErrorReporting, `"manually-changed"`)
+		}},
+		{name: EnvDisableTelemetry, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvDisableTelemetry, `"manually-changed"`)
+		}},
+		{name: "optional subagent", mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvClaudeCodeSubagentModel, `"manually-changed"`)
+		}},
+		{name: "optional teammate", mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			top[TopLevelTeammateDefaultModel] = json.RawMessage(`"manually-changed"`)
+		}},
+		{name: "unset optional fields", optional: true, mutateJSON: func(t *testing.T, top map[string]json.RawMessage) {
+			mutateManagedEnv(t, top, EnvClaudeCodeSubagentModel, `"stale-subagent"`)
+			top[TopLevelTeammateDefaultModel] = json.RawMessage(`"stale-teammate"`)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newHarnessFixture(t, "gateway-key")
+			if tc.optional {
+				profile := fixture.profiles[0]
+				profile.SubagentModel = ""
+				profile.TeammateDefaultModel = ""
+				if _, err := fixture.harness.UpdateProfile(ClaudeCodeAdapterID, profile.ID, profile); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeSettingsFixture(t, fixture.target, []byte(`{"preserve":true}`))
+			if _, err := fixture.harness.Activate(ClaudeCodeAdapterID, testProfileOneID); err != nil {
+				t.Fatal(err)
+			}
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(readFixture(t, fixture.target), &top); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutateJSON(t, top)
+			data, err := json.Marshal(top)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSettingsFixture(t, fixture.target, data)
+
+			status, err := fixture.harness.Status(ClaudeCodeAdapterID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.State != StateOutOfSync || status.ActiveProfileID != "" || status.LastInvalidationReason != reasonProjectionMismatch {
+				t.Fatalf("status after %s mutation = %#v", tc.name, status)
+			}
+			if got := fixture.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID; got != "" {
+				t.Fatalf("runtime active ID after %s mutation = %q", tc.name, got)
+			}
+		})
+	}
+}
+
+func mutateManagedEnv(t *testing.T, top map[string]json.RawMessage, key, value string) {
+	t.Helper()
+	var env map[string]json.RawMessage
+	if raw, ok := top["env"]; ok {
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		env = map[string]json.RawMessage{}
+	}
+	env[key] = json.RawMessage([]byte(value))
+	encoded, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	top["env"] = encoded
+}
+
+func TestManagerErrorClassificationKeepsProjectionFailuresOutOfPathCategory(t *testing.T) {
+	if state, reason := classifyPathError(ErrPathConflict); state != StateInvalid || reason != reasonPathConflict {
+		t.Fatalf("path conflict classification = %v/%q", state, reason)
+	}
+	if state, reason := classifyPathError(ErrInvalidPathConfig); state != StateInvalid || reason != reasonPathInvalid {
+		t.Fatalf("path validation classification = %v/%q", state, reason)
+	}
+	if state, reason := classifyProjectionError(ErrGatewayKeyRequired); state != StateOutOfSync || reason != reasonGatewayMissing {
+		t.Fatalf("gateway classification = %v/%q", state, reason)
+	}
+	for _, err := range []error{ErrInvalidListenAddr, ErrInvalidActivation, ErrInvalidModel, ErrInvalidProjection, errors.New("adapter failure")} {
+		if state, reason := classifyProjectionError(err); state != StateInvalid || reason != reasonProjectionInvalid {
+			t.Fatalf("projection error %v classification = %v/%q", err, state, reason)
+		}
+	}
+}
+
+func TestManagerHomeResolutionFailureClearsActiveState(t *testing.T) {
+	fixture := newHarnessFixture(t, "gateway-key")
+	writeSettingsFixture(t, fixture.target, []byte(`{"env":{}}`))
+	if _, err := fixture.harness.Activate(ClaudeCodeAdapterID, testProfileOneID); err != nil {
+		t.Fatal(err)
+	}
+	brokenAdapter := NewClaudeCodeAdapterWithHomeResolver(func() (string, error) {
+		return "", errors.New("user home is unavailable")
+	})
+	brokenRegistry, err := NewRegistry(brokenAdapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokenManager, err := NewManager(fixture.runtime, brokenRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := brokenManager.Status(ClaudeCodeAdapterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != StateInvalid || status.ActiveProfileID != "" || status.LastInvalidationReason != reasonPathInvalid {
+		t.Fatalf("home resolution failure status = %#v", status)
+	}
+	if got := fixture.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID; got != "" {
+		t.Fatalf("home resolution failure left active ID %q", got)
+	}
+}
+
 func TestManagerSwitchClearsOldActiveBeforeTargetFailure(t *testing.T) {
 	fixture := newHarnessFixture(t, "gateway-key")
 	writeSettingsFixture(t, fixture.target, []byte(`{"env":{}}`))
@@ -338,6 +489,31 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	if err != nil || !result.Active {
 		t.Fatalf("retry activation = %#v, err %v", result, err)
 	}
+	// A failed reconciliation clear must leave the persisted active ID intact
+	// but report a fail-closed state; the next read retries the clear.
+	target = filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(target, []byte(`{"env":{"MANUALLY_CHANGED":"1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.setFailNext(errors.New("injected clear failure"))
+	state, err := harness.Status(ClaudeCodeAdapterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.State != StateError || state.ActiveProfileID != "" || state.LastInvalidationReason != reasonStatePersistence {
+		t.Fatalf("failed reconciliation clear status = %#v", state)
+	}
+	if got := runtimeManager.Config().Harnesses.ClaudeCode.ActiveProfileID; got != profile.ID {
+		t.Fatalf("failed reconciliation clear changed runtime active ID to %q", got)
+	}
+	store.setFailNext(nil)
+	state, err = harness.Status(ClaudeCodeAdapterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.State != StateOutOfSync || state.ActiveProfileID != "" {
+		t.Fatalf("retry reconciliation clear status = %#v", state)
+	}
 }
 
 func TestManagerRejectsGatewayMissingProtectedPathAndRestartPending(t *testing.T) {
@@ -351,10 +527,12 @@ func TestManagerRejectsGatewayMissingProtectedPathAndRestartPending(t *testing.T
 	}
 
 	protected := newHarnessFixture(t, "gateway-key")
-	if _, err := protected.runtime.UpdateHarness(func(h *config.HarnessesConfig) error {
-		h.ClaudeCode.PathMode = config.PathModeCustom
-		h.ClaudeCode.SettingsPath = protected.runtime.ConfigPath()
-		return nil
+	if err := protected.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		return tx.UpdateHarness(func(h *config.HarnessesConfig) error {
+			h.ClaudeCode.PathMode = config.PathModeCustom
+			h.ClaudeCode.SettingsPath = protected.runtime.ConfigPath()
+			return nil
+		})
 	}); err != nil {
 		t.Fatal(err)
 	}

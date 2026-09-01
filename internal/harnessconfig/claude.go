@@ -45,10 +45,6 @@ func NewClaudeCodeAdapterWithHomeResolver(resolve HomeResolver) *ClaudeCodeAdapt
 	return NewClaudeCodeAdapter(ClaudeCodeAdapterOptions{HomeDir: resolve})
 }
 
-func NewClaudeCodeAdapterWithOptions(options ClaudeCodeAdapterOptions) *ClaudeCodeAdapter {
-	return NewClaudeCodeAdapter(options)
-}
-
 func (a *ClaudeCodeAdapter) ID() string {
 	return ClaudeCodeAdapterID
 }
@@ -170,15 +166,6 @@ func validateModelValue(field, value string, required bool) error {
 		return fmt.Errorf("%w: %s contains control characters", ErrInvalidModel, field)
 	}
 	return nil
-}
-
-func hasControl(value string) bool {
-	for _, r := range value {
-		if unicode.IsControl(r) {
-			return true
-		}
-	}
-	return false
 }
 
 func validateGatewayURL(value string) error {

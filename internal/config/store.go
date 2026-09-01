@@ -100,8 +100,8 @@ func (s *Store) PromotePending() error {
 	if !info.Mode().IsRegular() {
 		return ErrNotRegular
 	}
-	if info.Mode().Perm() != 0o600 {
-		return ErrInsecurePermissions
+	if err := validateConfigFileMode(info); err != nil {
+		return err
 	}
 	if err := os.Rename(s.pendingPath, s.path); err != nil {
 		return err
@@ -136,8 +136,8 @@ func loadFile(path string) (Config, error) {
 	if !info.Mode().IsRegular() {
 		return Config{}, ErrNotRegular
 	}
-	if info.Mode().Perm() != 0o600 {
-		return Config{}, ErrInsecurePermissions
+	if err := validateConfigFileMode(info); err != nil {
+		return Config{}, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -152,7 +152,7 @@ func loadFile(path string) (Config, error) {
 
 func atomicWrite(path string, data []byte, exclusive bool) (err error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, configDirectoryMode()); err != nil {
 		return fmt.Errorf("create configuration directory: %w", err)
 	}
 	tmpFile, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
@@ -161,7 +161,7 @@ func atomicWrite(path string, data []byte, exclusive bool) (err error) {
 	}
 	f := tmpFile
 	tmp := f.Name()
-	if err := f.Chmod(0o600); err != nil {
+	if err := setConfigFileMode(f); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 		return err
@@ -184,7 +184,7 @@ func atomicWrite(path string, data []byte, exclusive bool) (err error) {
 	if err = f.Sync(); err != nil {
 		return err
 	}
-	if err = f.Chmod(0o600); err != nil {
+	if err = setConfigFileMode(f); err != nil {
 		return err
 	}
 	if err = f.Close(); err != nil {
