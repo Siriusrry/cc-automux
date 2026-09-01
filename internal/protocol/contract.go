@@ -76,21 +76,8 @@ func NewRegistry(adapters ...ProtocolAdapter) (*Registry, error) {
 	return &Registry{entries: entries, order: order}, nil
 }
 
-// NewAdapterRegistry is a descriptive constructor alias.
-func NewAdapterRegistry(adapters ...ProtocolAdapter) (*Registry, error) {
-	return NewRegistry(adapters...)
-}
-
-// NewRegistryFromSlice is convenient for callers that already own a slice.
-func NewRegistryFromSlice(adapters []ProtocolAdapter) (*Registry, error) {
-	return NewRegistry(adapters...)
-}
-
 // EmptyRegistry returns an empty immutable production registry.
 func EmptyRegistry() *Registry { return &Registry{entries: map[string]ProtocolAdapter{}} }
-
-// NewEmptyRegistry is an alias retained for explicit call sites.
-func NewEmptyRegistry() *Registry { return EmptyRegistry() }
 
 func (r *Registry) Lookup(protocolID string) (ProtocolAdapter, bool) {
 	if r == nil {

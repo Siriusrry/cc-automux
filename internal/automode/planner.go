@@ -124,9 +124,3 @@ func plannerContextErr(ctx context.Context) error {
 }
 
 var _ flow.Planner = (*ClassifierPlanner)(nil)
-
-// ClassifierModelOverride is a descriptive helper for callers inspecting a
-// prepared plan without depending on the concrete planner type.
-func ClassifierModelOverride(plan flow.ExecutionPlan) string {
-	return plan.PreparedRequest.Plan.EffectiveModel
-}

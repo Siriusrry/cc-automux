@@ -16,9 +16,6 @@ const (
 	// harness. The ingress scan must observe these bytes unescaped somewhere in
 	// the original JSON request before the decoded system prefix is accepted.
 	SecurityMarker = "You are a security monitor for autonomous AI coding agents"
-
-	// ClassifierSecurityMarker is a descriptive alias used by integrations.
-	ClassifierSecurityMarker = SecurityMarker
 )
 
 var ErrRawMarkerNotTracked = errors.New("automode: classifier security marker was not tracked by ingress")
@@ -89,12 +86,6 @@ func (ClassifierDetector) Detect(view traffic.RequestView) (bool, error) {
 		return false, fmt.Errorf("automode: read classifier system prefix: %w", err)
 	}
 	return strings.HasPrefix(prefix, SecurityMarker), nil
-}
-
-// LastField returns the source-order final field. It is exported for focused
-// tests and for future detectors that need the same duplicate-member rule.
-func LastField(fields []bodyfile.Field) (bodyfile.Field, bool) {
-	return lastField(fields)
 }
 
 func lastField(fields []bodyfile.Field) (bodyfile.Field, bool) {
