@@ -125,15 +125,6 @@ func clientUpdateFromConfig(value Config) ClientConfigUpdate {
 	}
 }
 
-// DecodeClient is retained for older in-process callers.
-func DecodeClient(data []byte) (Config, error) {
-	update, err := DecodeClientUpdate(data)
-	if err != nil {
-		return Config{}, err
-	}
-	return configFromClientUpdate(update), nil
-}
-
 func configFromClientUpdate(update ClientConfigUpdate) Config {
 	next := Config{
 		SchemaVersion: update.SchemaVersion,

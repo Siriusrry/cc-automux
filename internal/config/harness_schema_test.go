@@ -248,8 +248,8 @@ func TestClientActiveProfileIsReadOnlyAndServerUpdatesReconcile(t *testing.T) {
 		`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{},"harnesses":{"claude_code":{"active_profile_id":"22222222-2222-4222-8222-222222222222"}}}`,
 		`{"schema_version":1,"auth":{"management_key":"m"},"auto_mode":{},"harnesses":{"claude_code":{"active_profile_id":null}}}`,
 	} {
-		if _, err := DecodeClient([]byte(raw)); !errors.Is(err, ErrActiveProfileReadOnly) {
-			t.Fatalf("DecodeClient(%s) error = %v, want read-only error", raw, err)
+		if _, err := DecodeClientUpdate([]byte(raw)); !errors.Is(err, ErrActiveProfileReadOnly) {
+			t.Fatalf("DecodeClientUpdate(%s) error = %v, want read-only error", raw, err)
 		}
 	}
 

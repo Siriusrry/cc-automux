@@ -453,14 +453,6 @@ func (current Config) ApplyClientRequest(update ClientConfigUpdate) (Config, err
 	return current.ApplyClientUpdate(configFromClientUpdate(update))
 }
 
-// ValidateClientUpdate checks an in-process candidate's server-owned-state
-// rules without returning the normalized candidate. HTTP callers should use
-// DecodeClientUpdate and ClientConfigUpdate instead.
-func ValidateClientUpdate(current, next Config) error {
-	_, err := current.ApplyClientUpdate(next)
-	return err
-}
-
 // ApplyServerUpdate prepares a trusted read-modify-write candidate. A server
 // mutator may omit the active ID or leave its current value in place; it may
 // not replace a non-empty ID with another profile. Relevant active inputs are
