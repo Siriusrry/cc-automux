@@ -16,6 +16,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/gateway"
+	"github.com/Siriusrry/cc-automux/internal/harnessconfig"
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/management"
 	"github.com/Siriusrry/cc-automux/internal/patch"
@@ -27,16 +28,19 @@ import (
 )
 
 type Options struct {
-	ConfigPath   string
-	Stdout       io.Writer
-	Stderr       io.Writer
-	LogOpener    LogOpener
-	Registry     *patch.Registry
-	Restart      func() error
-	Exec         func() error
-	RestartDelay time.Duration
-	Preflight    func(current, next config.Config) error
-	Now          func() time.Time
+	ConfigPath       string
+	Stdout           io.Writer
+	Stderr           io.Writer
+	LogOpener        LogOpener
+	Registry         *patch.Registry
+	Restart          func() error
+	Exec             func() error
+	RestartDelay     time.Duration
+	Preflight        func(current, next config.Config) error
+	Now              func() time.Time
+	HarnessRegistry  harnessconfig.AdapterRegistry
+	HarnessFileStore *harnessconfig.FileStore
+	HarnessHomeDir   harnessconfig.HomeResolver
 }
 
 type App struct {
@@ -51,6 +55,7 @@ type App struct {
 	selector       *scheduler.Scheduler
 	gateway        *gateway.Handler
 	management     *management.Handler
+	harnesses      *harnessconfig.Manager
 	runtimeMu      sync.Mutex
 	syncedRevision uint64
 
@@ -214,6 +219,33 @@ func New(options Options) (*App, error) {
 		logs.error.Printf("pending configuration was not activated: %v", startup.Warning())
 	}
 	app.manager = manager
+	var harnessRegistry harnessconfig.AdapterRegistry = options.HarnessRegistry
+	if harnessRegistry == nil {
+		adapter := harnessconfig.NewClaudeCodeAdapter(harnessconfig.ClaudeCodeAdapterOptions{HomeDir: options.HarnessHomeDir})
+		harnessRegistry, err = harnessconfig.NewRegistry(adapter)
+		if err != nil {
+			closeResources(app.logs, app.listener)
+			return nil, fmt.Errorf("initialize harness registry: %w", err)
+		}
+	}
+	harnessManager, harnessErr := harnessconfig.NewManager(manager, harnessRegistry, harnessconfig.ManagerOptions{
+		Registry:       harnessRegistry,
+		FileStore:      options.HarnessFileStore,
+		ProtectedPaths: []string{path, config.PendingPath(path)},
+	})
+	if harnessErr != nil {
+		closeResources(app.logs, app.listener)
+		return nil, fmt.Errorf("initialize harness manager: %w", harnessErr)
+	}
+	// Reconcile before constructing the HTTP server. A persistence failure is
+	// represented as state_error by the harness manager and does not stop the
+	// loopback data plane; an unexpected manager error is an initialization
+	// failure.
+	if _, harnessErr = harnessManager.ReconcileAll(); harnessErr != nil {
+		closeResources(app.logs, app.listener)
+		return nil, fmt.Errorf("reconcile harness configuration: %w", harnessErr)
+	}
+	app.harnesses = harnessManager
 	fixedDiagnostics := automode.NewDiagnostics()
 	clock := options.Now
 	if clock == nil {
@@ -249,6 +281,7 @@ func New(options Options) (*App, error) {
 		Sync:                app.syncRuntime,
 		ActiveRequests:      app.activeDataRequests,
 		AutoModeDiagnostics: fixedDiagnostics,
+		Harnesses:           harnessManager,
 	})
 	app.syncRuntime()
 	app.server = newHTTPServer(app.rootHandler())
@@ -278,6 +311,14 @@ func (a *App) Manager() *runtime.Manager {
 		return nil
 	}
 	return a.manager
+}
+
+// HarnessManager returns the process-owned harness configuration service.
+func (a *App) HarnessManager() *harnessconfig.Manager {
+	if a == nil {
+		return nil
+	}
+	return a.harnesses
 }
 
 func (a *App) Listener() net.Listener {

@@ -137,13 +137,22 @@ type AdapterInfo struct {
 	DefaultPathMode string   `json:"default_path_mode"`
 }
 
-// HarnessUpdate is the complete mutable harness-level input. active_profile_id
-// and profiles are intentionally absent; server-side profile transitions have
-// dedicated Manager methods.
+// HarnessUpdate is the complete trusted harness-level input used by the
+// compatibility-style Update method. active_profile_id and profiles are
+// intentionally absent; server-side profile transitions have dedicated
+// Manager methods. HTTP callers use HarnessUpdatePatch for partial updates.
 type HarnessUpdate struct {
 	PathMode         string `json:"path_mode"`
 	SettingsPath     string `json:"settings_path"`
 	DisableTelemetry bool   `json:"disable_telemetry"`
+}
+
+// HarnessUpdatePatch is the transaction-safe partial form used by HTTP PUT.
+// A nil field means that the currently persisted value is retained.
+type HarnessUpdatePatch struct {
+	PathMode         *string
+	SettingsPath     *string
+	DisableTelemetry *bool
 }
 
 // ManagerOptions supplies construction-time seams for Manager.
@@ -1000,6 +1009,19 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 // Update applies a path/telemetry harness-level update and immediately runs
 // the required post-update reconciliation.
 func (m *Manager) Update(id string, update HarnessUpdate) (HarnessStatus, error) {
+	pathMode := update.PathMode
+	settingsPath := update.SettingsPath
+	disableTelemetry := update.DisableTelemetry
+	return m.UpdatePatch(id, HarnessUpdatePatch{
+		PathMode:         &pathMode,
+		SettingsPath:     &settingsPath,
+		DisableTelemetry: &disableTelemetry,
+	})
+}
+
+// UpdatePatch applies only the supplied harness-level fields while retaining
+// all omitted values from the same transaction snapshot.
+func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStatus, error) {
 	adapter, err := m.lookup(id)
 	if err != nil {
 		return HarnessStatus{}, err
@@ -1017,9 +1039,15 @@ func (m *Manager) Update(id string, update HarnessUpdate) (HarnessStatus, error)
 		}
 		beforeActiveID := tx.Config().Harnesses.ClaudeCode.ActiveProfileID
 		if err := tx.UpdateHarness(func(h *config.HarnessesConfig) error {
-			h.ClaudeCode.PathMode = update.PathMode
-			h.ClaudeCode.SettingsPath = update.SettingsPath
-			h.ClaudeCode.DisableTelemetry = update.DisableTelemetry
+			if update.PathMode != nil {
+				h.ClaudeCode.PathMode = *update.PathMode
+			}
+			if update.SettingsPath != nil {
+				h.ClaudeCode.SettingsPath = *update.SettingsPath
+			}
+			if update.DisableTelemetry != nil {
+				h.ClaudeCode.DisableTelemetry = *update.DisableTelemetry
+			}
 			return nil
 		}); err != nil {
 			return err

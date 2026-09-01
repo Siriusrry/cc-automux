@@ -17,6 +17,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/harnessconfig"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
@@ -42,6 +43,34 @@ func writeAppConfig(t *testing.T, path string, cfg config.Config) *config.Store 
 		t.Fatal(err)
 	}
 	return store
+}
+
+func marshalAppClientConfig(t *testing.T, cfg config.Config) []byte {
+	t.Helper()
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var harnesses map[string]json.RawMessage
+	if err := json.Unmarshal(root["harnesses"], &harnesses); err != nil {
+		t.Fatal(err)
+	}
+	var claude map[string]json.RawMessage
+	if err := json.Unmarshal(harnesses["claude_code"], &claude); err != nil {
+		t.Fatal(err)
+	}
+	delete(claude, "active_profile_id")
+	harnesses["claude_code"], _ = json.Marshal(claude)
+	root["harnesses"], _ = json.Marshal(harnesses)
+	data, err = json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func baseAppConfig(t *testing.T, path string) (*config.Store, config.Config) {
@@ -82,6 +111,136 @@ func TestNewBindsLoopbackAndServesManagementAndMessagesRoutes(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m"}`)))
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "gateway_not_configured") {
 		t.Fatalf("unconfigured Messages route = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAppWiresHarnessManagerAndAPI(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	cfg := config.Default()
+	cfg.Service.ListenAddr = freeListenAddr(t)
+	cfg.Auth.ManagementKey = "management-key"
+	cfg.Auth.GatewayKey = "gateway-key"
+	writeAppConfig(t, path, cfg)
+	home := filepath.Join(root, "home")
+	application, err := New(Options{
+		ConfigPath:     path,
+		Stdout:         io.Discard,
+		Stderr:         io.Discard,
+		HarnessHomeDir: func() (string, error) { return home, nil },
+		Restart:        func() error { return errors.New("not used") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+	if application.HarnessManager() == nil {
+		t.Fatal("app did not create the harness manager")
+	}
+	handler := application.server.Handler
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/harnesses", nil)
+	request.Header.Set("Authorization", "Bearer management-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"claude-code"`) {
+		t.Fatalf("app harness discovery = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAppStartupReconcilesHarnessBeforeServing(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	home := filepath.Join(root, "home")
+	profile := config.Profile{
+		ID:                   "11111111-1111-4111-8111-111111111111",
+		Name:                 "Daily",
+		HaikuModel:           "haiku",
+		SonnetModel:          "sonnet",
+		OpusModel:            "opus",
+		FableModel:           "fable",
+		SubagentModel:        "subagent",
+		TeammateDefaultModel: "teammate",
+	}
+	cfg := config.Default()
+	cfg.Service.ListenAddr = freeListenAddr(t)
+	cfg.Auth.ManagementKey = "management-key"
+	cfg.Auth.GatewayKey = "gateway-key"
+	cfg.Harnesses.ClaudeCode.Profiles = []config.Profile{profile}
+	cfg.Harnesses.ClaudeCode.ActiveProfileID = profile.ID
+	adapter := harnessconfig.NewClaudeCodeAdapterWithHomeResolver(func() (string, error) { return home, nil })
+	projection, err := adapter.BuildManagedProjection(harnessconfig.ActivationInput{
+		ListenAddr:       cfg.Service.ListenAddr,
+		GatewayKey:       cfg.Auth.GatewayKey,
+		Profile:          harnessconfig.ProfileFromConfig(profile),
+		DisableTelemetry: cfg.Harnesses.ClaudeCode.DisableTelemetry,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := adapter.Merge([]byte(`{"preserved":true}`), projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := writeAppConfig(t, path, cfg)
+	application, err := New(Options{
+		ConfigPath:     path,
+		Stdout:         io.Discard,
+		Stderr:         io.Discard,
+		HarnessHomeDir: func() (string, error) { return home, nil },
+		Restart:        func() error { return errors.New("not used") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+	status, err := application.HarnessManager().Status(harnessconfig.ClaudeCodeAdapterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != harnessconfig.StateInSync || status.ActiveProfileID != profile.ID {
+		t.Fatalf("startup harness status = %#v", status)
+	}
+	persisted, err := store.Load()
+	if err != nil || persisted.Harnesses.ClaudeCode.ActiveProfileID != profile.ID {
+		t.Fatalf("startup active state = %q, err %v", persisted.Harnesses.ClaudeCode.ActiveProfileID, err)
+	}
+
+	// A stale external file is invalidated during the next startup, while the
+	// loopback application still initializes successfully.
+	if err := os.WriteFile(target, []byte(`{"env":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
+	}
+	application, err = New(Options{
+		ConfigPath:     path,
+		Stdout:         io.Discard,
+		Stderr:         io.Discard,
+		HarnessHomeDir: func() (string, error) { return home, nil },
+		Restart:        func() error { return errors.New("not used") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+	status, err = application.HarnessManager().Status(harnessconfig.ClaudeCodeAdapterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ActiveProfileID != "" || status.State != harnessconfig.StateInactive {
+		t.Fatalf("stale startup status = %#v", status)
+	}
+	persisted, err = store.Load()
+	if err != nil || persisted.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		t.Fatalf("stale startup persisted active = %q, err %v", persisted.Harnesses.ClaudeCode.ActiveProfileID, err)
 	}
 }
 
@@ -649,7 +808,7 @@ func TestLogPreflightFailureDoesNotWritePendingOrChangeActiveState(t *testing.T)
 	defer application.Close()
 	next := cfg.Clone()
 	next.Service.LogMaxBytes++
-	body, _ := json.Marshal(next)
+	body := marshalAppClientConfig(t, next)
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(string(body)))
 	request.Header.Set("Authorization", "Bearer "+cfg.Auth.ManagementKey)
 	response := httptest.NewRecorder()
@@ -713,7 +872,7 @@ func TestSelfExecFailureRebindsOldListenerAndKeepsServing(t *testing.T) {
 
 	next := cfg.Clone()
 	next.Service.LogMaxBytes++
-	body, _ := json.Marshal(next)
+	body := marshalAppClientConfig(t, next)
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(string(body)))
 	request.Header.Set("Authorization", "Bearer "+cfg.Auth.ManagementKey)
 	response := httptest.NewRecorder()
@@ -841,7 +1000,7 @@ func TestRestartClosesInFlightMessagesWithoutDrain(t *testing.T) {
 
 	next := cfg.Clone()
 	next.Service.LogMaxBytes++
-	body, _ := json.Marshal(next)
+	body := marshalAppClientConfig(t, next)
 	restartRequest := httptest.NewRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(body))
 	restartRequest.Header.Set("Authorization", "Bearer management-key")
 	restartResponse := httptest.NewRecorder()
@@ -893,7 +1052,7 @@ func TestCloseDuringRestartDoesNotLeaveServeBlocked(t *testing.T) {
 
 	next := cfg.Clone()
 	next.Service.LogMaxBytes++
-	body, _ := json.Marshal(next)
+	body := marshalAppClientConfig(t, next)
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(string(body)))
 	request.Header.Set("Authorization", "Bearer "+cfg.Auth.ManagementKey)
 	response := httptest.NewRecorder()

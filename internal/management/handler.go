@@ -13,6 +13,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
+	"github.com/Siriusrry/cc-automux/internal/harnessconfig"
 	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
@@ -35,6 +36,7 @@ type Options struct {
 	Sync                func()
 	ActiveRequests      func() int64
 	AutoModeDiagnostics *automode.Diagnostics
+	Harnesses           *harnessconfig.Manager
 }
 
 type Handler struct {
@@ -47,6 +49,7 @@ type Handler struct {
 	syncRuntime         func()
 	activeRequests      func() int64
 	autoModeDiagnostics *automode.Diagnostics
+	harnesses           *harnessconfig.Manager
 }
 
 func New(manager *runtime.Manager) *Handler {
@@ -76,6 +79,7 @@ func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
 		syncRuntime:         options.Sync,
 		activeRequests:      options.ActiveRequests,
 		autoModeDiagnostics: options.AutoModeDiagnostics,
+		harnesses:           options.Harnesses,
 	}
 }
 
@@ -100,10 +104,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleStatus(w, r)
 	case apiPrefix + "/provider-health":
 		h.handleProviderHealth(w, r)
+	case apiPrefix + "/harnesses":
+		h.handleHarnessCollection(w, r)
 	default:
 		const providerPrefix = apiPrefix + "/providers/"
 		if strings.HasPrefix(r.URL.Path, providerPrefix) && strings.Count(strings.TrimPrefix(r.URL.Path, providerPrefix), "/") == 0 && strings.TrimPrefix(r.URL.Path, providerPrefix) != "" {
 			h.handleProvider(w, r, strings.TrimPrefix(r.URL.Path, providerPrefix))
+			return
+		}
+		const harnessPrefix = apiPrefix + "/harnesses/"
+		if strings.HasPrefix(r.URL.Path, harnessPrefix) {
+			h.handleHarnessPath(w, r, strings.TrimPrefix(r.URL.Path, harnessPrefix))
 			return
 		}
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
@@ -604,7 +615,7 @@ func (h *Handler) decodeConfig(w http.ResponseWriter, r *http.Request) (config.C
 	if err != nil {
 		return config.Config{}, err
 	}
-	cfg, err := config.Decode(data)
+	cfg, err := config.DecodeClient(data)
 	if err != nil {
 		h.writeDecodeError(w, err)
 		return config.Config{}, err
@@ -649,6 +660,10 @@ func (h *Handler) writeDecodeError(w http.ResponseWriter, err error) {
 	var syntax *config.SyntaxError
 	if errors.As(err, &syntax) {
 		writeError(w, http.StatusBadRequest, "invalid_json", syntax.Error())
+		return
+	}
+	if errors.Is(err, config.ErrActiveProfileReadOnly) {
+		writeError(w, http.StatusConflict, "active_profile_read_only", "active profile state is server-managed")
 		return
 	}
 	h.writeSemanticError(w, err)

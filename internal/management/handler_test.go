@@ -65,6 +65,34 @@ func request(handler http.Handler, method, path, auth, body string) *httptest.Re
 	return rec
 }
 
+func marshalManagementClientConfig(t *testing.T, cfg config.Config) string {
+	t.Helper()
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var harnesses map[string]json.RawMessage
+	if err := json.Unmarshal(root["harnesses"], &harnesses); err != nil {
+		t.Fatal(err)
+	}
+	var claude map[string]json.RawMessage
+	if err := json.Unmarshal(harnesses["claude_code"], &claude); err != nil {
+		t.Fatal(err)
+	}
+	delete(claude, "active_profile_id")
+	harnesses["claude_code"], _ = json.Marshal(claude)
+	root["harnesses"], _ = json.Marshal(harnesses)
+	data, err = json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func TestManagementAuthenticationUsesStandardChallenge(t *testing.T) {
 	handler := New(testManager(t, nil))
 	responses := []*httptest.ResponseRecorder{
@@ -172,8 +200,8 @@ func TestConfigAndProviderCRUDAndKeyRotation(t *testing.T) {
 	var replacement config.Config
 	replacement = got
 	replacement.Auth.ManagementKey = "new-management-key"
-	body, _ := json.Marshal(replacement)
-	rotated := request(handler, http.MethodPut, "/api/v1/config", auth, string(body))
+	body := marshalManagementClientConfig(t, replacement)
+	rotated := request(handler, http.MethodPut, "/api/v1/config", auth, body)
 	if rotated.Code != http.StatusOK {
 		t.Fatalf("key rotation = %d %s", rotated.Code, rotated.Body.String())
 	}
@@ -213,11 +241,8 @@ func TestManagementConfigRoundTripsFixedAutoModeAndStatusOmitsKey(t *testing.T) 
 			Patches: []string{patch.AnyRouterClassifierRequestID},
 		},
 	}
-	body, err := json.Marshal(next)
-	if err != nil {
-		t.Fatal(err)
-	}
-	updated := request(handler, http.MethodPut, "/api/v1/config", "Bearer management-key", string(body))
+	body := marshalManagementClientConfig(t, next)
+	updated := request(handler, http.MethodPut, "/api/v1/config", "Bearer management-key", body)
 	if updated.Code != http.StatusOK {
 		t.Fatalf("PUT fixed Auto Mode = %d %s", updated.Code, updated.Body.String())
 	}
@@ -479,8 +504,8 @@ func TestRestartResponseAndConflict(t *testing.T) {
 	handler := New(manager)
 	cfg := manager.Snapshot().Config()
 	cfg.Service.LogMaxBytes++
-	body, _ := json.Marshal(cfg)
-	rec := request(handler, http.MethodPut, "/api/v1/config", "Bearer management-key", string(body))
+	body := marshalManagementClientConfig(t, cfg)
+	rec := request(handler, http.MethodPut, "/api/v1/config", "Bearer management-key", body)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("restart response = %d %s", rec.Code, rec.Body.String())
 	}
@@ -516,9 +541,9 @@ func TestRestartStartsAfterAcceptedResponseWrite(t *testing.T) {
 	handler := New(manager)
 	cfg := manager.Snapshot().Config()
 	cfg.Service.LogMaxBytes++
-	body, _ := json.Marshal(cfg)
+	body := marshalManagementClientConfig(t, cfg)
 	recorder := &orderedRecorder{ResponseRecorder: httptest.NewRecorder(), responseWritten: &responseWritten}
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer management-key")
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusAccepted {
@@ -564,8 +589,8 @@ func TestPersistenceFailureReturns500WithoutPublishingSnapshot(t *testing.T) {
 	}
 	next := cfg.Clone()
 	next.Auth.GatewayKey = "gateway-key"
-	body, _ := json.Marshal(next)
-	rec := request(New(manager), http.MethodPut, "/api/v1/config", "Bearer management-key", string(body))
+	body := marshalManagementClientConfig(t, next)
+	rec := request(New(manager), http.MethodPut, "/api/v1/config", "Bearer management-key", body)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("persistence failure = %d %s", rec.Code, rec.Body.String())
 	}
