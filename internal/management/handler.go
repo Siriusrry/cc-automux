@@ -39,6 +39,7 @@ type Options struct {
 	AutoModeDiagnostics *automode.Diagnostics
 	Harnesses           *harnessconfig.Manager
 	Logs                *logstore.Reader
+	LogStream           *logstore.Broker
 }
 
 type Handler struct {
@@ -53,6 +54,7 @@ type Handler struct {
 	autoModeDiagnostics *automode.Diagnostics
 	harnesses           *harnessconfig.Manager
 	logs                *logstore.Reader
+	logStream           *logstore.Broker
 }
 
 func New(manager *runtime.Manager) *Handler {
@@ -84,6 +86,7 @@ func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
 		autoModeDiagnostics: options.AutoModeDiagnostics,
 		harnesses:           options.Harnesses,
 		logs:                options.Logs,
+		logStream:           options.LogStream,
 	}
 }
 
@@ -110,6 +113,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleProviderHealth(w, r)
 	case apiPrefix + "/logs":
 		h.handleLogs(w, r)
+	case apiPrefix + "/logs/stream":
+		h.handleLogStream(w, r)
 	case apiPrefix + "/harnesses":
 		h.handleHarnessCollection(w, r)
 	default:

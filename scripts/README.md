@@ -70,8 +70,9 @@ before the structured log is available.
 The LaunchAgent label is com.Siriusrry.cc-automux. The service remains
 loopback-only.
 
-Structured log history is read through the authenticated `GET /api/v1/logs`
-management endpoint; there is no command-line log-viewing script.
+Structured log history is read through authenticated `GET /api/v1/logs`;
+live records use authenticated `GET /api/v1/logs/stream`. There is no
+command-line log-viewing script.
 
 ## Uninstall
 

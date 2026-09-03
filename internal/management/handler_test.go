@@ -1,6 +1,9 @@
 package management
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -417,6 +420,170 @@ func TestLogHistoryEndpointMissingFilesAndReadFailure(t *testing.T) {
 	failure := request(failingHandler, http.MethodGet, "/api/v1/logs", "Bearer management-key", "")
 	if failure.Code != http.StatusInternalServerError || !strings.Contains(failure.Body.String(), `"error":"log_read_failed"`) {
 		t.Fatalf("failed log history = %d %s", failure.Code, failure.Body.String())
+	}
+}
+
+func TestLogStreamEndpoint(t *testing.T) {
+	broker := logstore.NewBroker()
+	handler := NewWithOptions(testManager(t, nil), Options{LogStream: broker})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/v1/logs/stream?level=ERROR", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer management-key")
+	request.Header.Set("Last-Event-ID", "999")
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("X-Accel-Buffering") != "" {
+		t.Fatalf("stream response = %d headers=%v", response.StatusCode, response.Header)
+	}
+	if broker.SubscriberCount() != 1 {
+		t.Fatalf("subscriber count = %d", broker.SubscriberCount())
+	}
+	infoLine := []byte(`{"time":"2026-09-03T12:00:00Z","level":"INFO","msg":"service","seq":1,"event":"listening"}`)
+	errorLine := []byte(`{"time":"2026-09-03T12:00:01Z","level":"ERROR","msg":"gateway","seq":5,"kind":"failure","raw_error":"complete"}`)
+	if err := broker.Publish(append(append([]byte(nil), infoLine...), '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Publish(append(append([]byte(nil), errorLine...), '\n')); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(response.Body)
+	var event strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.WriteString(line)
+		if line == "\n" {
+			break
+		}
+	}
+	want := "event: record\nid: 5\ndata: " + string(errorLine) + "\n\n"
+	if event.String() != want || strings.Contains(event.String(), "dropped") {
+		t.Fatalf("stream event = %q, want %q", event.String(), want)
+	}
+
+	cancel()
+	_ = response.Body.Close()
+	for i := 0; i < 100 && broker.SubscriberCount() != 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if broker.SubscriberCount() != 0 {
+		t.Fatalf("subscriber remained after disconnect: %d", broker.SubscriberCount())
+	}
+
+	reconnectContext, reconnectCancel := context.WithCancel(context.Background())
+	defer reconnectCancel()
+	reconnect, err := http.NewRequestWithContext(reconnectContext, http.MethodGet, server.URL+"/api/v1/logs/stream?level=ERROR", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconnect.Header.Set("Authorization", "Bearer management-key")
+	reconnect.Header.Set("Last-Event-ID", "5")
+	reconnected, err := client.Do(reconnect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newLine := []byte(`{"time":"2026-09-03T12:00:02Z","level":"ERROR","msg":"gateway","seq":9,"kind":"failure","raw_error":"after reconnect"}`)
+	if err := broker.Publish(append(append([]byte(nil), newLine...), '\n')); err != nil {
+		t.Fatal(err)
+	}
+	reconnectedReader := bufio.NewReader(reconnected.Body)
+	event.Reset()
+	for {
+		line, err := reconnectedReader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.WriteString(line)
+		if line == "\n" {
+			break
+		}
+	}
+	if want := "event: record\nid: 9\ndata: " + string(newLine) + "\n\n"; event.String() != want {
+		t.Fatalf("reconnected event = %q, want %q", event.String(), want)
+	}
+	reconnectCancel()
+	_ = reconnected.Body.Close()
+	for i := 0; i < 100 && broker.SubscriberCount() != 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if broker.SubscriberCount() != 0 {
+		t.Fatalf("reconnected subscriber remained after disconnect: %d", broker.SubscriberCount())
+	}
+}
+
+func TestLogStreamValidationMethodAndCapacity(t *testing.T) {
+	broker := logstore.NewBroker()
+	handler := NewWithOptions(testManager(t, nil), Options{LogStream: broker})
+	auth := "Bearer management-key"
+	for _, path := range []string{
+		"/api/v1/logs/stream?unknown=value",
+		"/api/v1/logs/stream?level=",
+		"/api/v1/logs/stream?limit=1",
+		"/api/v1/logs/stream?cursor=invalid",
+	} {
+		response := request(handler, http.MethodGet, path, auth, "")
+		if response.Code != http.StatusUnprocessableEntity || response.Header().Get("Content-Type") == "text/event-stream" || !strings.Contains(response.Body.String(), `"error":"validation_failed"`) {
+			t.Fatalf("invalid stream %s = %d headers=%v body=%s", path, response.Code, response.Header(), response.Body.String())
+		}
+	}
+	if response := request(handler, http.MethodPost, "/api/v1/logs/stream", auth, ""); response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("stream method = %d Allow=%q", response.Code, response.Header().Get("Allow"))
+	}
+
+	parameters, err := logstore.ParseParameters(nil, logstore.ParseOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var subscriptions []*logstore.Subscription
+	for i := 0; i < logstore.MaximumStreams; i++ {
+		subscription, err := broker.Subscribe(parameters.Filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		subscriptions = append(subscriptions, subscription)
+	}
+	defer func() {
+		for _, subscription := range subscriptions {
+			subscription.Close()
+		}
+	}()
+	response := request(handler, http.MethodGet, "/api/v1/logs/stream", auth, "")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"error":"log_stream_unavailable"`) {
+		t.Fatalf("stream at capacity = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestWriteStreamMessageShapes(t *testing.T) {
+	record, err := logstore.ParseRecord([]byte(`{"time":"2026-09-03T12:00:00Z","level":"ERROR","msg":"gateway","seq":41,"kind":"failure"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	buffer := bufio.NewWriter(&output)
+	if err := writeStreamMessage(buffer, logstore.Message{Kind: logstore.MessageRecord, Record: record}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStreamMessage(buffer, logstore.Message{Kind: logstore.MessageDropped, Dropped: 9}); err != nil {
+		t.Fatal(err)
+	}
+	if err := buffer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	want := "event: record\nid: 41\ndata: " + string(record.Bytes()) + "\n\nevent: dropped\ndata: {\"dropped\":9}\n\n"
+	if output.String() != want {
+		t.Fatalf("stream messages = %q, want %q", output.String(), want)
 	}
 }
 

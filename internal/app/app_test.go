@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1094,6 +1095,54 @@ func TestCloseDuringRestartDoesNotLeaveServeBlocked(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Serve remained blocked after Close during restart")
+	}
+}
+
+func TestCloseEndsActiveLogStreamWithoutShutdownDelay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	_, cfg := baseAppConfig(t, path)
+	application, err := New(Options{
+		ConfigPath: path,
+		LogDir:     filepath.Join(t.TempDir(), "logs"),
+		Restart:    func() error { return errors.New("not used") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- application.Serve() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	streamRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+cfg.Service.ListenAddr+"/api/v1/logs/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamRequest.Header.Set("Authorization", "Bearer management-key")
+	streamResponse, err := (&http.Client{Timeout: 3 * time.Second}).Do(streamRequest)
+	if err != nil {
+		_ = application.Close()
+		t.Fatal(err)
+	}
+	defer streamResponse.Body.Close()
+	if streamResponse.StatusCode != http.StatusOK {
+		_ = application.Close()
+		t.Fatalf("stream status = %d", streamResponse.StatusCode)
+	}
+	started := time.Now()
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Close waited on log stream for %v", elapsed)
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve after Close = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not stop after Close")
 	}
 }
 

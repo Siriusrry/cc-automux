@@ -167,7 +167,7 @@ curl http://127.0.0.1:8765/healthz
 ~/Library/Logs/cc-automux/bootstrap.log
 ```
 
-进程自行管理两个 JSON Lines 文件。结构化日志历史通过需要认证的管理接口 `GET /api/v1/logs` 读取，不再提供命令行日志查看脚本；`bootstrap.log` 仅用于记录结构化日志可用前发生的致命启动错误。
+进程自行管理两个 JSON Lines 文件。结构化日志历史通过需要认证的 `GET /api/v1/logs` 读取，实时记录通过需要认证的 `GET /api/v1/logs/stream` 推送；不再提供命令行日志查看脚本。`bootstrap.log` 仅用于记录结构化日志可用前发生的致命启动错误。
 
 ## 升级与卸载
 

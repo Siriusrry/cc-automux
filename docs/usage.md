@@ -167,7 +167,7 @@ Installed paths:
 ~/Library/Logs/cc-automux/bootstrap.log
 ```
 
-The process owns the two JSON Lines files. Structured log history is read through the authenticated `GET /api/v1/logs` management endpoint; there is no command-line log-viewing script. `bootstrap.log` is only the fallback for fatal startup errors that happen before structured logging is ready.
+The process owns the two JSON Lines files. Structured log history is read through authenticated `GET /api/v1/logs`, and live records use authenticated `GET /api/v1/logs/stream`; there is no command-line log-viewing script. `bootstrap.log` is only the fallback for fatal startup errors that happen before structured logging is ready.
 
 ## Upgrade and uninstall
 

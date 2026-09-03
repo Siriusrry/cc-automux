@@ -56,6 +56,7 @@ type App struct {
 	gateway        *gateway.Handler
 	management     *management.Handler
 	harnesses      *harnessconfig.Manager
+	logBroker      *logstore.Broker
 	runtimeMu      sync.Mutex
 	syncedRevision uint64
 
@@ -124,16 +125,17 @@ func New(options Options) (*App, error) {
 	if logOpener == nil {
 		logOpener = logOpenerForDir(logDir)
 	}
+	logBroker := logstore.NewBroker()
 
 	// Acquire the complete candidate before promotion. If pending resources fail,
 	// rollback selects the old active configuration and resources are acquired
 	// again from that immutable candidate.
 	cfg := startup.Config()
-	logs, listener, resourceErr := acquireResources(logOpener, cfg)
+	logs, listener, resourceErr := acquireResources(logOpener, logBroker, cfg)
 	if resourceErr != nil && startup.FromPending() {
 		_ = startup.Rollback(resourceErr)
 		cfg = startup.Config()
-		logs, listener, resourceErr = acquireResources(logOpener, cfg)
+		logs, listener, resourceErr = acquireResources(logOpener, logBroker, cfg)
 	}
 	if resourceErr != nil {
 		return nil, resourceErr
@@ -157,6 +159,7 @@ func New(options Options) (*App, error) {
 		listener:   listener,
 		logs:       logs,
 		logOpener:  logOpener,
+		logBroker:  logBroker,
 		resume:     make(chan struct{}, 1),
 		done:       make(chan struct{}),
 	}
@@ -182,7 +185,7 @@ func New(options Options) (*App, error) {
 		closeResources(logs, listener)
 		_ = startup.Rollback(managerErr)
 		cfg = startup.Config()
-		logs, listener, resourceErr = acquireResources(logOpener, cfg)
+		logs, listener, resourceErr = acquireResources(logOpener, logBroker, cfg)
 		if resourceErr == nil {
 			app.logs = logs
 			app.listener = listener
@@ -201,7 +204,7 @@ func New(options Options) (*App, error) {
 			closeResources(logs, listener)
 			_ = startup.Rollback(promoteErr)
 			cfg = startup.Config()
-			logs, listener, resourceErr = acquireResources(logOpener, cfg)
+			logs, listener, resourceErr = acquireResources(logOpener, logBroker, cfg)
 			if resourceErr != nil {
 				return nil, resourceErr
 			}
@@ -295,6 +298,7 @@ func New(options Options) (*App, error) {
 		AutoModeDiagnostics: fixedDiagnostics,
 		Harnesses:           harnessManager,
 		Logs:                logReader,
+		LogStream:           logBroker,
 	})
 	app.syncRuntime()
 	app.server = newHTTPServer(app.rootHandler())
@@ -409,11 +413,15 @@ func (a *App) Close() error {
 	server := a.server
 	listener := a.listener
 	logs := a.logs
+	logBroker := a.logBroker
 	if a.done != nil {
 		close(a.done)
 	}
 	a.lifecycleMu.Unlock()
 	var result error
+	if logBroker != nil {
+		logBroker.Close()
+	}
 	if server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := server.Shutdown(ctx); err != nil {
@@ -629,8 +637,8 @@ func (a *App) preflight(current, next config.Config) error {
 
 func bind(addr string) (net.Listener, error) { return net.Listen("tcp", addr) }
 
-func acquireResources(opener LogOpener, cfg config.Config) (*logger, net.Listener, error) {
-	logs, logErr := openLogger(opener, cfg.Service.LogMaxBytes)
+func acquireResources(opener LogOpener, broker *logstore.Broker, cfg config.Config) (*logger, net.Listener, error) {
+	logs, logErr := openLoggerWithBroker(opener, cfg.Service.LogMaxBytes, broker)
 	listener, listenErr := bind(cfg.Service.ListenAddr)
 	if logErr == nil && listenErr == nil {
 		return logs, listener, nil

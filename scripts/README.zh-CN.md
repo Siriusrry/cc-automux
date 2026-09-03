@@ -59,7 +59,7 @@ LaunchAgent 只携带可选的 CC_AUTOMUX_CONFIG 覆盖，不再注入旧路由�
 
 LaunchAgent 标识为 com.Siriusrry.cc-automux，服务始终只监听 loopback。
 
-结构化日志历史通过需要认证的管理接口 `GET /api/v1/logs` 读取，不再提供命令行日志查看脚本。
+结构化日志历史通过需要认证的 `GET /api/v1/logs` 读取，实时记录通过需要认证的 `GET /api/v1/logs/stream` 推送；不再提供命令行日志查看脚本。
 
 ## 卸载
 

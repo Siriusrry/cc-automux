@@ -3,13 +3,18 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/gateway"
+	logstore "github.com/Siriusrry/cc-automux/internal/logs"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
@@ -171,10 +176,94 @@ type failingLogWriter struct{}
 
 func (failingLogWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
+type shortLogWriter struct{}
+
+func (shortLogWriter) Write(p []byte) (int, error) { return len(p) / 2, nil }
+
 func TestLoggerIgnoresRuntimeWriteFailure(t *testing.T) {
 	logs, err := openLogger(appLogOpenerFor(failingLogWriter{}), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	(&App{logs: logs}).logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "failure"))
+}
+
+func TestLoggerPublishesOnlyAfterSuccessfulCompleteWrite(t *testing.T) {
+	broker := logstore.NewBroker()
+	subscription, err := broker.Subscribe(logstore.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	var output bytes.Buffer
+	logs, err := openLoggerWithBroker(appLogOpenerFor(&output), 1024, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	(&App{logs: logs}).logServiceEvent(slog.LevelInfo, "listening", slog.String("listen_addr", "127.0.0.1:8765"))
+	message := <-subscription.Messages()
+	if message.Kind != logstore.MessageRecord {
+		t.Fatalf("message = %#v", message)
+	}
+	written := bytes.TrimSuffix(output.Bytes(), []byte{'\n'})
+	if !bytes.Equal(message.Record.Bytes(), written) {
+		t.Fatalf("published bytes = %q, written line = %q", message.Record.Bytes(), written)
+	}
+
+	failingBroker := logstore.NewBroker()
+	failingSubscription, err := failingBroker.Subscribe(logstore.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failingSubscription.Close()
+	failingLogs, err := openLoggerWithBroker(appLogOpenerFor(failingLogWriter{}), 1024, failingBroker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	(&App{logs: failingLogs}).logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "not persisted"))
+	select {
+	case unexpected := <-failingSubscription.Messages():
+		t.Fatalf("failed write was published: %#v", unexpected)
+	default:
+	}
+	short := &publishingWriter{delegate: shortLogWriter{}, broker: failingBroker}
+	if _, err := short.Write([]byte(`{"time":"2026-09-03T12:00:00Z","level":"INFO","msg":"service","seq":1}` + "\n")); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("short write error = %v", err)
+	}
+	select {
+	case unexpected := <-failingSubscription.Messages():
+		t.Fatalf("short write was published: %#v", unexpected)
+	default:
+	}
+}
+
+func TestLoggerPublishesAcrossRotation(t *testing.T) {
+	broker := logstore.NewBroker()
+	subscription, err := broker.Subscribe(logstore.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	dir := t.TempDir()
+	logs, err := openLoggerWithBroker(logOpenerForDir(dir), 256, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	application := &App{logs: logs}
+	application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", strings.Repeat("a", 100)))
+	application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", strings.Repeat("b", 100)))
+	for expected := uint64(1); expected <= 2; expected++ {
+		select {
+		case message := <-subscription.Messages():
+			if message.Kind != logstore.MessageRecord || message.Record.Seq != expected {
+				t.Fatalf("message %d = %#v", expected, message)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("record %d was not published", expected)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, logstore.ArchiveFileName)); err != nil {
+		t.Fatalf("rotation did not create archive: %v", err)
+	}
 }

@@ -213,6 +213,10 @@ type logger struct {
 }
 
 func openLogger(opener LogOpener, maxBytes int64) (*logger, error) {
+	return openLoggerWithBroker(opener, maxBytes, nil)
+}
+
+func openLoggerWithBroker(opener LogOpener, maxBytes int64, broker *logstore.Broker) (*logger, error) {
 	if opener == nil {
 		return nil, errors.New("log opener is nil")
 	}
@@ -227,13 +231,42 @@ func openLogger(opener LogOpener, maxBytes int64) (*logger, error) {
 		_ = closeFunc()
 		return nil, errors.New("log opener returned a nil writer")
 	}
-	jsonHandler := slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo})
 	source, _ := writer.(logstore.SnapshotSource)
+	output := io.Writer(writer)
+	if broker != nil {
+		output = &publishingWriter{delegate: writer, broker: broker}
+	}
+	jsonHandler := slog.NewJSONHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo})
 	return &logger{
 		handler: &sequencedHandler{state: &sequenceState{}, delegate: jsonHandler},
 		source:  source,
 		close:   closeFunc,
 	}, nil
+}
+
+type publishingWriter struct {
+	delegate io.Writer
+	broker   *logstore.Broker
+}
+
+func (w *publishingWriter) Write(p []byte) (int, error) {
+	if w == nil || w.delegate == nil {
+		return 0, errors.New("log publishing writer is not initialized")
+	}
+	n, err := w.delegate.Write(p)
+	if err != nil || n != len(p) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return n, err
+	}
+	if w.broker != nil {
+		// JSONHandler has already completed the record. Parsing failure here
+		// cannot undo an authoritative file write, so it only suppresses the
+		// impossible malformed real-time message.
+		_ = w.broker.Publish(p)
+	}
+	return n, nil
 }
 
 func (l *logger) Close() error {
