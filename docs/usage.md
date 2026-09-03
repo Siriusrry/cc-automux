@@ -167,7 +167,7 @@ Installed paths:
 ~/Library/Logs/cc-automux/bootstrap.log
 ```
 
-The process owns the two JSON Lines files. Structured logs are read through the authenticated management log endpoints; there is no command-line log-viewing script. `bootstrap.log` is only the fallback for fatal startup errors that happen before structured logging is ready.
+The process owns the two JSON Lines files. Structured log history is read through the authenticated `GET /api/v1/logs` management endpoint; there is no command-line log-viewing script. `bootstrap.log` is only the fallback for fatal startup errors that happen before structured logging is ready.
 
 ## Upgrade and uninstall
 
@@ -197,6 +197,6 @@ The uninstaller uses the macOS Trash when Finder is available. In a headless ses
 - **A reinstall appears to ignore a new port or upstream:** the existing configuration is authoritative; change it in `/admin`.
 - **`401` or `403`:** verify the route key/account and the selected `/any` or `/cpa` base URL.
 - **A manual JSON edit has no effect:** restart with `./scripts/stop.sh` followed by `./scripts/start.sh`.
-- **An upstream is temporarily unavailable:** inspect the authenticated management log endpoint. AnyRouter failover occurs automatically for transport errors, `429`, and `5xx` responses.
+- **An upstream is temporarily unavailable:** inspect `GET /api/v1/logs` with management authentication. AnyRouter failover occurs automatically for transport errors, `429`, and `5xx` responses.
 
 The configuration desk has no separate authentication and returns configured keys to the local browser. It is protected by the loopback-only listener; do not expose the port through a reverse proxy or tunnel.

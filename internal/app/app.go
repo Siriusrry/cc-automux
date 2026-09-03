@@ -18,6 +18,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/gateway"
 	"github.com/Siriusrry/cc-automux/internal/harnessconfig"
 	"github.com/Siriusrry/cc-automux/internal/health"
+	logstore "github.com/Siriusrry/cc-automux/internal/logs"
 	"github.com/Siriusrry/cc-automux/internal/management"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/protocol"
@@ -273,6 +274,19 @@ func New(options Options) (*App, error) {
 		ProtocolAdapters: protocol.EmptyRegistry(),
 		FixedDiagnostics: fixedDiagnostics,
 	})
+	logSource := app.logs.source
+	if logSource == nil {
+		logSource, err = logstore.NewDirectorySource(logDir)
+		if err != nil {
+			closeResources(app.logs, app.listener)
+			return nil, fmt.Errorf("initialize log reader source: %w", err)
+		}
+	}
+	logReader, logReaderErr := logstore.NewReader(logSource)
+	if logReaderErr != nil {
+		closeResources(app.logs, app.listener)
+		return nil, fmt.Errorf("initialize log reader: %w", logReaderErr)
+	}
 	app.management = management.NewWithOptions(manager, management.Options{
 		Health:              healthStore,
 		Selector:            selector,
@@ -280,6 +294,7 @@ func New(options Options) (*App, error) {
 		ActiveRequests:      app.activeDataRequests,
 		AutoModeDiagnostics: fixedDiagnostics,
 		Harnesses:           harnessManager,
+		Logs:                logReader,
 	})
 	app.syncRuntime()
 	app.server = newHTTPServer(app.rootHandler())

@@ -12,11 +12,7 @@ import (
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/gateway"
-)
-
-const (
-	activeLogName  = "cc-automux.log"
-	archiveLogName = "cc-automux.log.1"
+	logstore "github.com/Siriusrry/cc-automux/internal/logs"
 )
 
 // LogOpener abstracts startup log-resource acquisition so restart transactions
@@ -55,8 +51,8 @@ func newRotatingWriter(dir string, maxBytes int64) (*rotatingWriter, error) {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
 	w := &rotatingWriter{
-		active:    filepath.Join(dir, activeLogName),
-		archive:   filepath.Join(dir, archiveLogName),
+		active:    filepath.Join(dir, logstore.ActiveFileName),
+		archive:   filepath.Join(dir, logstore.ArchiveFileName),
 		threshold: maxBytes / 2,
 	}
 	if err := w.openActive(); err != nil {
@@ -158,6 +154,22 @@ func (w *rotatingWriter) Close() error {
 	return err
 }
 
+// OpenSnapshot binds both generations while holding the writer lock. A
+// rotation can proceed after the handles are open without changing which file
+// contents the history request observes.
+func (w *rotatingWriter) OpenSnapshot() (logstore.Snapshot, error) {
+	if w == nil {
+		return logstore.Snapshot{}, errors.New("log writer is nil")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	source, err := logstore.NewDirectorySource(filepath.Dir(w.active))
+	if err != nil {
+		return logstore.Snapshot{}, err
+	}
+	return source.OpenSnapshot()
+}
+
 type sequenceState struct {
 	mu   sync.Mutex
 	next uint64
@@ -196,6 +208,7 @@ func (h *sequencedHandler) WithGroup(name string) slog.Handler {
 
 type logger struct {
 	handler slog.Handler
+	source  logstore.SnapshotSource
 	close   func() error
 }
 
@@ -215,8 +228,10 @@ func openLogger(opener LogOpener, maxBytes int64) (*logger, error) {
 		return nil, errors.New("log opener returned a nil writer")
 	}
 	jsonHandler := slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo})
+	source, _ := writer.(logstore.SnapshotSource)
 	return &logger{
 		handler: &sequencedHandler{state: &sequenceState{}, delegate: jsonHandler},
+		source:  source,
 		close:   closeFunc,
 	}, nil
 }

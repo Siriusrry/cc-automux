@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/health"
+	logstore "github.com/Siriusrry/cc-automux/internal/logs"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
@@ -320,6 +322,101 @@ func TestManagementErrorsAndMethodContracts(t *testing.T) {
 	}
 	if rec := request(handler, http.MethodGet, "/api/v1/providers/nope", auth, ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("missing provider = %d", rec.Code)
+	}
+}
+
+func TestLogHistoryEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	contents := strings.Join([]string{
+		`{"time":"2026-09-03T12:00:00Z","level":"INFO","msg":"service","seq":1,"event":"listening","listen_addr":"127.0.0.1:8765"}`,
+		`malformed`,
+		`{"time":"2026-09-03T12:00:01Z","level":"ERROR","msg":"gateway","seq":2,"kind":"failure","provider_id":"provider-a","http_status":503,"raw_error":"complete"}`,
+		`{"time":"2026-09-03T12:00:02Z","level":"ERROR","msg":"gateway","seq":3,"kind":"failure","provider_id":"provider-b","http_status":502,"raw_error":"newest"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, logstore.ActiveFileName), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := logstore.NewDirectorySource(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := logstore.NewReader(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWithOptions(testManager(t, nil), Options{Logs: reader})
+
+	response := request(handler, http.MethodGet, "/api/v1/logs?level=ERROR&http_status=502&http_status=503&limit=1", "Bearer management-key", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("log history = %d %s", response.Code, response.Body.String())
+	}
+	var page struct {
+		Items            []map[string]any `json:"items"`
+		HasMore          bool             `json:"has_more"`
+		NextCursor       string           `json:"next_cursor"`
+		SkippedMalformed int              `json:"skipped_malformed"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0]["seq"] != float64(3) || !page.HasMore || page.NextCursor == "" || page.SkippedMalformed != 0 {
+		t.Fatalf("first log page = %#v", page)
+	}
+	second := request(handler, http.MethodGet, "/api/v1/logs?level=ERROR&http_status=502&http_status=503&limit=1&cursor="+page.NextCursor, "Bearer management-key", "")
+	if second.Code != http.StatusOK {
+		t.Fatalf("second log page = %d %s", second.Code, second.Body.String())
+	}
+	page = struct {
+		Items            []map[string]any `json:"items"`
+		HasMore          bool             `json:"has_more"`
+		NextCursor       string           `json:"next_cursor"`
+		SkippedMalformed int              `json:"skipped_malformed"`
+	}{}
+	if err := json.Unmarshal(second.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0]["seq"] != float64(2) || page.HasMore || page.NextCursor != "" || page.SkippedMalformed != 1 {
+		t.Fatalf("second log page = %#v", page)
+	}
+
+	for _, path := range []string{
+		"/api/v1/logs?unknown=value",
+		"/api/v1/logs?level=",
+		"/api/v1/logs?limit=1001",
+		"/api/v1/logs?cursor=invalid!",
+	} {
+		invalid := request(handler, http.MethodGet, path, "Bearer management-key", "")
+		if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), `"error":"validation_failed"`) {
+			t.Fatalf("invalid log query %s = %d %s", path, invalid.Code, invalid.Body.String())
+		}
+	}
+	if method := request(handler, http.MethodPost, "/api/v1/logs", "Bearer management-key", ""); method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("log method = %d Allow=%q", method.Code, method.Header().Get("Allow"))
+	}
+}
+
+func TestLogHistoryEndpointMissingFilesAndReadFailure(t *testing.T) {
+	emptySource, err := logstore.NewDirectorySource(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyReader, _ := logstore.NewReader(emptySource)
+	emptyHandler := NewWithOptions(testManager(t, nil), Options{Logs: emptyReader})
+	empty := request(emptyHandler, http.MethodGet, "/api/v1/logs", "Bearer management-key", "")
+	if empty.Code != http.StatusOK || !strings.Contains(empty.Body.String(), `"items":[]`) || !strings.Contains(empty.Body.String(), `"has_more":false`) || !strings.Contains(empty.Body.String(), `"skipped_malformed":0`) || strings.Contains(empty.Body.String(), `"next_cursor"`) {
+		t.Fatalf("empty log history = %d %s", empty.Code, empty.Body.String())
+	}
+
+	failingReader, err := logstore.NewReader(logstore.SnapshotSourceFunc(func() (logstore.Snapshot, error) {
+		return logstore.Snapshot{}, errors.New("read failed")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingHandler := NewWithOptions(testManager(t, nil), Options{Logs: failingReader})
+	failure := request(failingHandler, http.MethodGet, "/api/v1/logs", "Bearer management-key", "")
+	if failure.Code != http.StatusInternalServerError || !strings.Contains(failure.Body.String(), `"error":"log_read_failed"`) {
+		t.Fatalf("failed log history = %d %s", failure.Code, failure.Body.String())
 	}
 }
 

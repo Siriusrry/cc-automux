@@ -18,6 +18,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/automode"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/harnessconfig"
+	logstore "github.com/Siriusrry/cc-automux/internal/logs"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
@@ -1098,7 +1099,7 @@ func TestCloseDuringRestartDoesNotLeaveServeBlocked(t *testing.T) {
 
 func TestRotatingWriterPreservesOversizedRecordAndLatestHistory(t *testing.T) {
 	dir := t.TempDir()
-	oldArchive := filepath.Join(dir, archiveLogName)
+	oldArchive := filepath.Join(dir, logstore.ArchiveFileName)
 	if err := os.WriteFile(oldArchive, []byte("oldest\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1122,7 +1123,7 @@ func TestRotatingWriterPreservesOversizedRecordAndLatestHistory(t *testing.T) {
 	if err != nil || string(archive) != string(oversized) {
 		t.Fatalf("archive = %q, %v", archive, err)
 	}
-	active, err := os.ReadFile(filepath.Join(dir, activeLogName))
+	active, err := os.ReadFile(filepath.Join(dir, logstore.ActiveFileName))
 	if err != nil || string(active) != "next\n" {
 		t.Fatalf("active = %q, %v", active, err)
 	}
@@ -1146,7 +1147,7 @@ func TestRotatingWriterKeepsRegularTotalWithinLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		var total int64
-		for _, name := range []string{activeLogName, archiveLogName} {
+		for _, name := range []string{logstore.ActiveFileName, logstore.ArchiveFileName} {
 			if info, statErr := os.Stat(filepath.Join(dir, name)); statErr == nil {
 				total += info.Size()
 			} else if !os.IsNotExist(statErr) {

@@ -15,6 +15,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/harnessconfig"
 	"github.com/Siriusrry/cc-automux/internal/health"
+	logstore "github.com/Siriusrry/cc-automux/internal/logs"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
@@ -37,6 +38,7 @@ type Options struct {
 	ActiveRequests      func() int64
 	AutoModeDiagnostics *automode.Diagnostics
 	Harnesses           *harnessconfig.Manager
+	Logs                *logstore.Reader
 }
 
 type Handler struct {
@@ -50,6 +52,7 @@ type Handler struct {
 	activeRequests      func() int64
 	autoModeDiagnostics *automode.Diagnostics
 	harnesses           *harnessconfig.Manager
+	logs                *logstore.Reader
 }
 
 func New(manager *runtime.Manager) *Handler {
@@ -80,6 +83,7 @@ func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
 		activeRequests:      options.ActiveRequests,
 		autoModeDiagnostics: options.AutoModeDiagnostics,
 		harnesses:           options.Harnesses,
+		logs:                options.Logs,
 	}
 }
 
@@ -104,6 +108,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleStatus(w, r)
 	case apiPrefix + "/provider-health":
 		h.handleProviderHealth(w, r)
+	case apiPrefix + "/logs":
+		h.handleLogs(w, r)
 	case apiPrefix + "/harnesses":
 		h.handleHarnessCollection(w, r)
 	default:
