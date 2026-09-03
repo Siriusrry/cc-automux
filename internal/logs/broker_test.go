@@ -1,10 +1,12 @@
 package logs
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -96,6 +98,78 @@ func TestBrokerDropsWithoutBlockingAndReportsOnlyRealDrops(t *testing.T) {
 	if delivered.Kind != MessageRecord || delivered.Record.Seq != 20_001 {
 		t.Fatalf("recovered record = %#v", delivered)
 	}
+}
+
+func TestBrokerBoundsPushedRecordsAndFiltersOnCompleteValues(t *testing.T) {
+	broker := NewBroker()
+	subscription, err := broker.Subscribe(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+
+	body := strings.Repeat("x", MaximumFieldBytes+321)
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"time":"2026-09-03T12:00:00Z","level":"ERROR","msg":"gateway","seq":4,"kind":"failure","raw_error":` + string(encoded) + "}\n"
+	if err := broker.Publish([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	message := <-subscription.Messages()
+	if message.Kind != MessageRecord {
+		t.Fatalf("message = %#v", message)
+	}
+	// The connection carries the summary, not the complete body: the buffer
+	// bounds records rather than bytes, so a burst of oversized upstream errors
+	// would otherwise queue far more than the buffer suggests.
+	pushed := len(message.Record.Bytes())
+	if pushed >= len(line) {
+		t.Fatalf("pushed %d bytes for a %d byte line", pushed, len(line))
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(message.Record.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	var limits map[string]int
+	if err := json.Unmarshal(fields[truncatedFieldName], &limits); err != nil {
+		t.Fatal(err)
+	}
+	if limits["raw_error"] != len(body) {
+		t.Fatalf("marker = %v", limits)
+	}
+	// The reference resolves the same identity the record was persisted under.
+	if reference := decodeStringField(t, fields[referenceFieldName]); reference != EncodeReference(message.Record.Time, 4) {
+		t.Fatalf("reference = %q", reference)
+	}
+
+	// Filtering uses the complete record, so a value beyond the bound still
+	// decides the match and cannot be changed by summarizing.
+	filtered, err := ParseParameters(map[string][]string{"kind": {"failure"}}, ParseOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching, err := broker.Subscribe(filtered.Filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer matching.Close()
+	if err := broker.Publish([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-matching.Messages(); got.Kind != MessageRecord || got.Record.Seq != 4 {
+		t.Fatalf("filtered message = %#v", got)
+	}
+}
+
+func decodeStringField(t *testing.T, value json.RawMessage) string {
+	t.Helper()
+	var decoded string
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded
 }
 
 func TestBrokerSubscriptionLimitMultipleSubscribersAndLifecycle(t *testing.T) {

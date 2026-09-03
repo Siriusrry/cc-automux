@@ -115,6 +115,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleLogs(w, r)
 	case apiPrefix + "/logs/stream":
 		h.handleLogStream(w, r)
+	case apiPrefix + "/logs/record":
+		h.handleLogRecord(w, r)
 	case apiPrefix + "/harnesses":
 		h.handleHarnessCollection(w, r)
 	default:

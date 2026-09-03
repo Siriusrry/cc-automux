@@ -49,27 +49,48 @@ type Cursor struct {
 }
 
 func EncodeCursor(timestamp time.Time, seq uint64) string {
+	return encodePosition(timestamp, seq)
+}
+
+func DecodeCursor(value string) (Cursor, error) {
+	return decodePosition(value, "cursor")
+}
+
+// EncodeReference identifies one record for later complete retrieval. It shares
+// the cursor encoding because both name a position by time and sequence, and it
+// stays opaque so the identity can gain another component without a client
+// change.
+func EncodeReference(timestamp time.Time, seq uint64) string {
+	return encodePosition(timestamp, seq)
+}
+
+func DecodeReference(value string) (Cursor, error) {
+	return decodePosition(value, "ref")
+}
+
+func encodePosition(timestamp time.Time, seq uint64) string {
 	value := timestamp.Format(time.RFC3339Nano) + "|" + strconv.FormatUint(seq, 10)
 	return base64.RawURLEncoding.EncodeToString([]byte(value))
 }
 
-func DecodeCursor(value string) (Cursor, error) {
+func decodePosition(value, field string) (Cursor, error) {
+	invalid := &ValidationError{Field: field, Message: "must be an unmodified " + field + " returned by the server"}
 	decoded, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
-		return Cursor{}, &ValidationError{Field: "cursor", Message: "must be an unmodified cursor returned by the server"}
+		return Cursor{}, invalid
 	}
 	text := string(decoded)
 	if strings.Count(text, "|") != 1 {
-		return Cursor{}, &ValidationError{Field: "cursor", Message: "must be an unmodified cursor returned by the server"}
+		return Cursor{}, invalid
 	}
 	timeText, seqText, _ := strings.Cut(text, "|")
 	timestamp, err := time.Parse(time.RFC3339Nano, timeText)
 	if err != nil {
-		return Cursor{}, &ValidationError{Field: "cursor", Message: "must be an unmodified cursor returned by the server"}
+		return Cursor{}, invalid
 	}
 	seq, err := strconv.ParseUint(seqText, 10, 64)
 	if err != nil {
-		return Cursor{}, &ValidationError{Field: "cursor", Message: "must be an unmodified cursor returned by the server"}
+		return Cursor{}, invalid
 	}
 	return Cursor{Time: timestamp, Seq: seq}, nil
 }

@@ -268,9 +268,6 @@ func TestReaderAssemblesOversizedRecordWithoutRereading(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(itemSeqs(page.Items), []uint64{3, 2, 1}) {
 		t.Fatalf("page = %v, %v", itemSeqs(page.Items), err)
 	}
-	if !strings.Contains(string(page.Items[1].Bytes()), strings.Repeat("y", int(reverseReadChunk)*8)) {
-		t.Fatal("oversized record was truncated")
-	}
 	// The doubling growth keeps total reads logarithmic in the record length,
 	// and every byte of the file is pulled at most twice.
 	if counting.reads > 8 {
@@ -278,6 +275,20 @@ func TestReaderAssemblesOversizedRecordWithoutRereading(t *testing.T) {
 	}
 	if counting.bytes > 2*size {
 		t.Fatalf("read %d bytes for a %d byte file", counting.bytes, size)
+	}
+
+	// The page carries the bounded summary; the complete field is still reachable
+	// through the reference the summary names.
+	reference, err := DecodeReference(referenceOf(t, page.Items[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete, err := reader.Record(context.Background(), reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(complete.Bytes()), strings.Repeat("y", int(reverseReadChunk)*8)) {
+		t.Fatal("referenced record was not complete")
 	}
 }
 
@@ -315,6 +326,116 @@ func readerForFile(t *testing.T, file ReadFile, size int64) *Reader {
 type nopCloseFile struct{ ReadFile }
 
 func (nopCloseFile) Close() error { return nil }
+
+func TestReaderRecordResolvesReferencesFromBothGenerations(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	// The archive holds a newer event time than the active file: event records
+	// carry when the event happened, so a lookup cannot stop early on order.
+	writeLines(t, filepath.Join(dir, ArchiveFileName),
+		logLine(base.Add(5*time.Second), 1, `"kind":"success"`),
+		logLine(base.Add(time.Second), 2, `"kind":"failure"`),
+	)
+	writeLines(t, filepath.Join(dir, ActiveFileName),
+		logLine(base.Add(2*time.Second), 3, `"kind":"success"`),
+		"not-json",
+		logLine(base.Add(3*time.Second), 4, `"kind":"failure"`),
+	)
+	reader := directoryReader(t, dir)
+
+	for _, want := range []struct {
+		timestamp time.Time
+		seq       uint64
+	}{
+		{base.Add(5 * time.Second), 1},
+		{base.Add(time.Second), 2},
+		{base.Add(2 * time.Second), 3},
+		{base.Add(3 * time.Second), 4},
+	} {
+		reference, err := DecodeReference(EncodeReference(want.timestamp, want.seq))
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := reader.Record(context.Background(), reference)
+		if err != nil {
+			t.Fatalf("lookup seq %d: %v", want.seq, err)
+		}
+		if record.Seq != want.seq || !record.Time.Equal(want.timestamp) {
+			t.Fatalf("resolved seq %d at %s", record.Seq, record.Time)
+		}
+	}
+
+	// A rotated-away record is an ordinary outcome, not a failure.
+	missing, err := DecodeReference(EncodeReference(base.Add(time.Hour), 99))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Record(context.Background(), missing); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("missing reference error = %v", err)
+	}
+
+	// A matching time with a different sequence is a different record.
+	sameTime, err := DecodeReference(EncodeReference(base.Add(2*time.Second), 77))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Record(context.Background(), sameTime); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("same-time mismatch error = %v", err)
+	}
+
+	if _, err := reader.Record(context.Background(), missing); err == nil {
+		t.Fatal("expected the missing lookup to stay reproducible")
+	}
+	empty := directoryReader(t, t.TempDir())
+	if _, err := empty.Record(context.Background(), missing); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("missing files lookup error = %v", err)
+	}
+}
+
+func TestReaderRecordReturnsCompleteUntruncatedContent(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	body := strings.Repeat("q", MaximumFieldBytes*3)
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, filepath.Join(dir, ActiveFileName),
+		logLine(base, 1, `"kind":"failure","raw_error":`+string(encoded)),
+	)
+	reader := directoryReader(t, dir)
+
+	page, err := reader.Query(context.Background(), HistoryQuery{Limit: 10})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("page = %d items, %v", len(page.Items), err)
+	}
+	reference, err := DecodeReference(referenceOf(t, page.Items[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := reader.Record(context.Background(), reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(record.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := json.Unmarshal(fields["raw_error"], &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw != body {
+		t.Fatalf("complete record returned %d of %d bytes", len(raw), len(body))
+	}
+	// The complete record is the persisted line itself, with no markers added.
+	if _, marked := fields[truncatedFieldName]; marked {
+		t.Fatal("complete record carries a truncation marker")
+	}
+	if _, referenced := fields[referenceFieldName]; referenced {
+		t.Fatal("complete record carries a reference")
+	}
+}
 
 func TestReaderSnapshotSurvivesConcurrentNamespaceRotation(t *testing.T) {
 	dir := t.TempDir()

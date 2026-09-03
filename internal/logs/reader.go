@@ -100,12 +100,75 @@ func (r *Reader) Query(ctx context.Context, query HistoryQuery) (page Page, resu
 			page.NextCursor = EncodeCursor(last.Time, last.Seq)
 			break
 		}
-		page.Items = append(page.Items, record)
+		summary, err := Summarize(record)
+		if err != nil {
+			// The line parsed but could not be summarized, so it cannot be
+			// represented within the response bound. Account for it the same way
+			// as an unparseable line instead of failing the whole request.
+			page.SkippedMalformed++
+			if err := selected.advance(ctx, &page.SkippedMalformed); err != nil {
+				return page, err
+			}
+			continue
+		}
+		page.Items = append(page.Items, summary)
 		if err := selected.advance(ctx, &page.SkippedMalformed); err != nil {
 			return page, err
 		}
 	}
 	return page, nil
+}
+
+// ErrRecordNotFound reports that no persisted record carries the reference. The
+// record was rotated away, which is an ordinary outcome rather than a failure.
+var ErrRecordNotFound = errors.New("log record not found")
+
+// Record returns the complete persisted record named by a reference. Both
+// generations are scanned in full: event records carry the time the event
+// occurred rather than the time it was written, so file order cannot be relied
+// on to stop early without risking an intermittent miss.
+func (r *Reader) Record(ctx context.Context, reference Cursor) (record Record, resultErr error) {
+	if r == nil || r.source == nil {
+		return Record{}, errors.New("log reader is not initialized")
+	}
+	snapshot, err := r.source.OpenSnapshot()
+	if err != nil {
+		return Record{}, err
+	}
+	defer func() {
+		if closeErr := snapshot.Close(); resultErr == nil && closeErr != nil {
+			resultErr = closeErr
+		}
+	}()
+
+	for _, item := range []struct {
+		file ReadFile
+		size int64
+	}{{snapshot.Active, snapshot.ActiveSize}, {snapshot.Archive, snapshot.ArchiveSize}} {
+		if item.file == nil {
+			continue
+		}
+		stream, err := newRecordStream(item.file, item.size)
+		if err != nil {
+			return Record{}, err
+		}
+		skipped := 0
+		for {
+			if err := ctx.Err(); err != nil {
+				return Record{}, err
+			}
+			if err := stream.advance(ctx, &skipped); err != nil {
+				return Record{}, err
+			}
+			if !stream.has {
+				break
+			}
+			if comparePosition(stream.current.Time, stream.current.Seq, reference.Time, reference.Seq) == 0 {
+				return stream.current, nil
+			}
+		}
+	}
+	return Record{}, ErrRecordNotFound
 }
 
 type recordStream struct {

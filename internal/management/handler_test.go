@@ -423,6 +423,100 @@ func TestLogHistoryEndpointMissingFilesAndReadFailure(t *testing.T) {
 	}
 }
 
+func TestLogRecordEndpointReturnsCompleteContent(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Repeat("x", logstore.MaximumFieldBytes+64)
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"time":"2026-09-03T12:00:00Z","level":"ERROR","msg":"gateway","seq":7,"kind":"failure","raw_error":` + string(encoded) + `}`
+	if err := os.WriteFile(filepath.Join(dir, logstore.ActiveFileName), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := logstore.NewDirectorySource(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := logstore.NewReader(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWithOptions(testManager(t, nil), Options{Logs: reader})
+
+	page := request(handler, http.MethodGet, "/api/v1/logs", "Bearer management-key", "")
+	if page.Code != http.StatusOK {
+		t.Fatalf("history = %d %s", page.Code, page.Body.String())
+	}
+	var decoded struct {
+		Items []struct {
+			Reference string         `json:"ref"`
+			Truncated map[string]int `json:"truncated"`
+			RawError  string         `json:"raw_error"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(page.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Items) != 1 {
+		t.Fatalf("history items = %d", len(decoded.Items))
+	}
+	item := decoded.Items[0]
+	if len(item.RawError) != logstore.MaximumFieldBytes || item.Truncated["raw_error"] != len(body) || item.Reference == "" {
+		t.Fatalf("summary = %#v", item)
+	}
+
+	complete := request(handler, http.MethodGet, "/api/v1/logs/record?ref="+item.Reference, "Bearer management-key", "")
+	if complete.Code != http.StatusOK {
+		t.Fatalf("record = %d %s", complete.Code, complete.Body.String())
+	}
+	if strings.TrimSpace(complete.Body.String()) != line {
+		t.Fatal("record endpoint did not return the persisted line")
+	}
+
+	if unauthorized := request(handler, http.MethodGet, "/api/v1/logs/record?ref="+item.Reference, "", ""); unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated record = %d", unauthorized.Code)
+	}
+	for _, path := range []string{
+		"/api/v1/logs/record",
+		"/api/v1/logs/record?ref=",
+		"/api/v1/logs/record?ref=invalid!",
+		"/api/v1/logs/record?ref=" + item.Reference + "&ref=" + item.Reference,
+		"/api/v1/logs/record?ref=" + item.Reference + "&limit=1",
+	} {
+		invalid := request(handler, http.MethodGet, path, "Bearer management-key", "")
+		if invalid.Code != http.StatusUnprocessableEntity || !strings.Contains(invalid.Body.String(), `"error":"validation_failed"`) {
+			t.Fatalf("invalid record request %s = %d %s", path, invalid.Code, invalid.Body.String())
+		}
+	}
+	// A well-formed reference to a rotated-away record is not a server failure.
+	rotated := logstore.EncodeReference(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), 1)
+	missing := request(handler, http.MethodGet, "/api/v1/logs/record?ref="+rotated, "Bearer management-key", "")
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"error":"not_found"`) {
+		t.Fatalf("rotated record = %d %s", missing.Code, missing.Body.String())
+	}
+	if method := request(handler, http.MethodPost, "/api/v1/logs/record?ref="+item.Reference, "Bearer management-key", ""); method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("record method = %d Allow=%q", method.Code, method.Header().Get("Allow"))
+	}
+
+	failingReader, err := logstore.NewReader(logstore.SnapshotSourceFunc(func() (logstore.Snapshot, error) {
+		return logstore.Snapshot{}, errors.New("read failed")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := request(NewWithOptions(testManager(t, nil), Options{Logs: failingReader}),
+		http.MethodGet, "/api/v1/logs/record?ref="+item.Reference, "Bearer management-key", "")
+	if failing.Code != http.StatusInternalServerError || !strings.Contains(failing.Body.String(), `"error":"log_read_failed"`) {
+		t.Fatalf("failed record read = %d %s", failing.Code, failing.Body.String())
+	}
+	unavailable := request(NewWithOptions(testManager(t, nil), Options{}),
+		http.MethodGet, "/api/v1/logs/record?ref="+item.Reference, "Bearer management-key", "")
+	if unavailable.Code != http.StatusInternalServerError || !strings.Contains(unavailable.Body.String(), `"error":"log_read_failed"`) {
+		t.Fatalf("unavailable record read = %d %s", unavailable.Code, unavailable.Body.String())
+	}
+}
+
 func TestLogStreamEndpoint(t *testing.T) {
 	broker := logstore.NewBroker()
 	handler := NewWithOptions(testManager(t, nil), Options{LogStream: broker})

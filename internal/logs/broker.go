@@ -33,10 +33,16 @@ type subscriber struct {
 	dropped uint64
 }
 
-func (s *subscriber) deliver(record Record) {
+// deliver offers one already-summarized record. Filtering runs against the
+// original record so a bounded field cannot change a match, while only the
+// summary is buffered — the buffer bounds records, not bytes, so buffering
+// complete oversized bodies would let a burst of upstream failures queue
+// hundreds of megabytes against one connection.
+func (s *subscriber) deliver(record, summary Record) {
 	if s == nil || !s.filter.Match(record) {
 		return
 	}
+	record = summary
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.dropped > 0 {
@@ -82,8 +88,7 @@ func (b *Broker) Publish(line []byte) error {
 	if err != nil {
 		return err
 	}
-	b.publishRecordLocked(record)
-	return nil
+	return b.publishParsedLocked(record)
 }
 
 func (b *Broker) PublishRecord(record Record) {
@@ -95,13 +100,18 @@ func (b *Broker) PublishRecord(record Record) {
 	if b.closed {
 		return
 	}
-	b.publishRecordLocked(record)
+	_ = b.publishParsedLocked(record)
 }
 
-func (b *Broker) publishRecordLocked(record Record) {
-	for _, target := range b.subscribers {
-		target.deliver(record)
+func (b *Broker) publishParsedLocked(record Record) error {
+	summary, err := Summarize(record)
+	if err != nil {
+		return err
 	}
+	for _, target := range b.subscribers {
+		target.deliver(record, summary)
+	}
+	return nil
 }
 
 type Subscription struct {

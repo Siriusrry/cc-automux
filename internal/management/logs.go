@@ -39,6 +39,44 @@ func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, page)
 }
 
+// handleLogRecord returns one complete persisted record. Both interfaces bound
+// oversized fields, so this is how a client reads content that was withheld,
+// whether it saw the summary in a history page or on the live stream.
+func (h *Handler) handleLogRecord(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	values := r.URL.Query()
+	reference := values.Get("ref")
+	if len(values) != 1 || len(values["ref"]) != 1 || reference == "" {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "ref: must appear exactly once")
+		return
+	}
+	position, err := logstore.DecodeReference(reference)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+		return
+	}
+	if h.logs == nil {
+		writeError(w, http.StatusInternalServerError, "log_read_failed", "log history is unavailable")
+		return
+	}
+	record, err := h.logs.Record(r.Context(), position)
+	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return
+		case errors.Is(err, logstore.ErrRecordNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "log record is no longer retained")
+		default:
+			writeError(w, http.StatusInternalServerError, "log_read_failed", "could not read the log record")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
+}
+
 func (h *Handler) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
