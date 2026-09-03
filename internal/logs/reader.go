@@ -156,9 +156,19 @@ func newestStream(streams []*recordStream) *recordStream {
 	return newest
 }
 
+// reverseLineReader walks a byte range backwards one line at a time while
+// retaining the block it last read. Successive lines that share a block are
+// served from memory, so scanning a range costs one read of that range rather
+// than one block read per line.
 type reverseLineReader struct {
-	file         ReadFile
-	end          int64
+	file ReadFile
+	// end is the exclusive upper bound of the bytes still to be scanned; the
+	// next line reported ends here.
+	end int64
+	// buf holds the file bytes at [start, start+len(buf)) and always covers
+	// end, so the unscanned window is buf[:end-start].
+	start        int64
+	buf          []byte
 	pendingEmpty bool
 }
 
@@ -173,17 +183,20 @@ func newReverseLineReader(file ReadFile, size int64) (*reverseLineReader, error)
 	if size < 0 || size > info.Size() {
 		return nil, errors.New("log snapshot size is invalid")
 	}
-	reader := &reverseLineReader{file: file, end: size}
-	if reader.end > 0 {
+	reader := &reverseLineReader{file: file}
+	end := size
+	if end > 0 {
 		last := []byte{0}
-		if err := readAtFull(file, last, reader.end-1); err != nil {
+		if err := readAtFull(file, last, end-1); err != nil {
 			return nil, err
 		}
 		if last[0] == '\n' {
-			reader.end--
-			reader.pendingEmpty = reader.end == 0
+			end--
+			reader.pendingEmpty = end == 0
 		}
 	}
+	reader.end = end
+	reader.start = end
 	return reader, nil
 }
 
@@ -192,43 +205,48 @@ func (r *reverseLineReader) Next() ([]byte, bool, error) {
 		r.pendingEmpty = false
 		return []byte{}, true, nil
 	}
-	if r.end == 0 {
-		return nil, false, nil
-	}
-	searchEnd := r.end
-	parts := make([][]byte, 0, 1)
-	total := 0
-	for searchEnd > 0 {
-		start := searchEnd - reverseReadChunk
-		if start < 0 {
-			start = 0
+	for {
+		if r.end == 0 {
+			return nil, false, nil
 		}
-		chunk := make([]byte, searchEnd-start)
-		if err := readAtFull(r.file, chunk, start); err != nil {
+		window := r.buf[:r.end-r.start]
+		if index := bytes.LastIndexByte(window, '\n'); index >= 0 {
+			line := append([]byte(nil), window[index+1:]...)
+			r.end = r.start + int64(index)
+			return line, true, nil
+		}
+		if r.start == 0 {
+			line := append([]byte(nil), window...)
+			r.end = 0
+			return line, true, nil
+		}
+		if err := r.extend(); err != nil {
 			return nil, false, err
 		}
-		if index := bytes.LastIndexByte(chunk, '\n'); index >= 0 {
-			part := append([]byte(nil), chunk[index+1:]...)
-			parts = append(parts, part)
-			total += len(part)
-			r.end = start + int64(index)
-			return joinReverseParts(parts, total), true, nil
-		}
-		part := append([]byte(nil), chunk...)
-		parts = append(parts, part)
-		total += len(part)
-		searchEnd = start
 	}
-	r.end = 0
-	return joinReverseParts(parts, total), true, nil
 }
 
-func joinReverseParts(parts [][]byte, total int) []byte {
-	line := make([]byte, 0, total)
-	for i := len(parts) - 1; i >= 0; i-- {
-		line = append(line, parts[i]...)
+// extend drops the already-scanned tail and prepends more file bytes. The read
+// size doubles while a single line keeps growing, so assembling one oversized
+// record stays linear in its length instead of quadratic in its block count.
+func (r *reverseLineReader) extend() error {
+	retained := r.end - r.start
+	r.buf = r.buf[:retained]
+	want := reverseReadChunk
+	if retained > want {
+		want = retained
 	}
-	return line
+	if want > r.start {
+		want = r.start
+	}
+	chunk := make([]byte, want+retained)
+	if err := readAtFull(r.file, chunk[:want], r.start-want); err != nil {
+		return err
+	}
+	copy(chunk[want:], r.buf)
+	r.buf = chunk
+	r.start -= want
+	return nil
 }
 
 func readAtFull(file io.ReaderAt, destination []byte, offset int64) error {

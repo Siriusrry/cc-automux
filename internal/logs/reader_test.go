@@ -202,6 +202,120 @@ func TestReaderMissingFilesAndReadFailures(t *testing.T) {
 	}
 }
 
+// countingFile reports how much the reader pulled from disk so the retained
+// block stays observable. Re-reading a block per line would make both counters
+// grow with the number of records instead of the scanned byte range.
+type countingFile struct {
+	ReadFile
+	reads int
+	bytes int64
+}
+
+func (f *countingFile) ReadAt(p []byte, offset int64) (int, error) {
+	n, err := f.ReadFile.ReadAt(p, offset)
+	f.reads++
+	f.bytes += int64(n)
+	return n, err
+}
+
+func TestReaderServesLinesSharingABlockFromMemory(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	const records = 400
+	lines := make([]string, 0, records)
+	for i := 0; i < records; i++ {
+		lines = append(lines, logLine(base.Add(time.Duration(i)*time.Second), uint64(i+1), `"kind":"success"`))
+	}
+	path := filepath.Join(dir, ActiveFileName)
+	writeLines(t, path, lines...)
+	size := fileSize(t, path)
+	if size >= reverseReadChunk {
+		t.Fatalf("fixture must fit one block: %d bytes", size)
+	}
+
+	counting := openCountingFile(t, path)
+	page, err := readerForFile(t, counting, size).Query(context.Background(), HistoryQuery{Limit: records})
+	if err != nil || len(page.Items) != records {
+		t.Fatalf("page = %d items, %v", len(page.Items), err)
+	}
+	// One terminator probe plus one block read covers the whole fixture.
+	if counting.reads > 2 {
+		t.Fatalf("reading %d records issued %d reads", records, counting.reads)
+	}
+	if counting.bytes > size+1 {
+		t.Fatalf("read %d bytes for a %d byte range", counting.bytes, size)
+	}
+}
+
+func TestReaderAssemblesOversizedRecordWithoutRereading(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	oversized, err := json.Marshal(strings.Repeat("y", int(reverseReadChunk)*8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ActiveFileName)
+	writeLines(t, path,
+		logLine(base, 1, `"kind":"success"`),
+		logLine(base.Add(time.Second), 2, `"kind":"failure","raw_error":`+string(oversized)),
+		logLine(base.Add(2*time.Second), 3, `"kind":"success"`),
+	)
+	size := fileSize(t, path)
+
+	counting := openCountingFile(t, path)
+	reader := readerForFile(t, counting, size)
+	page, err := reader.Query(context.Background(), HistoryQuery{Limit: 10})
+	if err != nil || !reflect.DeepEqual(itemSeqs(page.Items), []uint64{3, 2, 1}) {
+		t.Fatalf("page = %v, %v", itemSeqs(page.Items), err)
+	}
+	if !strings.Contains(string(page.Items[1].Bytes()), strings.Repeat("y", int(reverseReadChunk)*8)) {
+		t.Fatal("oversized record was truncated")
+	}
+	// The doubling growth keeps total reads logarithmic in the record length,
+	// and every byte of the file is pulled at most twice.
+	if counting.reads > 8 {
+		t.Fatalf("assembling one oversized record issued %d reads", counting.reads)
+	}
+	if counting.bytes > 2*size {
+		t.Fatalf("read %d bytes for a %d byte file", counting.bytes, size)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
+func openCountingFile(t *testing.T, path string) *countingFile {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return &countingFile{ReadFile: file}
+}
+
+func readerForFile(t *testing.T, file ReadFile, size int64) *Reader {
+	t.Helper()
+	reader, err := NewReader(SnapshotSourceFunc(func() (Snapshot, error) {
+		return Snapshot{Active: nopCloseFile{file}, ActiveSize: size}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reader
+}
+
+// nopCloseFile keeps the counting handle usable after Query closes its snapshot.
+type nopCloseFile struct{ ReadFile }
+
+func (nopCloseFile) Close() error { return nil }
+
 func TestReaderSnapshotSurvivesConcurrentNamespaceRotation(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
