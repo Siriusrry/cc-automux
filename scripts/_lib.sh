@@ -29,8 +29,7 @@ fi
 CC_AUTOMUX_CONFIG="$_cfg"
 unset _cfg
 LOG_DIR="$HOME/Library/Logs/$APP_NAME"
-STDOUT_LOG="$LOG_DIR/stdout.log"
-STDERR_LOG="$LOG_DIR/stderr.log"
+BOOTSTRAP_LOG="$LOG_DIR/bootstrap.log"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/$LABEL.plist"
 TEMPLATE_PATH="$REPO_ROOT/packaging/macos/launch-agent.plist.template"
@@ -69,8 +68,7 @@ render_plist() {
   rendered=${rendered//__LABEL__/$(xml_escape "$LABEL")}
   rendered=${rendered//__BINARY_PATH__/$(xml_escape "$BIN_PATH")}
   rendered=${rendered//__WORKING_DIRECTORY__/$(xml_escape "$APP_DIR")}
-  rendered=${rendered//__STDOUT_LOG__/$(xml_escape "$STDOUT_LOG")}
-  rendered=${rendered//__STDERR_LOG__/$(xml_escape "$STDERR_LOG")}
+  rendered=${rendered//__BOOTSTRAP_LOG__/$(xml_escape "$BOOTSTRAP_LOG")}
   rendered=${rendered//__CONFIG_ENV__/$config_env}
 
   mkdir -p "$PLIST_DIR"

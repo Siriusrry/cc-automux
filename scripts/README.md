@@ -13,7 +13,6 @@ v1 service. They do not implement configuration or construct JSON.
 | start.sh | Start an installed LaunchAgent. |
 | stop.sh | Stop and unload the LaunchAgent. |
 | status.sh | Print the LaunchAgent status. |
-| logs.sh | Read or follow stdout/stderr logs. |
 | uninstall.sh | Stop the service and remove its installed files. |
 | _lib.sh | Shared implementation helpers; do not run directly. |
 
@@ -47,16 +46,18 @@ Installed paths:
 ~/Library/Application Support/cc-automux/bin/cc-automux
 ~/Library/Application Support/cc-automux/config.json
 ~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist
-~/Library/Logs/cc-automux/stdout.log
-~/Library/Logs/cc-automux/stderr.log
+~/Library/Logs/cc-automux/cc-automux.log
+~/Library/Logs/cc-automux/cc-automux.log.1
+~/Library/Logs/cc-automux/bootstrap.log
 ~~~
 
 The LaunchAgent carries only the optional CC_AUTOMUX_CONFIG override. It does
 not seed legacy route or upstream environment variables.
 
-Each regular stdout/stderr log file is bounded by the configured
-`log_max_bytes`. Reaching the limit rolls the file over by truncating old
-contents and continues logging; it is not a permanent write stop.
+The process writes structured JSON Lines to `cc-automux.log` and keeps one
+older generation in `cc-automux.log.1`. The configured `log_max_bytes` is the
+combined budget. `bootstrap.log` receives only fatal startup errors emitted
+before the structured log is available.
 
 ## Start, stop, and status
 
@@ -69,14 +70,8 @@ contents and continues logging; it is not a permanent write stop.
 The LaunchAgent label is com.Siriusrry.cc-automux. The service remains
 loopback-only.
 
-## Logs
-
-~~~
-./scripts/logs.sh
-./scripts/logs.sh --out
-./scripts/logs.sh --err --last 200
-./scripts/logs.sh --both --no-follow
-~~~
+Structured logs are read through the authenticated management log endpoints;
+there is no command-line log-viewing script.
 
 ## Uninstall
 

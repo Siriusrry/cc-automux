@@ -145,16 +145,13 @@ When the configuration file does not exist, the binary can seed it from:
 | `CC_ANYROUTER_SHIM_UPSTREAM` | Two default AnyRouter entrances | Comma-separated initial entrance list. |
 | `CC_CLIPROXY_SHIM_UPSTREAM` | `https://127.0.0.1:8317` | Initial CPA upstream. |
 | `CC_CLIPROXY_SHIM_CA` | empty | Initial CPA CA file. |
-| `CC_AUTO_SHIM_LOG_MAX_BYTES` | `104857600` | Initial per-file log cap in bytes. |
 
-After the file exists, its routing, listen address, and log cap are authoritative. `CC_AUTO_SHIM_STDOUT_LOG` and `CC_AUTO_SHIM_STDERR_LOG` select file-log paths and are normally set by the LaunchAgent.
+After the file exists, its routing and listen address are authoritative.
 
 ## Service and logs
 
 ```bash
 ./scripts/status.sh
-./scripts/logs.sh
-./scripts/logs.sh --err --last 200
 ./scripts/stop.sh
 ./scripts/start.sh
 ```
@@ -162,14 +159,15 @@ After the file exists, its routing, listen address, and log cap are authoritativ
 Installed paths:
 
 ```text
-~/Library/Application Support/cc-auto-mode-shim/bin/cc-auto-mode-shim
-~/Library/Application Support/cc-auto-mode-shim/config.json
-~/Library/LaunchAgents/com.Siriusrry.cc-auto-mode-shim.plist
-~/Library/Logs/cc-auto-mode-shim/stdout.log
-~/Library/Logs/cc-auto-mode-shim/stderr.log
+~/Library/Application Support/cc-automux/bin/cc-automux
+~/Library/Application Support/cc-automux/config.json
+~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist
+~/Library/Logs/cc-automux/cc-automux.log
+~/Library/Logs/cc-automux/cc-automux.log.1
+~/Library/Logs/cc-automux/bootstrap.log
 ```
 
-The `/admin/logs` page shows recent lines from the current process. `scripts/logs.sh` reads the log files, including older retained lines.
+The process owns the two JSON Lines files. Structured logs are read through the authenticated management log endpoints; there is no command-line log-viewing script. `bootstrap.log` is only the fallback for fatal startup errors that happen before structured logging is ready.
 
 ## Upgrade and uninstall
 
@@ -195,10 +193,10 @@ The uninstaller uses the macOS Trash when Finder is available. In a headless ses
 
 ## Basic troubleshooting
 
-- **The service does not start:** run `./scripts/status.sh` and `./scripts/logs.sh --err --no-follow`.
+- **The service does not start:** run `./scripts/status.sh` and inspect `~/Library/Logs/cc-automux/bootstrap.log`.
 - **A reinstall appears to ignore a new port or upstream:** the existing configuration is authoritative; change it in `/admin`.
 - **`401` or `403`:** verify the route key/account and the selected `/any` or `/cpa` base URL.
 - **A manual JSON edit has no effect:** restart with `./scripts/stop.sh` followed by `./scripts/start.sh`.
-- **An upstream is temporarily unavailable:** inspect stderr. AnyRouter failover occurs automatically for transport errors, `429`, and `5xx` responses.
+- **An upstream is temporarily unavailable:** inspect the authenticated management log endpoint. AnyRouter failover occurs automatically for transport errors, `429`, and `5xx` responses.
 
 The configuration desk has no separate authentication and returns configured keys to the local browser. It is protected by the loopback-only listener; do not expose the port through a reverse proxy or tunnel.

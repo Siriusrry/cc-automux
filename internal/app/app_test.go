@@ -33,6 +33,16 @@ func freeListenAddr(t *testing.T) string {
 	return addr
 }
 
+func discardAppLogOpener(int64) (io.Writer, func() error, error) {
+	return io.Discard, func() error { return nil }, nil
+}
+
+func appLogOpenerFor(writer io.Writer) LogOpener {
+	return func(int64) (io.Writer, func() error, error) {
+		return writer, func() error { return nil }, nil
+	}
+}
+
 func writeAppConfig(t *testing.T, path string, cfg config.Config) *config.Store {
 	t.Helper()
 	store, err := config.NewStore(path)
@@ -84,7 +94,7 @@ func baseAppConfig(t *testing.T, path string) (*config.Store, config.Config) {
 func TestNewBindsLoopbackAndServesManagementAndMessagesRoutes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	_, cfg := baseAppConfig(t, path)
-	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	application, err := New(Options{ConfigPath: path, LogOpener: discardAppLogOpener, Restart: func() error { return errors.New("not used") }})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -125,8 +135,7 @@ func TestAppWiresHarnessManagerAndAPI(t *testing.T) {
 	home := filepath.Join(root, "home")
 	application, err := New(Options{
 		ConfigPath:     path,
-		Stdout:         io.Discard,
-		Stderr:         io.Discard,
+		LogOpener:      discardAppLogOpener,
 		HarnessHomeDir: func() (string, error) { return home, nil },
 		Restart:        func() error { return errors.New("not used") },
 	})
@@ -191,8 +200,7 @@ func TestAppStartupReconcilesHarnessBeforeServing(t *testing.T) {
 	store := writeAppConfig(t, path, cfg)
 	application, err := New(Options{
 		ConfigPath:     path,
-		Stdout:         io.Discard,
-		Stderr:         io.Discard,
+		LogOpener:      discardAppLogOpener,
 		HarnessHomeDir: func() (string, error) { return home, nil },
 		Restart:        func() error { return errors.New("not used") },
 	})
@@ -222,8 +230,7 @@ func TestAppStartupReconcilesHarnessBeforeServing(t *testing.T) {
 	}
 	application, err = New(Options{
 		ConfigPath:     path,
-		Stdout:         io.Discard,
-		Stderr:         io.Discard,
+		LogOpener:      discardAppLogOpener,
 		HarnessHomeDir: func() (string, error) { return home, nil },
 		Restart:        func() error { return errors.New("not used") },
 	})
@@ -278,7 +285,7 @@ func TestAppProductionClassifierProviderPoolUsesOverrideSingleCallAndRawQuery(t 
 		Enabled: true,
 	}}
 	writeAppConfig(t, path, cfg)
-	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	application, err := New(Options{ConfigPath: path, LogOpener: discardAppLogOpener, Restart: func() error { return errors.New("not used") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,8 +337,8 @@ func TestAppClassifierProviderPoolFailureUsesOneProviderAndNoFailoverEvent(t *te
 		{ID: "22222222-2222-4222-8222-222222222222", Name: "second", BaseURL: second.URL, APIKey: "second-key", Models: []string{"classifier-model"}, Enabled: true},
 	}
 	writeAppConfig(t, path, cfg)
-	var stdout, stderr bytes.Buffer
-	application, err := New(Options{ConfigPath: path, Stdout: &stdout, Stderr: &stderr, Restart: func() error { return errors.New("not used") }})
+	var logOutput bytes.Buffer
+	application, err := New(Options{ConfigPath: path, LogOpener: appLogOpenerFor(&logOutput), Restart: func() error { return errors.New("not used") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,9 +353,9 @@ func TestAppClassifierProviderPoolFailureUsesOneProviderAndNoFailoverEvent(t *te
 		response.Header().Get("X-Classifier-Error") != "raw" || firstCalls.Load() != 1 || secondCalls.Load() != 0 {
 		t.Fatalf("classifier failure = %d headers=%v body=%q calls=%d/%d", response.Code, response.Header(), response.Body.String(), firstCalls.Load(), secondCalls.Load())
 	}
-	if strings.Contains(stderr.String(), "kind=failover") || strings.Count(stderr.String(), "kind=failure") != 1 ||
-		!strings.Contains(stderr.String(), `request_type="classifier"`) || !strings.Contains(stderr.String(), `attempt=1`) {
-		t.Fatalf("classifier failure events = %q", stderr.String())
+	if strings.Contains(logOutput.String(), `"kind":"failover"`) || strings.Count(logOutput.String(), `"kind":"failure"`) != 1 ||
+		!strings.Contains(logOutput.String(), `"request_type":"classifier"`) || !strings.Contains(logOutput.String(), `"attempt":1`) {
+		t.Fatalf("classifier failure events = %q", logOutput.String())
 	}
 }
 
@@ -366,7 +373,7 @@ func TestAppDisabledClassifierNeverFallsBackToNormal(t *testing.T) {
 		APIKey: "provider-key", Models: []string{"client-model"}, Enabled: true,
 	}}
 	writeAppConfig(t, path, cfg)
-	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	application, err := New(Options{ConfigPath: path, LogOpener: discardAppLogOpener, Restart: func() error { return errors.New("not used") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +416,7 @@ func TestAppFixedModeNormalUsesPoolAndClassifierReportsMissingAdapter(t *testing
 		APIKey: "provider-key", Models: []string{"normal-model"}, Enabled: true,
 	}}
 	writeAppConfig(t, path, cfg)
-	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	application, err := New(Options{ConfigPath: path, LogOpener: discardAppLogOpener, Restart: func() error { return errors.New("not used") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,11 +500,10 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 		Enabled: true,
 	}}
 	writeAppConfig(t, path, cfg)
-	var stdout, stderr bytes.Buffer
+	var logOutput bytes.Buffer
 	application, err := New(Options{
 		ConfigPath: path,
-		Stdout:     &stdout,
-		Stderr:     &stderr,
+		LogOpener:  appLogOpenerFor(&logOutput),
 		Restart:    func() error { return errors.New("not used") },
 	})
 	if err != nil {
@@ -527,13 +533,14 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "bad_gateway") {
 		t.Fatalf("Messages response = %d %q", response.Code, response.Body.String())
 	}
-	if !strings.Contains(stderr.String(), `request_type="normal"`) ||
-		!strings.Contains(stderr.String(), `session_id="app-session"`) ||
-		!strings.Contains(stderr.String(), `raw-app-upstream-error`) ||
-		!strings.Contains(stderr.String(), `global_health="cooldown"`) ||
-		!strings.Contains(stderr.String(), `global_entered_cooldown=true channel_entered_cooldown=false cooldown_until="`) ||
-		strings.Contains(stderr.String(), `global_entered_cooldown=true channel_entered_cooldown=false cooldown_until=""`) {
-		t.Fatalf("gateway error log = %q", stderr.String())
+	if !strings.Contains(logOutput.String(), `"request_type":"normal"`) ||
+		!strings.Contains(logOutput.String(), `"session_id":"app-session"`) ||
+		!strings.Contains(logOutput.String(), `raw-app-upstream-error`) ||
+		!strings.Contains(logOutput.String(), `"global_health":"cooldown"`) ||
+		!strings.Contains(logOutput.String(), `"global_entered_cooldown":true`) ||
+		!strings.Contains(logOutput.String(), `"channel_entered_cooldown":false`) ||
+		!strings.Contains(logOutput.String(), `"cooldown_until":`) {
+		t.Fatalf("gateway error log = %q", logOutput.String())
 	}
 
 	healthRequest := httptest.NewRequest(http.MethodGet, "/api/v1/provider-health", nil)
@@ -549,7 +556,7 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 	}
 }
 
-func TestAppLogsFailoverToStderrWithCompleteSourceAndNextProvider(t *testing.T) {
+func TestAppLogsStructuredFailoverWithCompleteSourceAndNextProvider(t *testing.T) {
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, "raw-failover-error")
@@ -586,11 +593,10 @@ func TestAppLogsFailoverToStderrWithCompleteSourceAndNextProvider(t *testing.T) 
 		},
 	}
 	writeAppConfig(t, path, cfg)
-	var stdout, stderr bytes.Buffer
+	var logOutput bytes.Buffer
 	application, err := New(Options{
 		ConfigPath: path,
-		Stdout:     &stdout,
-		Stderr:     &stderr,
+		LogOpener:  appLogOpenerFor(&logOutput),
 		Restart:    func() error { return errors.New("not used") },
 	})
 	if err != nil {
@@ -607,33 +613,29 @@ func TestAppLogsFailoverToStderrWithCompleteSourceAndNextProvider(t *testing.T) 
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
 
-	stdoutText := stdout.String()
-	stderrText := stderr.String()
-	if strings.Contains(stdoutText, "kind=failover") {
-		t.Fatalf("failover was logged to stdout: %q", stdoutText)
+	logText := logOutput.String()
+	if !strings.Contains(logText, `"kind":"forward"`) || !strings.Contains(logText, `"kind":"success"`) ||
+		!strings.Contains(logText, `"request_type":"normal"`) {
+		t.Fatalf("structured events = %q", logText)
 	}
-	if !strings.Contains(stdoutText, "kind=forward") || !strings.Contains(stdoutText, "kind=success") ||
-		!strings.Contains(stdoutText, `request_type="normal"`) {
-		t.Fatalf("stdout events = %q", stdoutText)
-	}
-	if count := strings.Count(stderrText, "kind=failover"); count != 1 {
-		t.Fatalf("stderr failover count = %d, log=%q", count, stderrText)
+	if count := strings.Count(logText, `"kind":"failover"`); count != 1 {
+		t.Fatalf("failover count = %d, log=%q", count, logText)
 	}
 	for _, field := range []string{
-		`provider_id="11111111-1111-4111-8111-111111111111"`,
-		`provider_name="first-provider"`,
-		`session_id="header-session"`,
-		`model="model-a"`,
-		`attempt=1`,
-		`upstream_url="` + first.URL + `/v1/messages"`,
-		`raw_error="raw-failover-error"`,
-		`next_provider_id="22222222-2222-4222-8222-222222222222"`,
-		`next_provider_name="second-provider"`,
-		`next_attempt=2`,
-		`next_upstream_url="` + second.URL + `/v1/messages"`,
+		`"provider_id":"11111111-1111-4111-8111-111111111111"`,
+		`"provider_name":"first-provider"`,
+		`"session_id":"header-session"`,
+		`"model":"model-a"`,
+		`"attempt":1`,
+		`"upstream_url":"` + first.URL + `/v1/messages"`,
+		`"raw_error":"raw-failover-error"`,
+		`"next_provider_id":"22222222-2222-4222-8222-222222222222"`,
+		`"next_provider_name":"second-provider"`,
+		`"next_attempt":2`,
+		`"next_upstream_url":"` + second.URL + `/v1/messages"`,
 	} {
-		if !strings.Contains(stderrText, field) {
-			t.Fatalf("stderr missing %s: %q", field, stderrText)
+		if !strings.Contains(logText, field) {
+			t.Fatalf("structured log missing %s: %q", field, logText)
 		}
 	}
 }
@@ -662,7 +664,7 @@ func TestAppHotUpdateUsesNewProviderGenerationOnNextRequest(t *testing.T) {
 		Enabled: true,
 	}}
 	writeAppConfig(t, path, cfg)
-	application, err := New(Options{ConfigPath: path, Restart: func() error { return errors.New("not used") }})
+	application, err := New(Options{ConfigPath: path, LogOpener: discardAppLogOpener, Restart: func() error { return errors.New("not used") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +701,7 @@ func TestPendingConfigPromotesOnlyAfterResourcesAreReady(t *testing.T) {
 	if err := store.SavePending(pending); err != nil {
 		t.Fatal(err)
 	}
-	application, err := New(Options{ConfigPath: path, Restart: func() error { return nil }})
+	application, err := New(Options{ConfigPath: path, LogOpener: discardAppLogOpener, Restart: func() error { return nil }})
 	if err != nil {
 		t.Fatalf("New(pending) error = %v", err)
 	}
@@ -725,11 +727,12 @@ func TestPendingResourceFailureRollsBackToActive(t *testing.T) {
 	if err := store.SavePending(pending); err != nil {
 		t.Fatal(err)
 	}
-	logOpener := func(maxBytes int64) (io.Writer, io.Writer, func() error, error) {
+	var logOutput bytes.Buffer
+	logOpener := func(maxBytes int64) (io.Writer, func() error, error) {
 		if maxBytes == pending.Service.LogMaxBytes {
-			return nil, nil, nil, errors.New("log resource failed")
+			return nil, nil, errors.New("log resource failed")
 		}
-		return io.Discard, io.Discard, func() error { return nil }, nil
+		return &logOutput, func() error { return nil }, nil
 	}
 	application, err := New(Options{ConfigPath: path, LogOpener: logOpener, Restart: func() error { return nil }})
 	if err != nil {
@@ -749,13 +752,18 @@ func TestPendingResourceFailureRollsBackToActive(t *testing.T) {
 	if status := application.Manager().RestartStatus(); status.State != "failed" || !strings.Contains(status.LastError, "log resource failed") {
 		t.Fatalf("rollback status = %#v", status)
 	}
+	if !strings.Contains(logOutput.String(), `"level":"WARN","msg":"service"`) ||
+		!strings.Contains(logOutput.String(), `"event":"pending_rejected"`) ||
+		!strings.Contains(logOutput.String(), `"error":"initialize logs: log resource failed"`) {
+		t.Fatalf("pending rejection log = %q", logOutput.String())
+	}
 }
 
 func TestActiveLogFailureClosesAlreadyBoundListener(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	_, cfg := baseAppConfig(t, path)
-	logOpener := func(int64) (io.Writer, io.Writer, func() error, error) {
-		return nil, nil, nil, errors.New("active log failed")
+	logOpener := func(int64) (io.Writer, func() error, error) {
+		return nil, nil, errors.New("active log failed")
 	}
 	if application, err := New(Options{ConfigPath: path, LogOpener: logOpener}); err == nil || application != nil {
 		t.Fatalf("New(active log failure) = %#v, %v", application, err)
@@ -781,7 +789,7 @@ func TestPendingPortConflictRollsBack(t *testing.T) {
 	if err := store.SavePending(pending); err != nil {
 		t.Fatal(err)
 	}
-	application, err := New(Options{ConfigPath: path, Restart: func() error { return nil }})
+	application, err := New(Options{ConfigPath: path, LogOpener: discardAppLogOpener, Restart: func() error { return nil }})
 	if err != nil {
 		t.Fatalf("New(port conflict) error = %v", err)
 	}
@@ -795,11 +803,11 @@ func TestPendingPortConflictRollsBack(t *testing.T) {
 func TestLogPreflightFailureDoesNotWritePendingOrChangeActiveState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	store, cfg := baseAppConfig(t, path)
-	logOpener := func(maxBytes int64) (io.Writer, io.Writer, func() error, error) {
+	logOpener := func(maxBytes int64) (io.Writer, func() error, error) {
 		if maxBytes != cfg.Service.LogMaxBytes {
-			return nil, nil, nil, errors.New("candidate log failed")
+			return nil, nil, errors.New("candidate log failed")
 		}
-		return io.Discard, io.Discard, func() error { return nil }, nil
+		return io.Discard, func() error { return nil }, nil
 	}
 	application, err := New(Options{ConfigPath: path, LogOpener: logOpener, Restart: func() error { return nil }})
 	if err != nil {
@@ -851,8 +859,10 @@ func TestSelfExecFailureRebindsOldListenerAndKeepsServing(t *testing.T) {
 	if err := store.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
+	var logOutput bytes.Buffer
 	application, err := New(Options{
 		ConfigPath:   path,
+		LogOpener:    appLogOpenerFor(&logOutput),
 		Exec:         func() error { return errors.New("exec denied") },
 		RestartDelay: -1,
 	})
@@ -889,6 +899,11 @@ func TestSelfExecFailureRebindsOldListenerAndKeepsServing(t *testing.T) {
 	}
 	if status := application.Manager().RestartStatus(); status.InProgress || status.State != "failed" {
 		t.Fatalf("restart failure status = %#v", status)
+	}
+	if !strings.Contains(logOutput.String(), `"level":"WARN","msg":"service"`) ||
+		!strings.Contains(logOutput.String(), `"event":"restart_failed"`) ||
+		!strings.Contains(logOutput.String(), `"error":"exec denied"`) {
+		t.Fatalf("restart failure log = %q", logOutput.String())
 	}
 	// The old listener was closed during the failed exec and then rebound. A
 	// request through the actual server proves the recovery loop resumed.
@@ -944,6 +959,7 @@ func TestRestartClosesInFlightMessagesWithoutDrain(t *testing.T) {
 	execStarted := make(chan struct{})
 	application, err := New(Options{
 		ConfigPath: path,
+		LogOpener:  discardAppLogOpener,
 		Exec: func() error {
 			close(execStarted)
 			return errors.New("exec denied")
@@ -1037,6 +1053,7 @@ func TestCloseDuringRestartDoesNotLeaveServeBlocked(t *testing.T) {
 	releaseExec := make(chan struct{})
 	application, err := New(Options{
 		ConfigPath: path,
+		LogOpener:  discardAppLogOpener,
 		Exec: func() error {
 			close(execStarted)
 			<-releaseExec
@@ -1079,61 +1096,65 @@ func TestCloseDuringRestartDoesNotLeaveServeBlocked(t *testing.T) {
 	}
 }
 
-func TestCappedWriterPreservesOversizedRecordThenRolls(t *testing.T) {
-	var destination strings.Builder
-	writer := newCappedWriter(4, &destination)
-	if n, err := writer.Write([]byte("abcdef")); err != nil || n != 6 {
-		t.Fatalf("first Write() = %d, %v", n, err)
+func TestRotatingWriterPreservesOversizedRecordAndLatestHistory(t *testing.T) {
+	dir := t.TempDir()
+	oldArchive := filepath.Join(dir, archiveLogName)
+	if err := os.WriteFile(oldArchive, []byte("oldest\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if got := destination.String(); got != "abcdef" {
-		t.Fatalf("destination = %q, want complete record", got)
+	writer, err := newRotatingWriter(dir, 12)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if n, err := writer.Write([]byte("more")); err != nil || n != 4 {
-		t.Fatalf("rolled Write() = %d, %v", n, err)
+	defer writer.Close()
+
+	oversized := []byte("oversized-record\n")
+	if n, err := writer.Write(oversized); err != nil || n != len(oversized) {
+		t.Fatalf("oversized Write() = %d, %v", n, err)
 	}
-	if destination.String() != "more" {
-		t.Fatalf("destination did not roll over: %q", destination.String())
+	if got, err := os.ReadFile(oldArchive); err != nil || string(got) != "oldest\n" {
+		t.Fatalf("empty-file write discarded archive: %q, %v", got, err)
 	}
-	if n, err := writer.Write([]byte("next")); err != nil || n != 4 {
-		t.Fatalf("second rolled Write() = %d, %v", n, err)
+	if n, err := writer.Write([]byte("next\n")); err != nil || n != 5 {
+		t.Fatalf("rotation Write() = %d, %v", n, err)
 	}
-	if destination.String() != "next" {
-		t.Fatalf("destination stopped after first rollover: %q", destination.String())
+	archive, err := os.ReadFile(oldArchive)
+	if err != nil || string(archive) != string(oversized) {
+		t.Fatalf("archive = %q, %v", archive, err)
+	}
+	active, err := os.ReadFile(filepath.Join(dir, activeLogName))
+	if err != nil || string(active) != "next\n" {
+		t.Fatalf("active = %q, %v", active, err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("closed\n")); err == nil {
+		t.Fatal("write after Close succeeded")
 	}
 }
 
-func TestCappedWriterAccountsForExistingFileSize(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "stdout.log")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+func TestRotatingWriterKeepsRegularTotalWithinLimit(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := newRotatingWriter(dir, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
-	if _, err := file.WriteString("already-too-large"); err != nil {
-		t.Fatal(err)
-	}
-	writer := newCappedWriter(5, file)
-	if n, err := writer.Write([]byte("more")); err != nil || n != 4 {
-		t.Fatalf("Write() = %d, %v", n, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(data), "more"; got != want {
-		t.Fatalf("log content = %q, want %q", got, want)
-	}
-	if len(data) > 5 {
-		t.Fatalf("log exceeded cap after startup rollover: %d", len(data))
-	}
-	if n, err := writer.Write([]byte("again")); err != nil || n != 5 {
-		t.Fatalf("second Write() = %d, %v", n, err)
-	}
-	data, err = os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(data), "again"; got != want {
-		t.Fatalf("log stopped after startup rollover: %q", got)
+	defer writer.Close()
+	for i := 0; i < 20; i++ {
+		if _, err := writer.Write([]byte("12345\n")); err != nil {
+			t.Fatal(err)
+		}
+		var total int64
+		for _, name := range []string{activeLogName, archiveLogName} {
+			if info, statErr := os.Stat(filepath.Join(dir, name)); statErr == nil {
+				total += info.Size()
+			} else if !os.IsNotExist(statErr) {
+				t.Fatal(statErr)
+			}
+		}
+		if total > 20 {
+			t.Fatalf("total log bytes = %d after write %d", total, i)
+		}
 	}
 }

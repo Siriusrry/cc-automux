@@ -59,7 +59,6 @@ When a route key is configured in the desk, the shim replaces the client credent
 
 ```bash
 ./scripts/status.sh
-./scripts/logs.sh
 ./scripts/stop.sh
 ./scripts/start.sh
 ./scripts/uninstall.sh

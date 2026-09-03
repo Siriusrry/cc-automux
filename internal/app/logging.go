@@ -1,198 +1,223 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/gateway"
 )
 
+const (
+	activeLogName  = "cc-automux.log"
+	archiveLogName = "cc-automux.log.1"
+)
+
 // LogOpener abstracts startup log-resource acquisition so restart transactions
 // can preflight it and tests can inject failures without touching real files.
-type LogOpener func(maxBytes int64) (stdout, stderr io.Writer, close func() error, err error)
+// The returned writer must preserve each Write call as one indivisible record.
+type LogOpener func(maxBytes int64) (writer io.Writer, close func() error, err error)
 
-func logOpenerFor(stdout, stderr io.Writer) LogOpener {
-	return func(maxBytes int64) (io.Writer, io.Writer, func() error, error) {
-		if maxBytes <= 0 {
-			return nil, nil, nil, errors.New("log_max_bytes must be positive")
-		}
-		stdoutWriter, err := newCappedWriterChecked(maxBytes, stdout)
+func logOpenerForDir(dir string) LogOpener {
+	return func(maxBytes int64) (io.Writer, func() error, error) {
+		writer, err := newRotatingWriter(dir, maxBytes)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("initialize stdout log: %w", err)
+			return nil, nil, err
 		}
-		stderrWriter, err := newCappedWriterChecked(maxBytes, stderr)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("initialize stderr log: %w", err)
-		}
-		return stdoutWriter, stderrWriter, func() error { return nil }, nil
+		return writer, writer.Close, nil
 	}
 }
 
-// cappedWriter rolls each regular-file log stream before a write would cross
-// maxBytes. One indivisible record may exceed the threshold so diagnostic text
-// is never truncated; the following write starts a fresh window. Opaque writers
-// that cannot be reset still get the same logical window accounting, but their
-// already-emitted bytes cannot be removed by an io.Writer-only interface.
-type cappedWriter struct {
+type rotatingWriter struct {
 	mu        sync.Mutex
-	maxBytes  int64
-	bytesSeen int64
-	delegate  io.Writer
-	initErr   error
+	active    string
+	archive   string
+	threshold int64
+	file      *os.File
+	size      int64
+	closed    bool
 }
 
-// fileLogTarget is the subset of *os.File used to normalize and roll over a
-// LaunchAgent stdout/stderr file without taking ownership of its descriptor.
-type fileLogTarget interface {
-	io.Writer
-	Stat() (os.FileInfo, error)
-	Truncate(size int64) error
-	Seek(offset int64, whence int) (int64, error)
-}
-
-type resettableLogTarget interface {
-	Reset()
-}
-
-func newCappedWriter(maxBytes int64, delegate io.Writer) io.Writer {
-	writer, err := newCappedWriterChecked(maxBytes, delegate)
-	if err != nil {
-		// Keep the historical one-result helper useful in package tests while
-		// allowing the production opener to report initialization failures. The
-		// first write will surface the same error instead of silently losing logs.
-		return &cappedWriter{maxBytes: maxBytes, delegate: delegate, initErr: err}
-	}
-	return writer
-}
-
-func newCappedWriterChecked(maxBytes int64, delegate io.Writer) (*cappedWriter, error) {
-	writer := &cappedWriter{maxBytes: maxBytes, delegate: delegate}
+func newRotatingWriter(dir string, maxBytes int64) (*rotatingWriter, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("log_max_bytes must be positive")
 	}
-	if err := writer.initialize(); err != nil {
+	if dir == "" {
+		return nil, errors.New("log directory must not be empty")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create log directory: %w", err)
+	}
+	w := &rotatingWriter{
+		active:    filepath.Join(dir, activeLogName),
+		archive:   filepath.Join(dir, archiveLogName),
+		threshold: maxBytes / 2,
+	}
+	if err := w.openActive(); err != nil {
 		return nil, err
 	}
-	return writer, nil
+	return w, nil
 }
 
-func (w *cappedWriter) initialize() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	file, ok := w.delegate.(fileLogTarget)
-	if !ok {
-		return nil
-	}
-	info, err := file.Stat()
+func (w *rotatingWriter) openActive() error {
+	file, err := os.OpenFile(w.active, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return err
+		return fmt.Errorf("open active log: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return nil
+	position, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("seek active log: %w", err)
 	}
-	if info.Size() > w.maxBytes {
-		if err := resetFile(file); err != nil {
-			return fmt.Errorf("reset oversized log: %w", err)
-		}
-		w.bytesSeen = 0
-		return nil
-	}
-	w.bytesSeen = info.Size()
+	w.file = file
+	w.size = position
 	return nil
 }
 
-func (w *cappedWriter) Write(p []byte) (int, error) {
+func (w *rotatingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.initErr != nil {
-		return 0, w.initErr
+	if w.closed {
+		return 0, os.ErrClosed
 	}
-	originalLen := len(p)
-	if originalLen == 0 {
+	if len(p) == 0 {
 		return 0, nil
 	}
-	if file, ok := w.delegate.(fileLogTarget); ok {
-		// The descriptor can outlive a previous process image and can also be
-		// externally truncated. Refresh the accounting before deciding whether
-		// this write starts a new window.
-		if info, err := file.Stat(); err != nil {
-			return 0, err
-		} else if info.Mode().IsRegular() {
-			w.bytesSeen = info.Size()
-		}
-	}
-
-	if w.bytesSeen > w.maxBytes || int64(len(p)) > w.maxBytes-w.bytesSeen {
-		if err := w.rolloverLocked(); err != nil {
+	if w.file == nil {
+		if err := w.openActive(); err != nil {
 			return 0, err
 		}
 	}
-	if w.delegate == nil {
-		w.bytesSeen += int64(len(p))
-		return originalLen, nil
+	if w.size > 0 && crossesThreshold(w.size, int64(len(p)), w.threshold) {
+		if err := w.rotateLocked(); err != nil {
+			return 0, err
+		}
 	}
-	n, err := w.delegate.Write(p)
-	w.bytesSeen += int64(n)
+	n, err := w.file.Write(p)
+	w.size += int64(n)
 	if err != nil {
 		return n, err
 	}
 	if n != len(p) {
 		return n, io.ErrShortWrite
 	}
-	return originalLen, nil
+	return n, nil
 }
 
-func (w *cappedWriter) rolloverLocked() error {
-	if file, ok := w.delegate.(fileLogTarget); ok {
-		if info, err := file.Stat(); err != nil {
-			return err
-		} else if info.Mode().IsRegular() {
-			if err := resetFile(file); err != nil {
-				return fmt.Errorf("roll over log: %w", err)
-			}
-		}
-	} else if resettable, ok := w.delegate.(resettableLogTarget); ok {
-		resettable.Reset()
+func crossesThreshold(current, incoming, threshold int64) bool {
+	if current > threshold {
+		return true
 	}
-	w.bytesSeen = 0
+	return incoming > threshold-current
+}
+
+func (w *rotatingWriter) rotateLocked() error {
+	if w.file == nil {
+		return errors.New("active log is not open")
+	}
+	if err := w.file.Close(); err != nil {
+		return fmt.Errorf("close active log before rotation: %w", err)
+	}
+	w.file = nil
+	if err := replaceLogArchive(w.active, w.archive); err != nil {
+		// The namespace was not changed. Reopen the active file so a transient
+		// replacement failure does not permanently disable later log writes.
+		reopenErr := w.openActive()
+		if reopenErr != nil {
+			return fmt.Errorf("rotate log: %w; reopen active log: %v", err, reopenErr)
+		}
+		return fmt.Errorf("rotate log: %w", err)
+	}
+	if err := w.openActive(); err != nil {
+		return fmt.Errorf("create active log after rotation: %w", err)
+	}
 	return nil
 }
 
-func resetFile(file fileLogTarget) error {
-	if err := file.Truncate(0); err != nil {
-		return err
+func (w *rotatingWriter) Close() error {
+	if w == nil {
+		return nil
 	}
-	_, err := file.Seek(0, io.SeekStart)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
 	return err
 }
 
+type sequenceState struct {
+	mu   sync.Mutex
+	next uint64
+}
+
+// sequencedHandler serializes complete slog records. Sequence allocation,
+// formatting and the writer's single Write call therefore occur in the same
+// order, so file order and seq order cannot diverge under concurrent logging.
+type sequencedHandler struct {
+	state    *sequenceState
+	delegate slog.Handler
+}
+
+func (h *sequencedHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h != nil && h.delegate != nil && h.delegate.Enabled(ctx, level)
+}
+
+func (h *sequencedHandler) Handle(ctx context.Context, record slog.Record) error {
+	if h == nil || h.delegate == nil || h.state == nil {
+		return errors.New("log handler is not initialized")
+	}
+	h.state.mu.Lock()
+	defer h.state.mu.Unlock()
+	h.state.next++
+	record.AddAttrs(slog.Uint64("seq", h.state.next))
+	return h.delegate.Handle(ctx, record)
+}
+
+func (h *sequencedHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &sequencedHandler{state: h.state, delegate: h.delegate.WithAttrs(attrs)}
+}
+
+func (h *sequencedHandler) WithGroup(name string) slog.Handler {
+	return &sequencedHandler{state: h.state, delegate: h.delegate.WithGroup(name)}
+}
+
 type logger struct {
-	info  *log.Logger
-	error *log.Logger
-	close func() error
+	handler slog.Handler
+	close   func() error
 }
 
 func openLogger(opener LogOpener, maxBytes int64) (*logger, error) {
-	stdout, stderr, closeFunc, err := opener(maxBytes)
+	if opener == nil {
+		return nil, errors.New("log opener is nil")
+	}
+	writer, closeFunc, err := opener(maxBytes)
 	if err != nil {
 		return nil, err
 	}
 	if closeFunc == nil {
 		closeFunc = func() error { return nil }
 	}
-	if stdout == nil || stderr == nil {
+	if writer == nil {
 		_ = closeFunc()
 		return nil, errors.New("log opener returned a nil writer")
 	}
+	jsonHandler := slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo})
 	return &logger{
-		info:  log.New(stdout, "cc-automux: ", log.LstdFlags),
-		error: log.New(stderr, "cc-automux error: ", log.LstdFlags),
-		close: closeFunc,
+		handler: &sequencedHandler{state: &sequenceState{}, delegate: jsonHandler},
+		close:   closeFunc,
 	}, nil
 }
 
@@ -203,40 +228,88 @@ func (l *logger) Close() error {
 	return l.close()
 }
 
+func (l *logger) log(at time.Time, level slog.Level, message string, attrs ...slog.Attr) {
+	if l == nil || l.handler == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	record := slog.NewRecord(at.UTC(), level, message, 0)
+	record.AddAttrs(attrs...)
+	_ = l.handler.Handle(context.Background(), record)
+}
+
 func (a *App) recordGatewayEvent(event gateway.Event) {
 	if a == nil || a.logs == nil {
 		return
 	}
-	target := a.logs.info
+	level := slog.LevelInfo
 	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover {
-		target = a.logs.error
+		level = slog.LevelError
 	}
-	cooldownUntil := ""
-	if event.CooldownUntil != nil {
-		cooldownUntil = event.CooldownUntil.UTC().Format(time.RFC3339Nano)
+	attrs := []slog.Attr{
+		slog.String("kind", string(event.Kind)),
+		slog.String("model", event.Model),
+		slog.String("request_type", string(event.RequestType)),
+		slog.Int("attempt", event.Attempt),
+		slog.String("upstream_url", event.UpstreamURL),
 	}
-	target.Printf(
-		"gateway kind=%s provider_id=%q provider_name=%q session_id=%q model=%q request_type=%q attempt=%d upstream_url=%q http_status=%d raw_error=%q patch_id=%q patch_stage=%q next_provider_id=%q next_provider_name=%q next_attempt=%d next_upstream_url=%q global_health=%q channel_health=%q global_entered_cooldown=%t channel_entered_cooldown=%t cooldown_until=%q",
-		event.Kind,
-		event.ProviderID,
-		event.ProviderName,
-		event.SessionID,
-		event.Model,
-		event.RequestType,
-		event.Attempt,
-		event.UpstreamURL,
-		event.HTTPStatus,
-		event.RawError,
-		event.PatchID,
-		event.PatchStage,
-		event.NextProviderID,
-		event.NextProviderName,
-		event.NextAttempt,
-		event.NextUpstreamURL,
-		event.GlobalHealth,
-		event.ChannelHealth,
-		event.GlobalEnteredCooldown,
-		event.ChannelEnteredCooldown,
-		cooldownUntil,
-	)
+	if event.ProviderID != "" {
+		attrs = append(attrs, slog.String("provider_id", event.ProviderID))
+	}
+	if event.ProviderName != "" {
+		attrs = append(attrs, slog.String("provider_name", event.ProviderName))
+	}
+	if event.SessionID != "" {
+		attrs = append(attrs, slog.String("session_id", event.SessionID))
+	}
+	if event.Kind != gateway.EventForward && event.HTTPStatus != 0 {
+		attrs = append(attrs, slog.Int("http_status", event.HTTPStatus))
+	}
+	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover {
+		attrs = append(attrs, slog.String("raw_error", event.RawError))
+		if event.PatchID != "" {
+			attrs = append(attrs,
+				slog.String("patch_id", event.PatchID),
+				slog.String("patch_stage", event.PatchStage),
+			)
+		}
+	}
+	if event.Kind != gateway.EventForward {
+		if event.GlobalHealth != "" {
+			attrs = append(attrs, slog.String("global_health", string(event.GlobalHealth)))
+		}
+		if event.ChannelHealth != "" {
+			attrs = append(attrs, slog.String("channel_health", string(event.ChannelHealth)))
+		}
+	}
+	if (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover) && (event.GlobalEnteredCooldown || event.ChannelEnteredCooldown) {
+		attrs = append(attrs,
+			slog.Bool("global_entered_cooldown", event.GlobalEnteredCooldown),
+			slog.Bool("channel_entered_cooldown", event.ChannelEnteredCooldown),
+		)
+		if event.CooldownUntil != nil {
+			attrs = append(attrs, slog.Time("cooldown_until", event.CooldownUntil.UTC()))
+		}
+	}
+	if event.Kind == gateway.EventFailover {
+		attrs = append(attrs,
+			slog.String("next_provider_id", event.NextProviderID),
+			slog.String("next_provider_name", event.NextProviderName),
+			slog.Int("next_attempt", event.NextAttempt),
+			slog.String("next_upstream_url", event.NextUpstreamURL),
+		)
+	}
+	a.logs.log(event.Time, level, "gateway", attrs...)
+}
+
+func (a *App) logServiceEvent(level slog.Level, event string, attrs ...slog.Attr) {
+	if a == nil || a.logs == nil {
+		return
+	}
+	values := make([]slog.Attr, 0, len(attrs)+1)
+	values = append(values, slog.String("event", event))
+	values = append(values, attrs...)
+	a.logs.log(time.Time{}, level, "service", values...)
 }

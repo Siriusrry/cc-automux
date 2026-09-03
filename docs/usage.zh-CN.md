@@ -145,16 +145,13 @@ curl http://127.0.0.1:8765/healthz
 | `CC_ANYROUTER_SHIM_UPSTREAM` | 两个默认 AnyRouter 入口 | 逗号分隔的初始入口列表。 |
 | `CC_CLIPROXY_SHIM_UPSTREAM` | `https://127.0.0.1:8317` | 初始 CPA 上游。 |
 | `CC_CLIPROXY_SHIM_CA` | 空 | 初始 CPA CA 文件。 |
-| `CC_AUTO_SHIM_LOG_MAX_BYTES` | `104857600` | 每个日志文件的初始字节上限。 |
 
-配置文件建立后，其中的路由、监听地址和日志上限优先。`CC_AUTO_SHIM_STDOUT_LOG` 与 `CC_AUTO_SHIM_STDERR_LOG` 用于指定文件日志路径，通常由 LaunchAgent 设置。
+配置文件建立后，其中的路由和监听地址优先。
 
 ## 服务与日志
 
 ```bash
 ./scripts/status.sh
-./scripts/logs.sh
-./scripts/logs.sh --err --last 200
 ./scripts/stop.sh
 ./scripts/start.sh
 ```
@@ -162,14 +159,15 @@ curl http://127.0.0.1:8765/healthz
 安装路径：
 
 ```text
-~/Library/Application Support/cc-auto-mode-shim/bin/cc-auto-mode-shim
-~/Library/Application Support/cc-auto-mode-shim/config.json
-~/Library/LaunchAgents/com.Siriusrry.cc-auto-mode-shim.plist
-~/Library/Logs/cc-auto-mode-shim/stdout.log
-~/Library/Logs/cc-auto-mode-shim/stderr.log
+~/Library/Application Support/cc-automux/bin/cc-automux
+~/Library/Application Support/cc-automux/config.json
+~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist
+~/Library/Logs/cc-automux/cc-automux.log
+~/Library/Logs/cc-automux/cc-automux.log.1
+~/Library/Logs/cc-automux/bootstrap.log
 ```
 
-`/admin/logs` 页面显示当前进程的近期日志；`scripts/logs.sh` 读取日志文件，包括仍被保留的较早内容。
+进程自行管理两个 JSON Lines 文件。结构化日志通过需要认证的管理日志接口读取，不再提供命令行日志查看脚本；`bootstrap.log` 仅用于记录结构化日志可用前发生的致命启动错误。
 
 ## 升级与卸载
 
@@ -195,10 +193,10 @@ Finder 可用时，卸载器会把文件移入 macOS 废纸篓；在无图形界
 
 ## 基础排障
 
-- **服务无法启动：**运行 `./scripts/status.sh` 和 `./scripts/logs.sh --err --no-follow`。
+- **服务无法启动：**运行 `./scripts/status.sh` 并检查 `~/Library/Logs/cc-automux/bootstrap.log`。
 - **重新安装后新端口或上游没有生效：**现有配置优先，请在 `/admin` 中修改。
 - **出现 `401` 或 `403`：**检查路由密钥/账号，以及使用的 `/any` 或 `/cpa` Base URL。
 - **手动修改 JSON 后没有生效：**依次运行 `./scripts/stop.sh` 和 `./scripts/start.sh`。
-- **上游暂时不可用：**检查 stderr；AnyRouter 会在传输错误、`429` 或 `5xx` 时自动切换入口。
+- **上游暂时不可用：**检查需要认证的管理日志接口；AnyRouter 会在传输错误、`429` 或 `5xx` 时自动切换入口。
 
 配置台没有单独认证，并会向本地浏览器返回已配置密钥。它依赖仅回环监听提供边界；不要通过反向代理或隧道暴露该端口。

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -29,8 +29,7 @@ import (
 
 type Options struct {
 	ConfigPath       string
-	Stdout           io.Writer
-	Stderr           io.Writer
+	LogDir           string
 	LogOpener        LogOpener
 	Registry         *patch.Registry
 	Restart          func() error
@@ -113,17 +112,16 @@ func New(options Options) (*App, error) {
 		return nil, err
 	}
 
-	stdout := options.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	stderr := options.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
+	logDir := options.LogDir
+	if logDir == "" {
+		logDir, err = config.LogDir()
+		if err != nil {
+			return nil, err
+		}
 	}
 	logOpener := options.LogOpener
 	if logOpener == nil {
-		logOpener = logOpenerFor(stdout, stderr)
+		logOpener = logOpenerForDir(logDir)
 	}
 
 	// Acquire the complete candidate before promotion. If pending resources fail,
@@ -216,7 +214,7 @@ func New(options Options) (*App, error) {
 		}
 	}
 	if startup.Warning() != nil && logs != nil {
-		logs.error.Printf("pending configuration was not activated: %v", startup.Warning())
+		app.logServiceEvent(slog.LevelWarn, "pending_rejected", slog.String("error", startup.Warning().Error()))
 	}
 	app.manager = manager
 	var harnessRegistry harnessconfig.AdapterRegistry = options.HarnessRegistry
@@ -285,7 +283,7 @@ func New(options Options) (*App, error) {
 	})
 	app.syncRuntime()
 	app.server = newHTTPServer(app.rootHandler())
-	app.logs.info.Printf("listening on %s", cfg.Service.ListenAddr)
+	app.logServiceEvent(slog.LevelInfo, "listening", slog.String("listen_addr", cfg.Service.ListenAddr))
 	return app, nil
 }
 
@@ -586,11 +584,8 @@ func (a *App) recoverRestartFailure(cause error) error {
 	a.listener = newListener
 	a.server = newHTTPServer(a.rootHandler())
 	a.restarting = false
-	logs := a.logs
 	a.lifecycleMu.Unlock()
-	if logs != nil {
-		logs.error.Printf("self-restart failed; kept active configuration: %v", cause)
-	}
+	a.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", cause.Error()))
 	a.signalResume()
 	return cause
 }

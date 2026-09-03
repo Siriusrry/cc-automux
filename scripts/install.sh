@@ -6,6 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
+ACTIVE_LOG="$LOG_DIR/cc-automux.log"
+ARCHIVE_LOG="$LOG_DIR/cc-automux.log.1"
+
 DIST_BIN="$REPO_ROOT/dist/cc-automux"
 if [[ ! -x "$DIST_BIN" ]]; then
   cat >&2 <<EOF
@@ -49,8 +52,8 @@ fi
 stop_launch_agent
 mkdir -p "$BIN_DIR" "$LOG_DIR" "$PLIST_DIR"
 install -m 755 "$DIST_BIN" "$BIN_PATH"
-touch "$STDOUT_LOG" "$STDERR_LOG"
-chmod 600 "$STDOUT_LOG" "$STDERR_LOG"
+touch "$BOOTSTRAP_LOG"
+chmod 600 "$BOOTSTRAP_LOG"
 render_plist
 
 start_launch_agent
@@ -69,8 +72,11 @@ Config:
   $CONFIG_PATH
 
 Logs:
-  $STDOUT_LOG
-  $STDERR_LOG
+  $ACTIVE_LOG
+  $ARCHIVE_LOG
+
+Startup fallback:
+  $BOOTSTRAP_LOG
 EOF
 if (( CONFIG_EXISTED )); then
   cat <<EOF
@@ -100,7 +106,6 @@ cat <<EOF
 
 Useful commands:
   ./scripts/status.sh
-  ./scripts/logs.sh
   ./scripts/stop.sh
   ./scripts/start.sh
   ./scripts/uninstall.sh

@@ -59,7 +59,6 @@ curl http://127.0.0.1:8765/healthz
 
 ```bash
 ./scripts/status.sh
-./scripts/logs.sh
 ./scripts/stop.sh
 ./scripts/start.sh
 ./scripts/uninstall.sh

@@ -25,10 +25,7 @@
 __CONFIG_ENV__
   </dict>
 
-  <key>StandardOutPath</key>
-  <string>__STDOUT_LOG__</string>
-
   <key>StandardErrorPath</key>
-  <string>__STDERR_LOG__</string>
+  <string>__BOOTSTRAP_LOG__</string>
 </dict>
 </plist>

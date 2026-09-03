@@ -12,7 +12,6 @@
 | start.sh | 启动已安装的 LaunchAgent。 |
 | stop.sh | 停止并卸载 LaunchAgent。 |
 | status.sh | 输出 LaunchAgent 状态。 |
-| logs.sh | 查看或跟踪 stdout/stderr 日志。 |
 | uninstall.sh | 停止服务并移除已安装文件。 |
 | _lib.sh | 共享实现辅助文件，不要直接运行。 |
 
@@ -41,13 +40,14 @@ go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-
 ~~~
 ~/Library/Application Support/cc-automux/bin/cc-automux
 ~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist
-~/Library/Logs/cc-automux/stdout.log
-~/Library/Logs/cc-automux/stderr.log
+~/Library/Logs/cc-automux/cc-automux.log
+~/Library/Logs/cc-automux/cc-automux.log.1
+~/Library/Logs/cc-automux/bootstrap.log
 ~~~
 
 LaunchAgent 只携带可选的 CC_AUTOMUX_CONFIG 覆盖，不再注入旧路由或上游环境变量。配置文件路径由配置核心解析。
 
-stdout/stderr 的普通日志文件分别受配置中的 `log_max_bytes` 限制。达到上限后会截断旧内容并继续记录，不会永久停止写日志。
+进程把结构化 JSON Lines 写入 `cc-automux.log`，并在 `cc-automux.log.1` 保留一代旧记录；配置中的 `log_max_bytes` 是两者的总预算。`bootstrap.log` 只接收结构化日志可用前发生的致命启动错误。
 
 ## 启动、停止与状态
 
@@ -59,14 +59,7 @@ stdout/stderr 的普通日志文件分别受配置中的 `log_max_bytes` 限制�
 
 LaunchAgent 标识为 com.Siriusrry.cc-automux，服务始终只监听 loopback。
 
-## 日志
-
-~~~
-./scripts/logs.sh
-./scripts/logs.sh --out
-./scripts/logs.sh --err --last 200
-./scripts/logs.sh --both --no-follow
-~~~
+结构化日志通过需要认证的管理日志接口读取，不再提供命令行日志查看脚本。
 
 ## 卸载
 
