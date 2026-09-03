@@ -211,40 +211,25 @@ func TestReaderSnapshotSurvivesConcurrentNamespaceRotation(t *testing.T) {
 	writeLines(t, activePath, logLine(base.Add(2*time.Second), 3, `"kind":"success"`), logLine(base.Add(3*time.Second), 4, `"kind":"success"`))
 
 	source := SnapshotSourceFunc(func() (Snapshot, error) {
-		active, err := os.Open(activePath)
+		directorySource, err := NewDirectorySource(dir)
 		if err != nil {
 			return Snapshot{}, err
 		}
-		archive, err := os.Open(archivePath)
+		snapshot, err := directorySource.OpenSnapshot()
 		if err != nil {
-			_ = active.Close()
-			return Snapshot{}, err
-		}
-		activeInfo, err := active.Stat()
-		if err != nil {
-			_ = active.Close()
-			_ = archive.Close()
-			return Snapshot{}, err
-		}
-		archiveInfo, err := archive.Stat()
-		if err != nil {
-			_ = active.Close()
-			_ = archive.Close()
 			return Snapshot{}, err
 		}
 		if err := os.Rename(activePath, activePath+".bound"); err != nil {
-			_ = active.Close()
-			_ = archive.Close()
+			_ = snapshot.Close()
 			return Snapshot{}, err
 		}
 		if err := os.Rename(archivePath, archivePath+".bound"); err != nil {
-			_ = active.Close()
-			_ = archive.Close()
+			_ = snapshot.Close()
 			return Snapshot{}, err
 		}
 		writeLines(t, archivePath, logLine(base.Add(2*time.Second), 3, `"kind":"success"`), logLine(base.Add(3*time.Second), 4, `"kind":"success"`))
 		writeLines(t, activePath, logLine(base.Add(4*time.Second), 5, `"kind":"success"`))
-		return Snapshot{Active: active, ActiveSize: activeInfo.Size(), Archive: archive, ArchiveSize: archiveInfo.Size()}, nil
+		return snapshot, nil
 	})
 	reader, err := NewReader(source)
 	if err != nil {

@@ -4,9 +4,58 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
+	"syscall"
 )
+
+const restartParentEnv = "CC_AUTOMUX_RESTART_PARENT_PID"
+
+func waitForRestartParent() error {
+	value := strings.TrimSpace(os.Getenv(restartParentEnv))
+	if value == "" {
+		return nil
+	}
+	_ = os.Unsetenv(restartParentEnv)
+	pid, err := strconv.ParseUint(value, 10, 32)
+	if err != nil || pid == 0 {
+		return fmt.Errorf("invalid restart parent pid %q", value)
+	}
+	handle, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(pid))
+	if errors.Is(err, syscall.Errno(87)) {
+		// The parent exited before the child opened its handle, so there is
+		// nothing left to wait for.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open restart parent process: %w", err)
+	}
+	defer syscall.CloseHandle(handle)
+	result, err := syscall.WaitForSingleObject(handle, syscall.INFINITE)
+	if err != nil {
+		return fmt.Errorf("wait for restart parent process: %w", err)
+	}
+	if result != syscall.WAIT_OBJECT_0 {
+		return fmt.Errorf("wait for restart parent process returned %#x", result)
+	}
+	return nil
+}
+
+func restartProcessEnvironment(configPath string, parentPID int) []string {
+	environ := processEnvironment(configPath)
+	entry := restartParentEnv + "=" + strconv.Itoa(parentPID)
+	for index, value := range environ {
+		name, _, ok := strings.Cut(value, "=")
+		if ok && strings.EqualFold(name, restartParentEnv) {
+			environ[index] = entry
+			return environ
+		}
+	}
+	return append(environ, entry)
+}
 
 func (a *App) restartProcess() error {
 	if err := a.beginRestart(); err != nil {
@@ -24,7 +73,7 @@ func (a *App) restartProcess() error {
 		return a.recoverRestartFailure(err)
 	}
 	command := exec.Command(executable, os.Args[1:]...)
-	command.Env = processEnvironment(a.configPath)
+	command.Env = restartProcessEnvironment(a.configPath, os.Getpid())
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	command.Stdin = os.Stdin

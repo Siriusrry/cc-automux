@@ -8,6 +8,8 @@ import (
 	"syscall"
 )
 
+func waitForRestartParent() error { return nil }
+
 func execCurrentProcessWithConfig(configPath string) error {
 	executable, err := os.Executable()
 	if err != nil {

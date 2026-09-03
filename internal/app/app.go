@@ -307,6 +307,9 @@ func New(options Options) (*App, error) {
 }
 
 func Run() error {
+	if err := waitForRestartParent(); err != nil {
+		return err
+	}
 	app, err := New(Options{})
 	if err != nil {
 		return err
