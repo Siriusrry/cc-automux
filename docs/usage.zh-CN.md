@@ -15,31 +15,22 @@
 ```bash
 go test ./...
 go build -trimpath -buildvcs=false -ldflags="-s -w" \
-  -o dist/cc-auto-mode-shim ./cmd/cc-auto-mode-shim
+  -o dist/cc-automux ./cmd/cc-automux
 ```
 
 前台运行：
 
 ```bash
-./dist/cc-auto-mode-shim
+./dist/cc-automux
 ```
 
-也可以把已构建的二进制安装为当前用户的 macOS LaunchAgent：
+也可以把已构建的二进制安装为当前用户的服务：macOS 上是 LaunchAgent，Linux 上是 `systemd --user` unit：
 
 ```bash
 ./scripts/install.sh
 ```
 
-安装器不进行交互。首次安装时可以覆盖以下值：
-
-```bash
-PORT=9000 \
-CLIPROXY_UPSTREAM=https://127.0.0.1:8317 \
-LOG_MAX_MB=200 \
-./scripts/install.sh
-```
-
-这些值只用于生成新配置；重新安装会保留现有 `config.json`。
+首次安装时，安装器会询问是否自动生成 management key；选择否则在二进制的可见提示中手动输入。配置文件由 `cc-automux init` 写入，脚本自身从不拼接配置。重新安装会原样保留现有 `config.json` 及其中的密钥。唯一支持的环境覆盖是 `CC_AUTOMUX_CONFIG`，取值必须是配置文件的绝对路径。
 
 ## 配置网关
 
@@ -54,7 +45,7 @@ open http://127.0.0.1:8765/admin
 - **AnyRouter：**有序入口 URL，以及零个或多个账号标签和密钥。新会话会分配到可用账号，并在同一会话内保持粘性。
 - **CPA：**CLIProxyAPI 上游 URL、一个可选密钥和一个可选 CA 文件。
 - **分类器拦截：**通常保持各路由默认目标；也可设置统一目标及其 URL、密钥、平台类型、模型覆盖和 TLS 选项。
-- **服务：**Active/Pass-through 模式、回环端口和单个日志文件的大小上限。
+- **服务：**Active/Pass-through 模式、回环端口和日志大小上限；该上限由活动日志文件和它的一代归档文件共同占用。
 
 大多数保存会立即生效。修改端口或日志上限时，进程会自动原地重启。直接编辑 `config.json` 不会被监测，手动修改后需要重启服务。
 
@@ -89,10 +80,11 @@ curl http://127.0.0.1:8765/healthz
 默认路径：
 
 ```text
-~/Library/Application Support/cc-auto-mode-shim/config.json
+macOS：~/Library/Application Support/cc-automux/config.json
+Linux：~/.config/cc-automux/config.json；设置了 $XDG_CONFIG_HOME 时为 $XDG_CONFIG_HOME/cc-automux/config.json
 ```
 
-可以把 `CC_AUTO_SHIM_CONFIG` 设置为绝对路径以使用其它位置。建议通过配置台修改。
+可以把 `CC_AUTOMUX_CONFIG` 设置为绝对路径以使用其它位置。建议通过配置台修改。
 
 默认结构：
 
@@ -135,18 +127,15 @@ curl http://127.0.0.1:8765/healthz
 
 密钥保存在这个本地文件中，不要提交已经填入真实密钥的配置。
 
-### 首次运行环境变量
+### 首次初始化
 
-配置文件不存在时，二进制可以使用以下变量生成初始配置：
+二进制除 `CC_AUTOMUX_CONFIG` 外不读取任何环境变量。配置文件不存在时由 `cc-automux init` 创建，安装器会代为执行。`--listen-addr` 与 `--log-max-bytes` 设置初始服务值，`--generate-management-key` 自动生成 management key 而不再提示输入：
 
-| 变量 | 默认值 | 用途 |
-|---|---|---|
-| `CC_AUTO_SHIM_LISTEN` | `127.0.0.1:8765` | 初始监听地址。 |
-| `CC_ANYROUTER_SHIM_UPSTREAM` | 两个默认 AnyRouter 入口 | 逗号分隔的初始入口列表。 |
-| `CC_CLIPROXY_SHIM_UPSTREAM` | `https://127.0.0.1:8317` | 初始 CPA 上游。 |
-| `CC_CLIPROXY_SHIM_CA` | 空 | 初始 CPA CA 文件。 |
+```bash
+./dist/cc-automux init --generate-management-key --listen-addr 127.0.0.1:8765
+```
 
-配置文件建立后，其中的路由和监听地址优先。
+配置文件建立后即以文件内容为准，`init` 不会再改动它。
 
 ## 服务与日志
 
@@ -185,7 +174,7 @@ Linux 安装路径，设置了 `XDG_CONFIG_HOME` 与 `XDG_STATE_HOME` 时按其�
 
 ## 升级与卸载
 
-重新构建后再次运行安装器，即可替换已安装的二进制和 LaunchAgent，同时保留现有配置：
+重新构建后再次运行安装器，即可替换已安装的二进制和服务注册，同时保留现有配置：
 
 ```bash
 ./scripts/install.sh
@@ -203,7 +192,7 @@ Linux 安装路径，设置了 `XDG_CONFIG_HOME` 与 `XDG_STATE_HOME` 时按其�
 ./scripts/uninstall.sh --keep-logs
 ```
 
-macOS 上 Finder 可用时，卸载器会把文件移入废纸篓；在无图形界面的会话中，它会警告后永久删除相同的明确目标。Linux 上始终是永久删除。通过 `CC_AUTO_SHIM_CONFIG` 放在应用目录之外的配置文件不会被删除。
+macOS 上 Finder 可用时，卸载器会把文件移入废纸篓；在无图形界面的会话中，它会警告后永久删除相同的明确目标。Linux 上始终是永久删除。通过 `CC_AUTOMUX_CONFIG` 放在应用目录之外的配置文件不会被删除。
 
 ## 基础排障
 

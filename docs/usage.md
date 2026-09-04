@@ -15,31 +15,22 @@ Build the binary:
 ```bash
 go test ./...
 go build -trimpath -buildvcs=false -ldflags="-s -w" \
-  -o dist/cc-auto-mode-shim ./cmd/cc-auto-mode-shim
+  -o dist/cc-automux ./cmd/cc-automux
 ```
 
 Run it in the foreground:
 
 ```bash
-./dist/cc-auto-mode-shim
+./dist/cc-automux
 ```
 
-Or install the built binary as a per-user macOS LaunchAgent:
+Or install the built binary as a per-user service, a LaunchAgent on macOS or a `systemd --user` unit on Linux:
 
 ```bash
 ./scripts/install.sh
 ```
 
-The installer is non-interactive. Optional first-install values are:
-
-```bash
-PORT=9000 \
-CLIPROXY_UPSTREAM=https://127.0.0.1:8317 \
-LOG_MAX_MB=200 \
-./scripts/install.sh
-```
-
-These values seed a new configuration. Reinstalling preserves an existing `config.json`.
+On a first installation the installer asks whether to generate a management key; declining lets you type one at the binary's visible prompt. The configuration file is written by `cc-automux init`, never by the script itself. Reinstalling keeps an existing `config.json` and its keys unchanged. The only environment override is `CC_AUTOMUX_CONFIG`, an absolute path to the configuration file.
 
 ## Configure the gateway
 
@@ -54,7 +45,7 @@ Configure only the routes you use:
 - **AnyRouter:** ordered entrance URLs and zero or more account labels/keys. New sessions are distributed across usable accounts and remain sticky to one account.
 - **CPA:** CLIProxyAPI upstream URL, one optional key, and an optional CA file.
 - **Classifier interception:** normally keep each provider's default destination. A single target can instead define its own URL, key, platform type, model override, and TLS settings.
-- **Service:** Active/Pass-through mode, loopback port, and per-file log limit.
+- **Service:** Active/Pass-through mode, loopback port, and the log size limit, which is shared by the active log file and its one archived generation.
 
 Most saves apply immediately. Changing the port or log limit automatically restarts the process in place. Editing `config.json` directly is not watched; restart the service after a manual edit.
 
@@ -89,10 +80,11 @@ curl http://127.0.0.1:8765/healthz
 Default path:
 
 ```text
-~/Library/Application Support/cc-auto-mode-shim/config.json
+macOS: ~/Library/Application Support/cc-automux/config.json
+Linux: ~/.config/cc-automux/config.json, or $XDG_CONFIG_HOME/cc-automux/config.json when that variable is set
 ```
 
-Set `CC_AUTO_SHIM_CONFIG` to an absolute path to use another location. The configuration desk is the recommended editor.
+Set `CC_AUTOMUX_CONFIG` to an absolute path to use another location. The configuration desk is the recommended editor.
 
 Default shape:
 
@@ -135,18 +127,15 @@ Key rules:
 
 Keys are stored in this local file. Do not commit a populated configuration.
 
-### First-run environment values
+### First-run initialization
 
-When the configuration file does not exist, the binary can seed it from:
+The binary reads no environment variable other than `CC_AUTOMUX_CONFIG`. A missing configuration file is created by `cc-automux init`, which the installer runs for you. `--listen-addr` and `--log-max-bytes` set the initial service values, and `--generate-management-key` creates the management key instead of prompting for it:
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `CC_AUTO_SHIM_LISTEN` | `127.0.0.1:8765` | Initial listen address. |
-| `CC_ANYROUTER_SHIM_UPSTREAM` | Two default AnyRouter entrances | Comma-separated initial entrance list. |
-| `CC_CLIPROXY_SHIM_UPSTREAM` | `https://127.0.0.1:8317` | Initial CPA upstream. |
-| `CC_CLIPROXY_SHIM_CA` | empty | Initial CPA CA file. |
+```bash
+./dist/cc-automux init --generate-management-key --listen-addr 127.0.0.1:8765
+```
 
-After the file exists, its routing and listen address are authoritative.
+Once the file exists it is authoritative, and `init` leaves it untouched.
 
 ## Service and logs
 
@@ -185,7 +174,7 @@ Fatal startup errors that happen before structured logging is ready go to stderr
 
 ## Upgrade and uninstall
 
-After rebuilding, rerun the installer to replace the installed binary and LaunchAgent while preserving the existing configuration:
+After rebuilding, rerun the installer to replace the installed binary and service registration while preserving the existing configuration:
 
 ```bash
 ./scripts/install.sh
@@ -203,7 +192,7 @@ Keep logs with:
 ./scripts/uninstall.sh --keep-logs
 ```
 
-On macOS the uninstaller uses the Trash when Finder is available; in a headless session it warns and permanently removes the same named targets. On Linux removal is always permanent. A configuration stored outside the application directory through `CC_AUTO_SHIM_CONFIG` is not removed.
+On macOS the uninstaller uses the Trash when Finder is available; in a headless session it warns and permanently removes the same named targets. On Linux removal is always permanent. A configuration stored outside the application directory through `CC_AUTOMUX_CONFIG` is not removed.
 
 ## Basic troubleshooting
 
