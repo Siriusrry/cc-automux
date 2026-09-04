@@ -846,6 +846,41 @@ func TestProviderHealthReturnsCompleteDiagnosticsAndStatusAggregates(t *testing.
 	}
 }
 
+// TestStatusReportsLoggingHealth covers the only path that makes a broken log
+// visible. Without it a process whose log writes fail keeps serving while the log
+// view is indistinguishable from an idle period.
+func TestStatusReportsLoggingHealth(t *testing.T) {
+	healthy := request(NewWithOptions(testManager(t, nil), Options{}),
+		http.MethodGet, "/api/v1/status", "Bearer management-key", "")
+	var decoded statusResponse
+	if err := json.Unmarshal(healthy.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	// A handler with no reporter wired must not claim a failure.
+	if !decoded.Logging.Healthy || decoded.Logging.Failures != 0 || decoded.Logging.LastFailureAt != nil {
+		t.Fatalf("default logging health = %#v", decoded.Logging)
+	}
+
+	failedAt := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	degraded := request(NewWithOptions(testManager(t, nil), Options{
+		LogHealth: func() logstore.Health {
+			return logstore.Health{Failures: 4, LastFailureAt: &failedAt, LastError: "no space left on device"}
+		},
+	}), http.MethodGet, "/api/v1/status", "Bearer management-key", "")
+	decoded = statusResponse{}
+	if err := json.Unmarshal(degraded.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Logging.Healthy || decoded.Logging.Failures != 4 ||
+		decoded.Logging.LastError != "no space left on device" ||
+		decoded.Logging.LastFailureAt == nil || !decoded.Logging.LastFailureAt.Equal(failedAt) {
+		t.Fatalf("degraded logging health = %#v", decoded.Logging)
+	}
+	if !strings.Contains(degraded.Body.String(), `"logging":{"healthy":false`) {
+		t.Fatalf("status body = %s", degraded.Body.String())
+	}
+}
+
 func TestManagementBodyLimit(t *testing.T) {
 	manager := testManager(t, nil)
 	handler := NewWithOptions(manager, Options{MaxBodyBytes: 16})

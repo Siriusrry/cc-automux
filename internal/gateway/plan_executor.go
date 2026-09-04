@@ -380,7 +380,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	if requestCanceled(ctx) {
 		return cancelAttempt(mutable.Body, requestBody, nil)
 	}
-	h.record(Event{Kind: EventForward, Time: h.now().UTC(), ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
+	h.record(Event{Kind: EventForward, ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
 	response, requestErr := clientLease.Client().Do(request)
 	requestCloseErr := requestBody.Close()
 	if requestErr != nil {

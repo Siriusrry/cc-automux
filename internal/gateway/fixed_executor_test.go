@@ -462,7 +462,7 @@ func TestFixedExecutionOrdersConversionAndPatchesAndInstallsFinalAuth(t *testing
 		t.Fatalf("events = %#v", gotEvents)
 	}
 	for _, event := range gotEvents {
-		if event.ProviderID != provider.FixedTargetID || event.SessionID != "original-session" || event.Model != "classifier-model" || event.UpstreamURL != fullURL || event.Attempt != 1 || !event.Time.Equal(now.UTC()) {
+		if event.ProviderID != provider.FixedTargetID || event.SessionID != "original-session" || event.Model != "classifier-model" || event.UpstreamURL != fullURL || event.Attempt != 1 {
 			t.Fatalf("event lost fixed facts: %#v", event)
 		}
 	}

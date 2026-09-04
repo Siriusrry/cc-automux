@@ -507,7 +507,6 @@ func (h *Handler) outcomeEvent(kind EventKind, lease scheduler.AttemptLease, out
 	item := lease.Provider
 	event := Event{
 		Kind:                   kind,
-		Time:                   h.now().UTC(),
 		SessionID:              outcome.SessionID,
 		Model:                  lease.Model,
 		RequestType:            lease.RequestType,

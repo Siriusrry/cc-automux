@@ -1279,7 +1279,7 @@ func (h *Handler) recordFixedCall(ctx context.Context, target *provider.Compiled
 }
 
 func (h *Handler) recordFixedEvent(kind EventKind, target *provider.CompiledFixedTarget, sessionID, model, upstream string, attempt, status int, raw string) {
-	event := Event{Kind: kind, Time: h.now().UTC(), SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
+	event := Event{Kind: kind, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
 	if target != nil {
 		event.ProviderID = target.ID
 	}

@@ -299,6 +299,9 @@ func New(options Options) (*App, error) {
 		Harnesses:           harnessManager,
 		Logs:                logReader,
 		LogStream:           logBroker,
+		// Read through the App so a restart that swaps the logger keeps the
+		// reported health pointing at the live one.
+		LogHealth: app.loggingHealth,
 	})
 	app.syncRuntime()
 	app.server = newHTTPServer(app.rootHandler())

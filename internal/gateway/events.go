@@ -18,9 +18,12 @@ const (
 
 // Event contains the complete diagnostic values observed by the data plane.
 // Recorders decide how those values are rendered or persisted.
+//
+// An event carries no timestamp of its own. The log record's timestamp is
+// assigned where the record is serialized, so that it cannot disagree with the
+// order records are written in.
 type Event struct {
 	Kind                   EventKind
-	Time                   time.Time
 	ProviderID             string
 	ProviderName           string
 	SessionID              string

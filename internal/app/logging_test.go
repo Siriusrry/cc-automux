@@ -88,7 +88,6 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 	defer logs.Close()
 	application := &App{logs: logs}
 	base := gateway.Event{
-		Time:         time.Date(2026, 9, 3, 10, 11, 12, 13, time.UTC),
 		ProviderID:   "provider-id",
 		ProviderName: "provider-name",
 		SessionID:    "session-id",
@@ -120,7 +119,7 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 	failure.GlobalHealth = scheduler.GlobalCooldown
 	failure.ChannelHealth = scheduler.ChannelHealthy
 	failure.GlobalEnteredCooldown = true
-	cooldown := base.Time.Add(time.Minute)
+	cooldown := time.Date(2026, 9, 3, 10, 12, 12, 13, time.UTC)
 	failure.CooldownUntil = &cooldown
 	application.recordGatewayEvent(failure)
 
@@ -266,4 +265,223 @@ func TestLoggerPublishesAcrossRotation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, logstore.ArchiveFileName)); err != nil {
 		t.Fatalf("rotation did not create archive: %v", err)
 	}
+}
+
+// TestLoggerTimestampsFollowSequenceUnderConcurrency covers the ordering
+// contract the history reader depends on. The reader scans one file backwards and
+// treats file order as descending (time, seq); if a record could carry a
+// timestamp taken before it acquired the write lock, a later-positioned record
+// could hold an earlier time and cursor pagination would skip records for good.
+func TestLoggerTimestampsFollowSequenceUnderConcurrency(t *testing.T) {
+	var output bytes.Buffer
+	logs, err := openLogger(appLogOpenerFor(&safeWriter{writer: &output}), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	application := &App{logs: logs}
+
+	var waiter sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		waiter.Add(1)
+		go func() {
+			defer waiter.Done()
+			application.recordGatewayEvent(gateway.Event{
+				Kind:        gateway.EventForward,
+				Model:       "model",
+				RequestType: traffic.RequestTypeNormal,
+				Attempt:     1,
+			})
+		}()
+	}
+	waiter.Wait()
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 64 {
+		t.Fatalf("wrote %d records", len(lines))
+	}
+	var previousSeq uint64
+	var previousTime time.Time
+	for index, line := range lines {
+		var record struct {
+			Time time.Time `json:"time"`
+			Seq  uint64    `json:"seq"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Seq != previousSeq+1 {
+			t.Fatalf("record %d has seq %d after %d", index, record.Seq, previousSeq)
+		}
+		if record.Time.Before(previousTime) {
+			t.Fatalf("record %d time %s precedes %s", index, record.Time, previousTime)
+		}
+		previousSeq = record.Seq
+		previousTime = record.Time
+	}
+}
+
+// TestLoggerClampsBackwardsClock keeps the same ordering when the wall clock
+// steps backwards, which would otherwise reintroduce the inversion without any
+// concurrency at all.
+func TestLoggerClampsBackwardsClock(t *testing.T) {
+	var output bytes.Buffer
+	logs, err := openLogger(appLogOpenerFor(&output), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	forward := time.Date(2026, 9, 3, 12, 0, 5, 0, time.UTC)
+	backward := forward.Add(-2 * time.Second)
+	times := []time.Time{forward, backward, backward.Add(time.Millisecond)}
+	index := 0
+	logs.handler.(*sequencedHandler).now = func() time.Time {
+		value := times[index]
+		if index < len(times)-1 {
+			index++
+		}
+		return value
+	}
+	application := &App{logs: logs}
+	for i := 0; i < 3; i++ {
+		application.logServiceEvent(slog.LevelInfo, "listening", slog.String("listen_addr", "127.0.0.1:1"))
+	}
+
+	var previous time.Time
+	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+		var record struct {
+			Time time.Time `json:"time"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Time.Before(previous) {
+			t.Fatalf("clamped time %s precedes %s", record.Time, previous)
+		}
+		previous = record.Time
+	}
+	if !previous.Equal(forward) {
+		t.Fatalf("clamped tail = %s, want %s", previous, forward)
+	}
+}
+
+// safeWriter serializes concurrent writes into the test buffer. bytes.Buffer is
+// not safe for concurrent use, and the writer under test intentionally no longer
+// holds the sequence lock while dispatching.
+type safeWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (w *safeWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.Write(p)
+}
+
+// TestLoggerReportsWriteFailureWithoutStopping covers the degradation contract.
+// A log write failure must not fail the request path, but it must stop being
+// invisible: the state is queryable, and the first transition reaches the same
+// stderr fallback that carries fatal startup errors.
+func TestLoggerReportsWriteFailureWithoutStopping(t *testing.T) {
+	var fallback bytes.Buffer
+	failing := &toggleWriter{}
+	logs, err := openLogger(appLogOpenerFor(failing), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	logs.fallback = &fallback
+	application := &App{logs: logs}
+
+	if health := application.loggingHealth(); !health.Healthy || health.Failures != 0 {
+		t.Fatalf("initial health = %#v", health)
+	}
+
+	failing.fail(errors.New("no space left on device"))
+	application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "first"))
+	health := application.loggingHealth()
+	if health.Healthy || health.Failures != 1 || health.LastError != "no space left on device" || health.LastFailureAt == nil {
+		t.Fatalf("degraded health = %#v", health)
+	}
+	if !strings.Contains(fallback.String(), "no space left on device") {
+		t.Fatalf("fallback = %q", fallback.String())
+	}
+
+	// Only the transition writes to the fallback. Reporting every failure would
+	// flood the fallback channel in exactly the disk-full case it exists for.
+	written := fallback.Len()
+	for i := 0; i < 5; i++ {
+		application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "again"))
+	}
+	if fallback.Len() != written {
+		t.Fatalf("fallback grew to %d bytes from %d", fallback.Len(), written)
+	}
+	if health = application.loggingHealth(); health.Failures != 6 {
+		t.Fatalf("accumulated failures = %d", health.Failures)
+	}
+
+	// Recovery clears the degradation so a transient failure does not pin the
+	// process into a permanently unhealthy report.
+	failing.fail(nil)
+	application.logServiceEvent(slog.LevelInfo, "listening", slog.String("listen_addr", "127.0.0.1:1"))
+	if health = application.loggingHealth(); !health.Healthy || health.Failures != 0 || health.LastError != "" || health.LastFailureAt != nil {
+		t.Fatalf("recovered health = %#v", health)
+	}
+	failing.fail(errors.New("second outage"))
+	application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "later"))
+	if !strings.Contains(fallback.String(), "second outage") {
+		t.Fatal("a new outage after recovery did not reach the fallback")
+	}
+}
+
+// TestLoggerFailedWriteIsNotPublished confirms degradation does not leak an
+// unpersisted record onto a live stream.
+func TestLoggerFailedWriteIsNotPublished(t *testing.T) {
+	broker := logstore.NewBroker()
+	subscription, err := broker.Subscribe(logstore.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	failing := &toggleWriter{}
+	logs, err := openLoggerWithBroker(appLogOpenerFor(failing), 1<<20, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	logs.fallback = io.Discard
+	application := &App{logs: logs}
+
+	failing.fail(errors.New("device removed"))
+	application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "lost"))
+	select {
+	case message := <-subscription.Messages():
+		t.Fatalf("failed write reached a subscriber: %#v", message)
+	default:
+	}
+	if health := application.loggingHealth(); health.Healthy {
+		t.Fatal("failed write left the logger reported as healthy")
+	}
+}
+
+// toggleWriter fails every write while an error is armed.
+type toggleWriter struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (w *toggleWriter) fail(err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.err = err
+}
+
+func (w *toggleWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return 0, w.err
+	}
+	return len(p), nil
 }

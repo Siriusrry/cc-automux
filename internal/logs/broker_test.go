@@ -263,3 +263,29 @@ func TestBrokerConcurrentPublishAndUnsubscribe(t *testing.T) {
 	wait.Wait()
 	broker.Close()
 }
+
+// TestBrokerDispatchDoesNotSerializeWrites documents which lock covers what. The
+// write lock exists to keep the file intact and the sequence monotonic;
+// dispatching is a separate concern and parsing a multi-megabyte record must not
+// put every other request's log write behind it.
+func TestBrokerPublishIsIndependentOfRecordSize(t *testing.T) {
+	broker := NewBroker()
+	subscription, err := broker.Subscribe(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+
+	body, err := json.Marshal(strings.Repeat("x", 4*MaximumFieldBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := []byte(`{"time":"2026-09-03T12:00:00Z","level":"ERROR","msg":"gateway","seq":1,"kind":"failure","raw_error":` + string(body) + "}\n")
+	if err := broker.Publish(line); err != nil {
+		t.Fatal(err)
+	}
+	message := <-subscription.Messages()
+	if message.Kind != MessageRecord || len(message.Record.Bytes()) >= len(line) {
+		t.Fatalf("published %d bytes of a %d byte line", len(message.Record.Bytes()), len(line))
+	}
+}

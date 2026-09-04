@@ -40,6 +40,10 @@ type Options struct {
 	Harnesses           *harnessconfig.Manager
 	Logs                *logstore.Reader
 	LogStream           *logstore.Broker
+	// LogHealth reports whether the process can still persist its own records.
+	// Status is the only place a degraded log becomes visible, so without it a
+	// broken log is indistinguishable from an idle period.
+	LogHealth func() logstore.Health
 }
 
 type Handler struct {
@@ -55,6 +59,7 @@ type Handler struct {
 	harnesses           *harnessconfig.Manager
 	logs                *logstore.Reader
 	logStream           *logstore.Broker
+	logHealth           func() logstore.Health
 }
 
 func New(manager *runtime.Manager) *Handler {
@@ -87,6 +92,7 @@ func NewWithOptions(manager *runtime.Manager, options Options) *Handler {
 		harnesses:           options.Harnesses,
 		logs:                options.Logs,
 		logStream:           options.LogStream,
+		logHealth:           options.LogHealth,
 	}
 }
 
@@ -339,12 +345,22 @@ func (h *Handler) handlePatches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+// loggingHealth defaults to healthy when no reporter is wired, which is the case
+// for handlers constructed without a running logger.
+func (h *Handler) loggingHealth() logstore.Health {
+	if h == nil || h.logHealth == nil {
+		return logstore.Health{Healthy: true}
+	}
+	return h.logHealth()
+}
+
 type statusResponse struct {
 	Product                     string                 `json:"product"`
 	Version                     string                 `json:"version"`
 	Revision                    uint64                 `json:"revision"`
 	ListenAddr                  string                 `json:"listen_addr"`
 	LogMaxBytes                 int64                  `json:"log_max_bytes"`
+	Logging                     logstore.Health        `json:"logging"`
 	GatewayConfigured           bool                   `json:"gateway_configured"`
 	ProviderCount               int                    `json:"provider_count"`
 	EnabledProviderCount        int                    `json:"enabled_provider_count"`
@@ -432,6 +448,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Revision:                    snapshot.Revision(),
 		ListenAddr:                  cfg.Service.ListenAddr,
 		LogMaxBytes:                 cfg.Service.LogMaxBytes,
+		Logging:                     h.loggingHealth(),
 		GatewayConfigured:           cfg.Auth.GatewayKey != "",
 		ProviderCount:               len(cfg.Providers),
 		EnabledProviderCount:        enabled,

@@ -171,16 +171,27 @@ func (w *rotatingWriter) OpenSnapshot() (logstore.Snapshot, error) {
 }
 
 type sequenceState struct {
-	mu   sync.Mutex
-	next uint64
+	mu       sync.Mutex
+	next     uint64
+	lastTime time.Time
+	// publish serializes dispatch in sequence order without holding mu, so
+	// parsing and summarizing one record never delays another record's write.
+	publish sync.Mutex
 }
 
-// sequencedHandler serializes complete slog records. Sequence allocation,
-// formatting and the writer's single Write call therefore occur in the same
-// order, so file order and seq order cannot diverge under concurrent logging.
+// sequencedHandler serializes complete slog records. The record timestamp and
+// the sequence number are both assigned inside the write lock, immediately
+// before the writer's single Write call, and the timestamp is clamped to be
+// non-decreasing. File order, seq order and (time, seq) order are therefore the
+// same order, which is what the history reader's reverse scan and cursor
+// pagination depend on. An event's own occurrence time is not carried into the
+// record: it differs from the write time by microseconds, and letting it set
+// the timestamp would reorder records relative to their sequence numbers.
 type sequencedHandler struct {
-	state    *sequenceState
-	delegate slog.Handler
+	state     *sequenceState
+	delegate  slog.Handler
+	publisher *publishingWriter
+	now       func() time.Time
 }
 
 func (h *sequencedHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -192,24 +203,69 @@ func (h *sequencedHandler) Handle(ctx context.Context, record slog.Record) error
 		return errors.New("log handler is not initialized")
 	}
 	h.state.mu.Lock()
-	defer h.state.mu.Unlock()
 	h.state.next++
+	record.Time = h.writeTimeLocked()
 	record.AddAttrs(slog.Uint64("seq", h.state.next))
-	return h.delegate.Handle(ctx, record)
+	err := h.delegate.Handle(ctx, record)
+	var line []byte
+	if err == nil && h.publisher != nil {
+		line = h.publisher.take()
+	}
+	// Hand over to the publish lock before releasing the write lock. Dispatch
+	// keeps sequence order while the next record is free to be written, so a
+	// multi-megabyte record does not make every other request wait for it to be
+	// parsed and summarized.
+	if line != nil {
+		h.state.publish.Lock()
+	}
+	h.state.mu.Unlock()
+	if line != nil {
+		h.publisher.dispatch(line)
+		h.state.publish.Unlock()
+	}
+	return err
+}
+
+// writeTimeLocked returns a non-decreasing write timestamp. A clock that steps
+// backwards would otherwise place a later record before an earlier one and make
+// reverse-scan pagination skip records permanently.
+func (h *sequencedHandler) writeTimeLocked() time.Time {
+	now := time.Now
+	if h.now != nil {
+		now = h.now
+	}
+	current := now().UTC()
+	if !h.state.lastTime.IsZero() && current.Before(h.state.lastTime) {
+		current = h.state.lastTime
+	}
+	h.state.lastTime = current
+	return current
 }
 
 func (h *sequencedHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &sequencedHandler{state: h.state, delegate: h.delegate.WithAttrs(attrs)}
+	return &sequencedHandler{state: h.state, delegate: h.delegate.WithAttrs(attrs), publisher: h.publisher, now: h.now}
 }
 
 func (h *sequencedHandler) WithGroup(name string) slog.Handler {
-	return &sequencedHandler{state: h.state, delegate: h.delegate.WithGroup(name)}
+	return &sequencedHandler{state: h.state, delegate: h.delegate.WithGroup(name), publisher: h.publisher, now: h.now}
 }
 
 type logger struct {
 	handler slog.Handler
 	source  logstore.SnapshotSource
 	close   func() error
+	health  *logstore.HealthTracker
+	// fallback receives one line when log writes first start failing. It is the
+	// last resort for the case where even the management interface cannot be
+	// reached, and is the same channel that carries fatal startup errors.
+	fallback io.Writer
+}
+
+func (l *logger) Health() logstore.Health {
+	if l == nil {
+		return logstore.Health{Healthy: true}
+	}
+	return l.health.Snapshot()
 }
 
 func openLogger(opener LogOpener, maxBytes int64) (*logger, error) {
@@ -232,27 +288,31 @@ func openLoggerWithBroker(opener LogOpener, maxBytes int64, broker *logstore.Bro
 		return nil, errors.New("log opener returned a nil writer")
 	}
 	source, _ := writer.(logstore.SnapshotSource)
-	output := io.Writer(writer)
-	if broker != nil {
-		output = &publishingWriter{delegate: writer, broker: broker}
-	}
-	jsonHandler := slog.NewJSONHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo})
+	publisher := &publishingWriter{delegate: writer, broker: broker}
+	jsonHandler := slog.NewJSONHandler(publisher, &slog.HandlerOptions{Level: slog.LevelInfo})
 	return &logger{
-		handler: &sequencedHandler{state: &sequenceState{}, delegate: jsonHandler},
-		source:  source,
-		close:   closeFunc,
+		handler:  &sequencedHandler{state: &sequenceState{}, delegate: jsonHandler, publisher: publisher},
+		source:   source,
+		close:    closeFunc,
+		health:   logstore.NewHealthTracker(),
+		fallback: os.Stderr,
 	}, nil
 }
 
+// publishingWriter records the bytes of each successfully persisted record so
+// the handler can dispatch them after releasing the write lock. Write is only
+// reached from inside that lock, so the captured line needs no guard of its own.
 type publishingWriter struct {
 	delegate io.Writer
 	broker   *logstore.Broker
+	captured []byte
 }
 
 func (w *publishingWriter) Write(p []byte) (int, error) {
 	if w == nil || w.delegate == nil {
 		return 0, errors.New("log publishing writer is not initialized")
 	}
+	w.captured = nil
 	n, err := w.delegate.Write(p)
 	if err != nil || n != len(p) {
 		if err == nil {
@@ -260,13 +320,29 @@ func (w *publishingWriter) Write(p []byte) (int, error) {
 		}
 		return n, err
 	}
-	if w.broker != nil {
-		// JSONHandler has already completed the record. Parsing failure here
-		// cannot undo an authoritative file write, so it only suppresses the
-		// impossible malformed real-time message.
-		_ = w.broker.Publish(p)
-	}
+	// Only a complete file write is eligible for dispatch, so an unpersisted
+	// record can never reach a subscriber.
+	w.captured = append([]byte(nil), p...)
 	return n, nil
+}
+
+func (w *publishingWriter) take() []byte {
+	if w == nil || w.broker == nil {
+		return nil
+	}
+	line := w.captured
+	w.captured = nil
+	return line
+}
+
+func (w *publishingWriter) dispatch(line []byte) {
+	if w == nil || w.broker == nil {
+		return
+	}
+	// JSONHandler has already completed the record. Parsing failure here cannot
+	// undo an authoritative file write, so it only suppresses the impossible
+	// malformed real-time message.
+	_ = w.broker.Publish(line)
 }
 
 func (l *logger) Close() error {
@@ -276,16 +352,30 @@ func (l *logger) Close() error {
 	return l.close()
 }
 
-func (l *logger) log(at time.Time, level slog.Level, message string, attrs ...slog.Attr) {
+// log formats one record. The timestamp argument is ignored: the handler assigns
+// the write time inside its lock so that file order, seq order and (time, seq)
+// order stay identical.
+func (l *logger) log(level slog.Level, message string, attrs ...slog.Attr) {
 	if l == nil || l.handler == nil {
 		return
 	}
-	if at.IsZero() {
-		at = time.Now()
-	}
-	record := slog.NewRecord(at.UTC(), level, message, 0)
+	record := slog.NewRecord(time.Time{}, level, message, 0)
 	record.AddAttrs(attrs...)
-	_ = l.handler.Handle(context.Background(), record)
+	if err := l.handler.Handle(context.Background(), record); err != nil {
+		l.reportWriteFailure(err)
+		return
+	}
+	l.health.RecordSuccess()
+}
+
+// reportWriteFailure keeps the degradation in memory and, only on the first
+// transition, emits one line to the fallback channel. It never logs: reporting a
+// log failure by logging would recurse.
+func (l *logger) reportWriteFailure(err error) {
+	if !l.health.RecordFailure(err) || l.fallback == nil {
+		return
+	}
+	fmt.Fprintf(l.fallback, "cc-automux: structured logging stopped working: %v\n", err)
 }
 
 func (a *App) recordGatewayEvent(event gateway.Event) {
@@ -349,7 +439,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 			slog.String("next_upstream_url", event.NextUpstreamURL),
 		)
 	}
-	a.logs.log(event.Time, level, "gateway", attrs...)
+	a.logs.log(level, "gateway", attrs...)
 }
 
 func (a *App) logServiceEvent(level slog.Level, event string, attrs ...slog.Attr) {
@@ -359,5 +449,18 @@ func (a *App) logServiceEvent(level slog.Level, event string, attrs ...slog.Attr
 	values := make([]slog.Attr, 0, len(attrs)+1)
 	values = append(values, slog.String("event", event))
 	values = append(values, attrs...)
-	a.logs.log(time.Time{}, level, "service", values...)
+	a.logs.log(level, "service", values...)
+}
+
+// loggingHealth reports the live logger's write health. Reading the field on
+// each call rather than capturing it keeps the report correct after a restart
+// transaction replaces the logger.
+func (a *App) loggingHealth() logstore.Health {
+	if a == nil {
+		return logstore.Health{Healthy: true}
+	}
+	a.lifecycleMu.Lock()
+	logs := a.logs
+	a.lifecycleMu.Unlock()
+	return logs.Health()
 }
