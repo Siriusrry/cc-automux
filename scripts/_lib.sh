@@ -108,6 +108,40 @@ xml_escape() {
   printf '%s' "$value"
 }
 
+# unit_quote renders one value for a systemd directive that is unquoted on
+# load, which ExecStart= and Environment= are. systemd splits those on
+# whitespace and expands % specifiers, so a home directory containing a space
+# or a percent sign would otherwise turn into a different program, different
+# arguments or a different path. Inside double quotes systemd honours backslash
+# escapes for the backslash and the quote, and a doubled percent sign stands
+# for a literal one.
+unit_quote() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//%/%%}
+  printf '"%s"' "$value"
+}
+
+# unit_env_quote renders one KEY=value assignment for Environment=. The whole
+# assignment is quoted, which is the form systemd documents for values that
+# contain whitespace.
+unit_env_quote() {
+  local name="$1" value="$2"
+  unit_quote "$name=$value"
+}
+
+# unit_path renders one value for a single-path directive such as
+# WorkingDirectory=. Those are not unquoted on load, so quotes would become
+# part of the path and make it non-absolute; only leading and trailing
+# whitespace is stripped, so interior spaces survive as they are. Specifiers
+# are still expanded, so the percent sign is the one character to escape.
+unit_path() {
+  local value="$1"
+  value=${value//%/%%}
+  printf '%s' "$value"
+}
+
 require_template() {
   if [[ ! -f "$TEMPLATE_PATH" ]]; then
     echo "Missing service template: $TEMPLATE_PATH" >&2
@@ -161,12 +195,12 @@ render_systemd_unit() {
   require_template
 
   if [[ -n "${CC_AUTOMUX_CONFIG:-}" ]]; then
-    config_env="Environment=CC_AUTOMUX_CONFIG=$CONFIG_PATH"
+    config_env="Environment=$(unit_env_quote CC_AUTOMUX_CONFIG "$CONFIG_PATH")"
   fi
 
   rendered="$(<"$TEMPLATE_PATH")"
-  rendered=${rendered//__BINARY_PATH__/$BIN_PATH}
-  rendered=${rendered//__WORKING_DIRECTORY__/$APP_DIR}
+  rendered=${rendered//__BINARY_PATH__/$(unit_quote "$BIN_PATH")}
+  rendered=${rendered//__WORKING_DIRECTORY__/$(unit_path "$APP_DIR")}
   rendered=${rendered//__CONFIG_ENV__/$config_env}
 
   mkdir -p "$SERVICE_DIR"
@@ -206,11 +240,22 @@ stop_service() {
 
 # unregister_service removes the autostart registration. On Linux the unit file
 # has to stay in place for disable to resolve the name, so the caller deletes it
-# afterwards.
+# afterwards and then calls forget_service so systemd drops the unit it still
+# holds in memory.
 unregister_service() {
   stop_service
   if [[ "$PLATFORM" == "linux" ]]; then
     systemctl --user disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+}
+
+# forget_service is called after the registration file has been deleted. launchd
+# forgets a booted-out agent on its own; systemd keeps a loaded unit until it is
+# told to reload, and would otherwise keep reporting the deleted unit.
+forget_service() {
+  if [[ "$PLATFORM" == "linux" ]]; then
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user reset-failed "$SERVICE_NAME" 2>/dev/null || true
   fi
 }
 

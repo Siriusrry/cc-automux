@@ -24,6 +24,7 @@ unregister_service
 # On macOS these move to the Trash and stay recoverable via Finder "Put Back";
 # on Linux the removal is permanent.
 remove_path "$SERVICE_PATH"
+forget_service
 remove_path "$APP_DIR"
 
 if [[ "$KEEP_LOGS" == true ]]; then
