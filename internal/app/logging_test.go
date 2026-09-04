@@ -220,6 +220,7 @@ func TestLoggerPublishesOnlyAfterSuccessfulCompleteWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	(&App{logs: failingLogs}).logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "not persisted"))
+	failingBroker.Flush()
 	select {
 	case unexpected := <-failingSubscription.Messages():
 		t.Fatalf("failed write was published: %#v", unexpected)
@@ -229,10 +230,67 @@ func TestLoggerPublishesOnlyAfterSuccessfulCompleteWrite(t *testing.T) {
 	if _, err := short.Write([]byte(`{"time":"2026-09-03T12:00:00Z","level":"INFO","msg":"service","seq":1}` + "\n")); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("short write error = %v", err)
 	}
+	failingBroker.Flush()
 	select {
 	case unexpected := <-failingSubscription.Messages():
 		t.Fatalf("short write was published: %#v", unexpected)
 	default:
+	}
+}
+
+// TestLoggerWriteReturnsBeforeDispatch covers the boundary between the write
+// lock and dispatch. The lock exists to keep the file intact and the sequence
+// monotonic; parsing and summarizing a record for subscribers is the broker's
+// work. A record large enough to take a noticeable time to parse must therefore
+// neither delay the call that logged it beyond its own write, nor delay the
+// small records logged by other requests while it is being parsed.
+func TestLoggerWriteReturnsBeforeDispatch(t *testing.T) {
+	broker := logstore.NewBroker()
+	defer broker.Close()
+	subscription, err := broker.Subscribe(logstore.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	logs, err := openLoggerWithBroker(appLogOpenerFor(&safeWriter{writer: io.Discard}), 1<<30, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	application := &App{logs: logs}
+
+	application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", strings.Repeat("x", 16<<20)))
+	if len(subscription.Messages()) != 0 {
+		t.Fatal("the oversized record was parsed and delivered before its log call returned")
+	}
+	// The oversized record is now being parsed on the broker's goroutine. Small
+	// records from other requests must not queue behind it.
+	var latencies [2]time.Duration
+	var waiter sync.WaitGroup
+	for i := range latencies {
+		waiter.Add(1)
+		go func(index int) {
+			defer waiter.Done()
+			started := time.Now()
+			application.logServiceEvent(slog.LevelInfo, "listening", slog.String("listen_addr", "127.0.0.1:1"))
+			latencies[index] = time.Since(started)
+		}(i)
+	}
+	waiter.Wait()
+	for index, latency := range latencies {
+		if latency > 100*time.Millisecond {
+			t.Fatalf("small record %d waited %v behind the oversized record's dispatch", index, latency)
+		}
+	}
+	broker.Flush()
+	for expected := uint64(1); expected <= 3; expected++ {
+		message := <-subscription.Messages()
+		if message.Kind != logstore.MessageRecord || message.Record.Seq != expected {
+			t.Fatalf("message %d = %#v", expected, message)
+		}
+		if expected == 1 && len(message.Record.Bytes()) > 2*logstore.MaximumFieldBytes {
+			t.Fatalf("oversized record was pushed with %d bytes", len(message.Record.Bytes()))
+		}
 	}
 }
 
@@ -365,9 +423,8 @@ func TestLoggerClampsBackwardsClock(t *testing.T) {
 	}
 }
 
-// safeWriter serializes concurrent writes into the test buffer. bytes.Buffer is
-// not safe for concurrent use, and the writer under test intentionally no longer
-// holds the sequence lock while dispatching.
+// safeWriter serializes concurrent writes into the test buffer, which is not
+// safe for concurrent use on its own.
 type safeWriter struct {
 	mu     sync.Mutex
 	writer io.Writer
@@ -455,6 +512,7 @@ func TestLoggerFailedWriteIsNotPublished(t *testing.T) {
 
 	failing.fail(errors.New("device removed"))
 	application.logServiceEvent(slog.LevelWarn, "restart_failed", slog.String("error", "lost"))
+	broker.Flush()
 	select {
 	case message := <-subscription.Messages():
 		t.Fatalf("failed write reached a subscriber: %#v", message)

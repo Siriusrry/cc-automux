@@ -544,12 +544,8 @@ func TestLogStreamEndpoint(t *testing.T) {
 	}
 	infoLine := []byte(`{"time":"2026-09-03T12:00:00Z","level":"INFO","msg":"service","seq":1,"event":"listening"}`)
 	errorLine := []byte(`{"time":"2026-09-03T12:00:01Z","level":"ERROR","msg":"gateway","seq":5,"kind":"failure","raw_error":"complete"}`)
-	if err := broker.Publish(append(append([]byte(nil), infoLine...), '\n')); err != nil {
-		t.Fatal(err)
-	}
-	if err := broker.Publish(append(append([]byte(nil), errorLine...), '\n')); err != nil {
-		t.Fatal(err)
-	}
+	broker.Publish(infoLine)
+	broker.Publish(errorLine)
 	reader := bufio.NewReader(response.Body)
 	var event strings.Builder
 	for {
@@ -589,9 +585,7 @@ func TestLogStreamEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	newLine := []byte(`{"time":"2026-09-03T12:00:02Z","level":"ERROR","msg":"gateway","seq":9,"kind":"failure","raw_error":"after reconnect"}`)
-	if err := broker.Publish(append(append([]byte(nil), newLine...), '\n')); err != nil {
-		t.Fatal(err)
-	}
+	broker.Publish(newLine)
 	reconnectedReader := bufio.NewReader(reconnected.Body)
 	event.Reset()
 	for {

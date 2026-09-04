@@ -174,9 +174,6 @@ type sequenceState struct {
 	mu       sync.Mutex
 	next     uint64
 	lastTime time.Time
-	// publish serializes dispatch in sequence order without holding mu, so
-	// parsing and summarizing one record never delays another record's write.
-	publish sync.Mutex
 }
 
 // sequencedHandler serializes complete slog records. The record timestamp and
@@ -187,11 +184,15 @@ type sequenceState struct {
 // pagination depend on. An event's own occurrence time is not carried into the
 // record: it differs from the write time by microseconds, and letting it set
 // the timestamp would reorder records relative to their sequence numbers.
+//
+// The lock covers formatting, the write and the hand-off of the persisted line
+// to the broker's queue, all of which cost a copy at most. Parsing and
+// summarizing the record for subscribers happen on the broker's goroutine, so
+// a multi-megabyte upstream error never holds this lock while it is parsed.
 type sequencedHandler struct {
-	state     *sequenceState
-	delegate  slog.Handler
-	publisher *publishingWriter
-	now       func() time.Time
+	state    *sequenceState
+	delegate slog.Handler
+	now      func() time.Time
 }
 
 func (h *sequencedHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -203,27 +204,11 @@ func (h *sequencedHandler) Handle(ctx context.Context, record slog.Record) error
 		return errors.New("log handler is not initialized")
 	}
 	h.state.mu.Lock()
+	defer h.state.mu.Unlock()
 	h.state.next++
 	record.Time = h.writeTimeLocked()
 	record.AddAttrs(slog.Uint64("seq", h.state.next))
-	err := h.delegate.Handle(ctx, record)
-	var line []byte
-	if err == nil && h.publisher != nil {
-		line = h.publisher.take()
-	}
-	// Hand over to the publish lock before releasing the write lock. Dispatch
-	// keeps sequence order while the next record is free to be written, so a
-	// multi-megabyte record does not make every other request wait for it to be
-	// parsed and summarized.
-	if line != nil {
-		h.state.publish.Lock()
-	}
-	h.state.mu.Unlock()
-	if line != nil {
-		h.publisher.dispatch(line)
-		h.state.publish.Unlock()
-	}
-	return err
+	return h.delegate.Handle(ctx, record)
 }
 
 // writeTimeLocked returns a non-decreasing write timestamp. A clock that steps
@@ -243,11 +228,11 @@ func (h *sequencedHandler) writeTimeLocked() time.Time {
 }
 
 func (h *sequencedHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &sequencedHandler{state: h.state, delegate: h.delegate.WithAttrs(attrs), publisher: h.publisher, now: h.now}
+	return &sequencedHandler{state: h.state, delegate: h.delegate.WithAttrs(attrs), now: h.now}
 }
 
 func (h *sequencedHandler) WithGroup(name string) slog.Handler {
-	return &sequencedHandler{state: h.state, delegate: h.delegate.WithGroup(name), publisher: h.publisher, now: h.now}
+	return &sequencedHandler{state: h.state, delegate: h.delegate.WithGroup(name), now: h.now}
 }
 
 type logger struct {
@@ -291,7 +276,7 @@ func openLoggerWithBroker(opener LogOpener, maxBytes int64, broker *logstore.Bro
 	publisher := &publishingWriter{delegate: writer, broker: broker}
 	jsonHandler := slog.NewJSONHandler(publisher, &slog.HandlerOptions{Level: slog.LevelInfo})
 	return &logger{
-		handler:  &sequencedHandler{state: &sequenceState{}, delegate: jsonHandler, publisher: publisher},
+		handler:  &sequencedHandler{state: &sequenceState{}, delegate: jsonHandler},
 		source:   source,
 		close:    closeFunc,
 		health:   logstore.NewHealthTracker(),
@@ -299,20 +284,18 @@ func openLoggerWithBroker(opener LogOpener, maxBytes int64, broker *logstore.Bro
 	}, nil
 }
 
-// publishingWriter records the bytes of each successfully persisted record so
-// the handler can dispatch them after releasing the write lock. Write is only
-// reached from inside that lock, so the captured line needs no guard of its own.
+// publishingWriter hands each successfully persisted record to the broker.
+// Publish only copies the line into the broker's queue, so the writer lock is
+// never held while a record is parsed or summarized for subscribers.
 type publishingWriter struct {
 	delegate io.Writer
 	broker   *logstore.Broker
-	captured []byte
 }
 
 func (w *publishingWriter) Write(p []byte) (int, error) {
 	if w == nil || w.delegate == nil {
 		return 0, errors.New("log publishing writer is not initialized")
 	}
-	w.captured = nil
 	n, err := w.delegate.Write(p)
 	if err != nil || n != len(p) {
 		if err == nil {
@@ -320,29 +303,10 @@ func (w *publishingWriter) Write(p []byte) (int, error) {
 		}
 		return n, err
 	}
-	// Only a complete file write is eligible for dispatch, so an unpersisted
-	// record can never reach a subscriber.
-	w.captured = append([]byte(nil), p...)
+	// Only a complete file write is published, so an unpersisted record can
+	// never reach a subscriber.
+	w.broker.Publish(p)
 	return n, nil
-}
-
-func (w *publishingWriter) take() []byte {
-	if w == nil || w.broker == nil {
-		return nil
-	}
-	line := w.captured
-	w.captured = nil
-	return line
-}
-
-func (w *publishingWriter) dispatch(line []byte) {
-	if w == nil || w.broker == nil {
-		return
-	}
-	// JSONHandler has already completed the record. Parsing failure here cannot
-	// undo an authoritative file write, so it only suppresses the impossible
-	// malformed real-time message.
-	_ = w.broker.Publish(line)
 }
 
 func (l *logger) Close() error {
