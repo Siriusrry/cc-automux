@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- macOS for the LaunchAgent scripts.
+- macOS or Linux for the install scripts. They register a per-user LaunchAgent on macOS and a per-user systemd unit on Linux.
 - Go 1.22 or newer when building from source.
 - An AnyRouter account, a running CLIProxyAPI instance, or another configured classifier target.
 
@@ -156,7 +156,7 @@ After the file exists, its routing and listen address are authoritative.
 ./scripts/start.sh
 ```
 
-Installed paths:
+Installed paths on macOS:
 
 ```text
 ~/Library/Application Support/cc-automux/bin/cc-automux
@@ -167,7 +167,21 @@ Installed paths:
 ~/Library/Logs/cc-automux/bootstrap.log
 ```
 
-The process owns the two JSON Lines files. Structured log history is read through authenticated `GET /api/v1/logs`, and live records use authenticated `GET /api/v1/logs/stream`; there is no command-line log-viewing script. `bootstrap.log` is only the fallback for fatal startup errors that happen before structured logging is ready.
+Installed paths on Linux, honouring `XDG_CONFIG_HOME` and `XDG_STATE_HOME` when set:
+
+```text
+~/.config/cc-automux/bin/cc-automux
+~/.config/cc-automux/config.json
+~/.config/systemd/user/cc-automux.service
+~/.local/state/cc-automux/cc-automux.log
+~/.local/state/cc-automux/cc-automux.log.1
+```
+
+The process owns the two JSON Lines files. Structured log history is read through authenticated `GET /api/v1/logs`, live records use authenticated `GET /api/v1/logs/stream`, and one complete record is read with `GET /api/v1/logs/record`; there is no command-line log-viewing script. Oversized fields are bounded in both the history and the stream, and the complete value is fetched by reference.
+
+`GET /api/v1/status` reports whether the process can still write its own log. A log write failure does not stop the gateway, so that field is how a broken log becomes visible instead of looking like an idle period.
+
+Fatal startup errors that happen before structured logging is ready go to stderr. On macOS they land in `bootstrap.log`, which the installer truncates on every run. On Linux they go to the journal, read with `journalctl --user -u cc-automux.service`.
 
 ## Upgrade and uninstall
 
@@ -189,11 +203,11 @@ Keep logs with:
 ./scripts/uninstall.sh --keep-logs
 ```
 
-The uninstaller uses the macOS Trash when Finder is available. In a headless session it warns and permanently removes the same named targets. A configuration stored outside the application directory through `CC_AUTO_SHIM_CONFIG` is not removed.
+On macOS the uninstaller uses the Trash when Finder is available; in a headless session it warns and permanently removes the same named targets. On Linux removal is always permanent. A configuration stored outside the application directory through `CC_AUTO_SHIM_CONFIG` is not removed.
 
 ## Basic troubleshooting
 
-- **The service does not start:** run `./scripts/status.sh` and inspect `~/Library/Logs/cc-automux/bootstrap.log`.
+- **The service does not start:** run `./scripts/status.sh`, then inspect `~/Library/Logs/cc-automux/bootstrap.log` on macOS or `journalctl --user -u cc-automux.service` on Linux.
 - **A reinstall appears to ignore a new port or upstream:** the existing configuration is authoritative; change it in `/admin`.
 - **`401` or `403`:** verify the route key/account and the selected `/any` or `/cpa` base URL.
 - **A manual JSON edit has no effect:** restart with `./scripts/stop.sh` followed by `./scripts/start.sh`.

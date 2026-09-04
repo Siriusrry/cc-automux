@@ -14,23 +14,26 @@ elif [[ $# -gt 0 ]]; then
   exit 1
 fi
 
-stop_launch_agent
-# Move artifacts to the macOS Trash (recoverable via Finder "Put Back") instead
-# of hard-deleting. Only the app's own named files/dirs are touched; the shared
-# parent dirs (LaunchAgents, Application Support, Logs) are left intact.
-# APP_DIR holds both the installed binary and config.json, so this removes both.
-# Logs are removed by default; --keep-logs retains LOG_DIR.
-trash "$PLIST_PATH"
-trash "$APP_DIR"
+# Stop the service and drop the autostart registration before deleting anything.
+# On Linux the unit file must still exist for disable to resolve the name.
+unregister_service
+# Only the app's own named files/dirs are touched; the shared parent dirs
+# (LaunchAgents, systemd/user, Application Support, Logs, .config, .local/state)
+# are left intact. APP_DIR holds both the installed binary and config.json, so
+# this removes both. Logs are removed by default; --keep-logs retains LOG_DIR.
+# On macOS these move to the Trash and stay recoverable via Finder "Put Back";
+# on Linux the removal is permanent.
+remove_path "$SERVICE_PATH"
+remove_path "$APP_DIR"
 
 if [[ "$KEEP_LOGS" == true ]]; then
   cat <<EOF
-Uninstalled $LABEL (plist + app data moved to the Trash).
+Uninstalled $SERVICE_NAME (autostart registration and app data removed).
 
 Logs were kept at:
   $LOG_DIR
 EOF
 else
-  trash "$LOG_DIR"
-  echo "Uninstalled $LABEL and moved plist, app data, and logs to the Trash."
+  remove_path "$LOG_DIR"
+  echo "Uninstalled $SERVICE_NAME and removed the autostart registration, app data, and logs."
 fi

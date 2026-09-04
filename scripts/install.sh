@@ -6,9 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
-ACTIVE_LOG="$LOG_DIR/cc-automux.log"
-ARCHIVE_LOG="$LOG_DIR/cc-automux.log.1"
-
 DIST_BIN="$REPO_ROOT/dist/cc-automux"
 if [[ ! -x "$DIST_BIN" ]]; then
   cat >&2 <<EOF
@@ -49,24 +46,30 @@ fi
 # Only stop or replace the installed service after initialization has
 # succeeded. A rejected key or invalid existing configuration therefore leaves
 # the currently installed process untouched.
-stop_launch_agent
-mkdir -p "$BIN_DIR" "$LOG_DIR" "$PLIST_DIR"
+stop_service
+mkdir -p "$BIN_DIR" "$LOG_DIR" "$SERVICE_DIR"
 install -m 755 "$DIST_BIN" "$BIN_PATH"
-touch "$BOOTSTRAP_LOG"
-chmod 600 "$BOOTSTRAP_LOG"
-render_plist
+if [[ -n "$BOOTSTRAP_LOG" ]]; then
+  # Truncate rather than append. This channel only carries fatal startup errors,
+  # which always need a human; a previous round's output has no value for the
+  # current one, and truncating keeps the file from growing without bound while a
+  # configuration stays broken and the service is restarted repeatedly.
+  : > "$BOOTSTRAP_LOG"
+  chmod 600 "$BOOTSTRAP_LOG"
+fi
+render_service
 
-start_launch_agent
+start_service
 
 cat <<EOF
 
-Installed and started CC AutoMux.
+Installed and started CC AutoMux ($PLATFORM).
 
 Installed binary:
   $BIN_PATH
 
-LaunchAgent:
-  $PLIST_PATH
+Autostart registration:
+  $SERVICE_PATH
 
 Config:
   $CONFIG_PATH
@@ -74,10 +77,14 @@ Config:
 Logs:
   $ACTIVE_LOG
   $ARCHIVE_LOG
+EOF
+
+cat <<EOF
 
 Startup fallback:
-  $BOOTSTRAP_LOG
 EOF
+describe_fallback
+
 if (( CONFIG_EXISTED )); then
   cat <<EOF
 

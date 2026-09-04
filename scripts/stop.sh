@@ -6,6 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
-stop_launch_agent
+stop_service
 
-echo "Stopped $LABEL"
+echo "Stopped $SERVICE_NAME"

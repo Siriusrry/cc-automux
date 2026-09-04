@@ -4,7 +4,7 @@
 
 ## 使用条件
 
-- LaunchAgent 脚本仅适用于 macOS。
+- 安装脚本适用于 macOS 与 Linux：在 macOS 上注册当前用户 LaunchAgent，在 Linux 上注册当前用户 systemd unit。
 - 从源码构建需要 Go 1.22 或更高版本。
 - 需要 AnyRouter 账号、正在运行的 CLIProxyAPI，或其它已配置的分类器目标。
 
@@ -156,7 +156,7 @@ curl http://127.0.0.1:8765/healthz
 ./scripts/start.sh
 ```
 
-安装路径：
+macOS 安装路径：
 
 ```text
 ~/Library/Application Support/cc-automux/bin/cc-automux
@@ -167,7 +167,21 @@ curl http://127.0.0.1:8765/healthz
 ~/Library/Logs/cc-automux/bootstrap.log
 ```
 
-进程自行管理两个 JSON Lines 文件。结构化日志历史通过需要认证的 `GET /api/v1/logs` 读取，实时记录通过需要认证的 `GET /api/v1/logs/stream` 推送；不再提供命令行日志查看脚本。`bootstrap.log` 仅用于记录结构化日志可用前发生的致命启动错误。
+Linux 安装路径，设置了 `XDG_CONFIG_HOME` 与 `XDG_STATE_HOME` 时按其取值：
+
+```text
+~/.config/cc-automux/bin/cc-automux
+~/.config/cc-automux/config.json
+~/.config/systemd/user/cc-automux.service
+~/.local/state/cc-automux/cc-automux.log
+~/.local/state/cc-automux/cc-automux.log.1
+```
+
+进程自行管理两个 JSON Lines 文件。结构化日志历史通过需要认证的 `GET /api/v1/logs` 读取，实时记录通过需要认证的 `GET /api/v1/logs/stream` 推送，单条完整记录通过 `GET /api/v1/logs/record` 读取；不提供命令行日志查看脚本。超长字段在历史与推送中都会设上限，完整内容按引用单独获取。
+
+`GET /api/v1/status` 会报告进程当前是否还能写入自己的日志。日志写入失败不会中断网关，因此该字段是让日志失效变得可见的唯一途径，否则它看起来只是最近没有新日志。
+
+结构化日志可用之前的致命启动错误写入 stderr：macOS 上进入 `bootstrap.log`，安装器每次运行都会截断它；Linux 上进入 journal，用 `journalctl --user -u cc-automux.service` 查看。
 
 ## 升级与卸载
 
@@ -189,11 +203,11 @@ curl http://127.0.0.1:8765/healthz
 ./scripts/uninstall.sh --keep-logs
 ```
 
-Finder 可用时，卸载器会把文件移入 macOS 废纸篓；在无图形界面的会话中，它会警告后永久删除相同的明确目标。通过 `CC_AUTO_SHIM_CONFIG` 放在应用目录之外的配置文件不会被删除。
+macOS 上 Finder 可用时，卸载器会把文件移入废纸篓；在无图形界面的会话中，它会警告后永久删除相同的明确目标。Linux 上始终是永久删除。通过 `CC_AUTO_SHIM_CONFIG` 放在应用目录之外的配置文件不会被删除。
 
 ## 基础排障
 
-- **服务无法启动：**运行 `./scripts/status.sh` 并检查 `~/Library/Logs/cc-automux/bootstrap.log`。
+- **服务无法启动：**运行 `./scripts/status.sh`，然后在 macOS 上检查 `~/Library/Logs/cc-automux/bootstrap.log`，在 Linux 上检查 `journalctl --user -u cc-automux.service`。
 - **重新安装后新端口或上游没有生效：**现有配置优先，请在 `/admin` 中修改。
 - **出现 `401` 或 `403`：**检查路由密钥/账号，以及使用的 `/any` 或 `/cpa` Base URL。
 - **手动修改 JSON 后没有生效：**依次运行 `./scripts/stop.sh` 和 `./scripts/start.sh`。

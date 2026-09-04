@@ -1,0 +1,21 @@
+[Unit]
+Description=CC AutoMux local gateway
+Documentation=https://github.com/Siriusrry/cc-automux
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__BINARY_PATH__
+WorkingDirectory=__WORKING_DIRECTORY__
+Restart=always
+RestartSec=5
+__CONFIG_ENV__
+# The process opens and rotates its own structured log file, so regular output is
+# discarded here. Only fatal errors from before that file exists reach stderr,
+# and journald applies its own system-level capacity limit and rotation to them.
+# This unit therefore names no log path and manages no log growth.
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=default.target
