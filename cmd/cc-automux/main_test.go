@@ -21,7 +21,7 @@ func TestHandleArgsVersion(t *testing.T) {
 	if !handled || exitCode != 0 {
 		t.Fatalf("handleArgs(--version) = handled %v, exit %d", handled, exitCode)
 	}
-	if got, want := stdout.String(), "CC AutoMux v1.0.0-dev\n"; got != want {
+	if got, want := stdout.String(), "CC AutoMux v1.0.0\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 	if stderr.Len() != 0 {
