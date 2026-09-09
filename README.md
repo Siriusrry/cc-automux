@@ -1,59 +1,53 @@
-# cc-auto-mode-shim
+# CC AutoMux
 
 [简体中文](README.zh-CN.md)
 
-`cc-auto-mode-shim` is a loopback-only local gateway for using Claude Code auto mode with AnyRouter and CLIProxyAPI (CPA). It fixes classifier request/response compatibility while keeping normal model traffic streaming.
+A multi-provider gateway and auto-mode compatibility layer for Claude Code.
+
+CC AutoMux runs on your computer, forwards Anthropic Messages requests, and provides a local web console for providers, model mappings, auto mode, and logs. The console is embedded in the Go binary; it needs no separate frontend server or Node.js installation.
 
 ## Features
 
-- `/any`: AnyRouter routing with ordered sticky failover and session-sticky multi-account keys.
-- `/cpa`: CLIProxyAPI routing with one optional shim-managed key.
-- Claude- and GPT-family auto-mode classifier compatibility.
-- Optional single classifier target with its own URL, key, platform type, model override, and TLS settings.
-- Local web desk for configuration, runtime status, and live logs.
-- Global Active/Pass-through switch.
-- Persistent JSON configuration with live apply; port and log-size changes restart the process in place.
+- Providers with individual URLs, keys, model lists, priorities, TLS settings, and optional compatibility patches.
+- Model-based routing, same-priority round-robin, session stickiness, health cooldowns, and request failover.
+- Auto-mode classifier routing through the provider pool or a fixed target.
+- Claude Code profiles that write the gateway address, key, model mappings, and telemetry settings into `settings.json`, with a one-time backup of an existing file.
+- A light/dark web console with provider diagnostics, configuration editing, and searchable live/history logs.
+- Atomic configuration updates and automatic process restart when the listener or log size limit changes.
 
-The service listens on `127.0.0.1:8765` by default and never accepts a non-loopback listen address.
+Ordinary providers must accept the **Anthropic Messages API** directly. Fixed classifier targets can use Anthropic Messages; OpenAI Responses and OpenAI-compatible conversion are not implemented yet. Selecting either unsupported protocol returns `501 protocol_not_implemented` for classifier requests.
 
 ## Quick start
 
-Requirements: Go 1.22 or newer, macOS when using the bundled LaunchAgent scripts, and at least one usable AnyRouter or CLIProxyAPI upstream.
+Requirements: Go 1.22 or newer to build, macOS or Linux to run the binary with the supplied service scripts, and an Anthropic Messages-compatible upstream.
 
 ```bash
-go test ./...
 go build -trimpath -buildvcs=false -ldflags="-s -w" \
-  -o dist/cc-auto-mode-shim ./cmd/cc-auto-mode-shim
+  -o dist/cc-automux ./cmd/cc-automux
 ./scripts/install.sh
 ```
 
-Open the configuration desk and add the upstream URL and credentials you use:
+The installer initializes the configuration, asks you to enter or generate a management key, and starts a per-user service. Keep that key for signing into the console.
+
+Open [http://127.0.0.1:8765/ui/](http://127.0.0.1:8765/ui/) using the configured port if it differs from the default. Then:
+
+1. Sign in with the **management key**.
+2. In **Service**, set or generate a separate **gateway key**.
+3. In **Providers**, add an upstream and its exact model names.
+4. In **Claude Code**, create a model-mapping profile and activate it.
+5. Configure **Auto Mode** if you use Claude Code auto mode.
+
+Alternatively, point Claude Code at the gateway manually:
 
 ```bash
-open http://127.0.0.1:8765/admin
-```
-
-Then start Claude Code through one route:
-
-```bash
-# AnyRouter
-ANTHROPIC_BASE_URL=http://127.0.0.1:8765/any \
-ANTHROPIC_AUTH_TOKEN='<AnyRouter token>' \
+ANTHROPIC_BASE_URL=http://127.0.0.1:8765 \
+ANTHROPIC_AUTH_TOKEN='<gateway key>' \
 claude
-
-# CLIProxyAPI
-ANTHROPIC_BASE_URL=http://127.0.0.1:8765/cpa \
-claude
 ```
 
-Check that the local service is ready:
+Configure Claude Code's model names to match the models declared by your providers. The gateway receives requests at `POST /v1/messages`.
 
-```bash
-curl http://127.0.0.1:8765/healthz
-# ok
-```
-
-When a route key is configured in the desk, the shim replaces the client credential for that upstream. With no configured key, the client credential is forwarded unchanged.
+The service only listens on `127.0.0.1`. The gateway key and management key protect different interfaces and cannot replace each other.
 
 ## Service commands
 
@@ -66,7 +60,5 @@ When a route key is configured in the desk, the shim replaces the client credent
 
 ## Documentation
 
-- [Usage guide](docs/usage.md)
-- [Script reference](scripts/README.md)
-
-This gateway handles only Claude Code traffic explicitly pointed at `/any` or `/cpa`. Other clients should continue using their own upstream configuration.
+- [Usage guide](docs/usage.md): setup, console pages, configuration, and troubleshooting.
+- [Script reference](scripts/README.md): installation, platform paths, and service operations.

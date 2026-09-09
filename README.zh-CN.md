@@ -1,59 +1,53 @@
-# cc-auto-mode-shim
+# CC AutoMux
 
 [English](README.md)
 
-`cc-auto-mode-shim` 是一个仅监听本机回环地址的轻量网关，用于通过 AnyRouter 或 CLIProxyAPI（CPA）使用 Claude Code auto mode。它修复分类器请求与响应的兼容性，同时保持普通模型流量的流式转发。
+面向 Claude Code 的多 Provider 网关与 auto mode 兼容层。
+
+CC AutoMux 在本机转发 Anthropic Messages 请求，通过本地 Web 控制台管理 Provider、模型映射、auto mode 和日志。前端嵌入 Go 二进制，无需独立前端服务或 Node.js。
 
 ## 功能
 
-- `/any`：AnyRouter 路由，支持有序粘性故障切换和按会话粘性的多账号密钥轮询。
-- `/cpa`：CLIProxyAPI 路由，支持一个可选的网关托管密钥。
-- 支持 Claude 与 GPT 模型族的 auto-mode 分类器兼容处理。
-- 可选的统一分类器目标，支持独立 URL、密钥、平台类型、模型覆盖和 TLS 设置。
-- 本地 Web 配置台，可查看运行状态和实时日志。
-- 全局 Active/Pass-through 开关。
-- JSON 配置持久化并实时应用；端口和日志大小变更会原地重启进程。
+- 每个 Provider 独立配置 URL、密钥、模型列表、优先级、TLS 和可选兼容补丁。
+- 按模型路由、同级轮询、会话粘性、健康冷却和请求故障切换。
+- Auto mode 分类器使用 Provider 池或池外固定目标。
+- Claude Code Profile 将网关地址、密钥、模型映射和遥测设置写入 `settings.json`；首次修改已有文件前创建一次性备份。
+- 浅色/深色 Web 控制台，提供 Provider 诊断、配置编辑、历史日志筛选与实时日志。
+- 配置原子更新；监听地址或日志容量改变时自动重启进程。
 
-服务默认监听 `127.0.0.1:8765`，且不接受非回环监听地址。
+普通 Provider 必须直接支持 **Anthropic Messages API**。固定分类器目标可使用 Anthropic Messages；OpenAI Responses 和 OpenAI-compatible 协议转换尚未实现。选择后两种协议后，分类器请求会返回 `501 protocol_not_implemented`。
 
 ## 快速开始
 
-需要 Go 1.22 或更高版本、至少一个可用的 AnyRouter 或 CLIProxyAPI 上游；使用随附的 LaunchAgent 脚本时需要 macOS。
+要求：构建需要 Go 1.22 或更新版本；二进制及配套服务脚本面向 macOS、Linux；需要一个兼容 Anthropic Messages 的上游。
 
 ```bash
-go test ./...
 go build -trimpath -buildvcs=false -ldflags="-s -w" \
-  -o dist/cc-auto-mode-shim ./cmd/cc-auto-mode-shim
+  -o dist/cc-automux ./cmd/cc-automux
 ./scripts/install.sh
 ```
 
-打开配置台，填写所用上游的 URL 和凭据：
+安装器初始化配置，提示输入或生成 management key，并启动用户级服务。保存该密钥，用于登录控制台。
+
+打开 [http://127.0.0.1:8765/ui/](http://127.0.0.1:8765/ui/)；如果修改过默认端口，请使用配置中的端口。然后：
+
+1. 用 **management key** 登录。
+2. 在 **Service** 设置或生成独立的 **gateway key**。
+3. 在 **Providers** 添加上游及准确的模型名。
+4. 在 **Claude Code** 创建模型映射 Profile 并激活。
+5. 使用 Claude Code auto mode 时，配置 **Auto Mode**。
+
+也可以手动让 Claude Code 连接网关：
 
 ```bash
-open http://127.0.0.1:8765/admin
-```
-
-然后通过其中一个路由启动 Claude Code：
-
-```bash
-# AnyRouter
-ANTHROPIC_BASE_URL=http://127.0.0.1:8765/any \
-ANTHROPIC_AUTH_TOKEN='<AnyRouter token>' \
+ANTHROPIC_BASE_URL=http://127.0.0.1:8765 \
+ANTHROPIC_AUTH_TOKEN='<gateway key>' \
 claude
-
-# CLIProxyAPI
-ANTHROPIC_BASE_URL=http://127.0.0.1:8765/cpa \
-claude
 ```
 
-检查本地服务是否就绪：
+Claude Code 的模型名须与 Provider 声明的模型匹配。网关接收 `POST /v1/messages` 请求。
 
-```bash
-curl http://127.0.0.1:8765/healthz
-# ok
-```
-
-配置台中设置了路由密钥时，网关会替换发往该上游的客户端凭据；未设置时则原样转发客户端凭据。
+服务只监听 `127.0.0.1`。Gateway key 与 management key 分别保护不同接口，不能互相替代。
 
 ## 服务命令
 
@@ -66,7 +60,5 @@ curl http://127.0.0.1:8765/healthz
 
 ## 文档
 
-- [使用说明](docs/usage.zh-CN.md)
-- [脚本说明](scripts/README.zh-CN.md)
-
-本项目只处理明确指向 `/any` 或 `/cpa` 的 Claude Code 流量；其它客户端应继续使用各自的上游配置。
+- [使用说明](docs/usage.zh-CN.md)：配置、控制台页面、运行与排障。
+- [脚本说明](scripts/README.zh-CN.md)：安装、平台路径与服务操作。

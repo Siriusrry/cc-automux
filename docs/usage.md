@@ -1,205 +1,148 @@
 # Usage
 
-[简体中文](usage.zh-CN.md) · [Project overview](../README.md)
+[简体中文](usage.zh-CN.md) · [README](../README.md)
 
-## Requirements
+## Install or run directly
 
-- macOS or Linux for the install scripts. They register a per-user LaunchAgent on macOS and a per-user systemd unit on Linux.
-- Go 1.22 or newer when building from source.
-- An AnyRouter account, a running CLIProxyAPI instance, or another configured classifier target.
-
-## Build and run
-
-Build the binary:
+Build with Go 1.22 or newer:
 
 ```bash
-go test ./...
-go build -trimpath -buildvcs=false -ldflags="-s -w" \
-  -o dist/cc-automux ./cmd/cc-automux
+go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-automux
 ```
 
-Run it in the foreground:
+For a per-user service on macOS or Linux:
 
 ```bash
+./scripts/install.sh
+```
+
+The installer prompts for a management key on first use and preserves an existing configuration on reinstall. macOS uses a LaunchAgent; Linux uses `systemd --user`. Installation enables autostart. See the [script reference](../scripts/README.md) for platform paths and removal behavior.
+
+To run directly instead:
+
+```bash
+./dist/cc-automux init --generate-management-key
 ./dist/cc-automux
 ```
 
-Or install the built binary as a per-user service, a LaunchAgent on macOS or a `systemd --user` unit on Linux:
+Do not start a second instance on the installed service's port. To choose a separate configuration, use an absolute path:
 
 ```bash
-./scripts/install.sh
+./dist/cc-automux init --generate-management-key --config /absolute/path/config.json --listen-addr 127.0.0.1:8766
+CC_AUTOMUX_CONFIG=/absolute/path/config.json ./dist/cc-automux
 ```
 
-On a first installation the installer asks whether to generate a management key; declining lets you type one at the binary's visible prompt. The configuration file is written by `cc-automux init`, never by the script itself. Reinstalling keeps an existing `config.json` and its keys unchanged. The only environment override is `CC_AUTOMUX_CONFIG`, an absolute path to the configuration file.
+`init` without `--generate-management-key` prompts for a key. Repeating initialization preserves an existing configuration and key. `./dist/cc-automux --version` prints the embedded product version.
 
-## Configure the gateway
+## Sign in and connect Claude Code
 
-Open the local configuration desk:
+Open [http://127.0.0.1:8765/ui/](http://127.0.0.1:8765/ui/) with the configured port and sign in with the management key. By default the browser stores it for the tab session; **Remember on this device** stores it persistently in that browser. **Sign out** clears the stored key.
 
-```bash
-open http://127.0.0.1:8765/admin
-```
+1. In **Service**, generate or enter a gateway key. It must differ from the management key. Without it, Messages requests return `503 gateway_not_configured`.
+2. In **Providers**, add a compatible upstream, its key, and exact model names.
+3. In **Claude Code**, create a named profile with the four required mappings: Haiku, Sonnet, Opus, and Fable. Each mapping names a model declared by a provider. Subagent and Teammate mappings are optional.
+4. Activate the profile. CC AutoMux writes the gateway address/key and mappings into the selected Claude Code settings file.
+5. Start a new Claude Code session so it reads the configuration.
 
-Configure only the routes you use:
-
-- **AnyRouter:** ordered entrance URLs and zero or more account labels/keys. New sessions are distributed across usable accounts and remain sticky to one account.
-- **CPA:** CLIProxyAPI upstream URL, one optional key, and an optional CA file.
-- **Classifier interception:** normally keep each provider's default destination. A single target can instead define its own URL, key, platform type, model override, and TLS settings.
-- **Service:** Active/Pass-through mode, loopback port, and the log size limit, which is shared by the active log file and its one archived generation.
-
-Most saves apply immediately. Changing the port or log limit automatically restarts the process in place. Editing `config.json` directly is not watched; restart the service after a manual edit.
-
-Pass-through mode keeps prefix routing and AnyRouter entrance failover, but disables gateway-managed credentials, account rotation, and compatibility rewrites.
-
-## Connect Claude Code
-
-Use one base URL per Claude Code process:
+For manual setup, use the gateway's base address without an endpoint suffix:
 
 ```bash
-# AnyRouter
-ANTHROPIC_BASE_URL=http://127.0.0.1:8765/any \
-ANTHROPIC_AUTH_TOKEN='<AnyRouter token>' \
-claude
-
-# CLIProxyAPI
-ANTHROPIC_BASE_URL=http://127.0.0.1:8765/cpa \
+ANTHROPIC_BASE_URL=http://127.0.0.1:8765 \
+ANTHROPIC_AUTH_TOKEN='<gateway key>' \
 claude
 ```
 
-If you changed the port, replace `8765`. A key configured in the desk replaces the client's upstream credential; an empty route key leaves the client credential unchanged.
+Set Claude Code's model mappings separately if you do not activate a profile.
 
-Check readiness:
+## Console pages
 
-```bash
-curl http://127.0.0.1:8765/healthz
-# ok
-```
+| Page | Purpose |
+|---|---|
+| Overview | Runtime status, provider counts, routing map, and configuration warnings. |
+| Providers | Add/edit/remove upstreams, declare models, set priorities and patches, and inspect health and sessions. |
+| Auto Mode | Select Off, Provider pool, or Fixed provider for classifier requests. |
+| Claude Code | Select the settings path, configure telemetry, and create/edit/activate model-mapping profiles. |
+| Logs | Search retained history, follow live records, expand errors, and load older records. |
+| Service | Set the listener, log limit and keys; view runtime details and configuration JSON. |
 
-## Configuration file
+Forms with a save bar require **Save changes**; **Revert** discards the draft. Inline switches and Profile actions apply immediately as indicated. The settings path uses **Apply path**. Failed saves retain the input and show an error. If another window changes the same configuration field, reload the current values before retrying; unrelated concurrent changes are preserved.
 
-Default path:
+### Providers and routing
 
-```text
-macOS: ~/Library/Application Support/cc-automux/config.json
-Linux: ~/.config/cc-automux/config.json, or $XDG_CONFIG_HOME/cc-automux/config.json when that variable is set
-```
+Ordinary upstreams must accept the Anthropic Messages API. Enter their base URL; CC AutoMux appends `/v1/messages`. Do not append that endpoint yourself. Model names are case-sensitive and matched exactly.
 
-Set `CC_AUTOMUX_CONFIG` to an absolute path to use another location. The configuration desk is the recommended editor.
+Higher numeric priorities are tried first. New sessions round-robin within the highest available priority; sessions with a valid `X-Claude-Code-Session-Id` stay on a provider for the same model and request type. Lower tiers are used when higher ones are unavailable. Normal requests may try up to three different providers on eligible failures. Disabling health cooldown prevents failure-based scheduling suppression; diagnostics remain available.
 
-Default shape:
+TLS uses system roots by default. A custom CA file and skipping certificate verification are mutually exclusive. Compatibility patches are selected explicitly and run in the chosen order; provider names and URLs do not enable them automatically.
+
+### Auto mode
+
+- **Off:** classifier requests return `503 auto_mode_not_configured`; normal requests still use the provider pool.
+- **Provider pool:** set the shared classifier model. Enabled providers declaring that model are candidates, using priority, stickiness, and a separate classifier health channel. A classifier request makes at most one provider attempt.
+- **Fixed provider:** supply a base URL, key, protocol, TLS settings, and optional classifier patches. This target serves only classifier requests and does not join the provider pool.
+
+Anthropic Messages fixed targets work directly. OpenAI Responses and OpenAI-compatible conversion are not implemented; saving those selections is allowed, but classifier requests return `501 protocol_not_implemented`. Failed parsing or conversion never produces a fabricated allow/block result.
+
+### Claude Code files and profiles
+
+The default target is the current user's `.claude/settings.json`; you can select an absolute custom path. Activation updates only the managed gateway, model, and telemetry fields and preserves other values. Before the first modification of an existing file, CC AutoMux creates a sibling `.cc-automux.bak`; an existing backup is never overwritten. Creating a new settings file does not create a backup.
+
+Saving a profile does not activate it. **Active** means the managed file contents were verified; changing them outside CC AutoMux clears that state on the next check. Open or return to the Claude Code page to refresh it. Changing the gateway address/key or the active profile can require reactivation.
+
+**Disable Claude Code telemetry** controls the four fields shown beside the switch. Its value is written when a profile is activated.
+
+### Logs and restarts
+
+The process writes structured JSON Lines to one active log and one archive. Use **Logs** for retained history and live events. Filters apply to both. Scrolling up pauses following while new records buffer; return to the bottom to resume. A dropped-record or full-buffer notice asks you to reload the view.
+
+Long fields are initially bounded. **Show complete** loads the retained full record; if rotation has removed it, the page says so. A logging-health warning means writes are failing even if the gateway is still serving.
+
+Changing the listener port or log size limit restarts the process and interrupts in-flight requests. The console waits for the new configuration. A port change opens the new console address and requires a new sign-in. Rotating only the management key keeps this console signed in with the new key; other sessions must sign in again.
+
+## Configuration and management API
+
+Default configuration paths:
+
+| Platform | Path |
+|---|---|
+| macOS | `~/Library/Application Support/cc-automux/config.json` |
+| Linux | `$XDG_CONFIG_HOME/cc-automux/config.json`, or `~/.config/cc-automux/config.json` |
+
+`CC_AUTOMUX_CONFIG` overrides the file using an absolute path. Running instances apply changes through the console or management API; editing the disk file requires a process restart.
+
+A minimal configuration has this shape; replace the example management key before use:
 
 ```json
 {
-  "listen_addr": "127.0.0.1:8765",
-  "enabled": true,
-  "log_max_bytes": 104857600,
-  "anyrouter": {
-    "entrances": [
-      "https://anyrouter.top",
-      "https://a-ocnfniawgw.cn-shanghai.fcapp.run"
-    ],
-    "accounts": []
-  },
-  "cpa": {
-    "upstream": "https://127.0.0.1:8317",
-    "key": "",
-    "ca_path": ""
-  },
-  "classifier": {
-    "target_base_url": "",
-    "target_key": "",
-    "model_override": "",
-    "target_type": "",
-    "target_ca_path": "",
-    "target_insecure_skip_verify": false
-  }
+  "schema_version": 1,
+  "service": {"listen_addr": "127.0.0.1:8765", "log_max_bytes": 104857600},
+  "auth": {"gateway_key": "", "management_key": "replace-with-a-random-management-key"},
+  "auto_mode": {"mode": "disabled", "model": ""},
+  "harnesses": {"claude_code": {"path_mode": "default", "settings_path": "", "disable_telemetry": true, "profiles": []}},
+  "providers": []
 }
 ```
 
-Key rules:
+The service requires a management key and only binds `127.0.0.1`. Unix configuration files use mode `0600`. Keep configuration files and keys out of source control.
 
-- `listen_addr` must use `127.0.0.1` and a port from `1` to `65535`.
-- AnyRouter entrances must be distinct `http` or `https` URLs; at least one is required.
-- Non-empty AnyRouter account labels must be unique. A keyed account with no label receives an `acct-N` label.
-- `target_type` accepts empty/`auto`, `anyrouter`, `cpa`, or `generic`.
-- A classifier target CA file and `target_insecure_skip_verify` cannot be enabled together.
-- Unknown JSON fields and trailing JSON content are rejected.
+Authenticated management requests use `Authorization: Bearer <management key>`:
 
-Keys are stored in this local file. Do not commit a populated configuration.
+- `GET /api/v1/status`: runtime, restart, and logging health.
+- `GET/PUT /api/v1/config`: complete configuration read/replacement.
+- `/api/v1/providers` and `/api/v1/providers/{id}`: provider CRUD.
+- `/api/v1/harnesses/claude-code` and its `/profiles` resources: settings and profiles.
+- `GET /api/v1/logs`, `/api/v1/logs/stream`, `/api/v1/logs/record?ref=…`: history, SSE, and complete records.
 
-### First-run initialization
+Config GET includes server-owned `active_profile_id`; remove it when constructing a config PUT. Preserve fields you are not changing. Send the GET response's ETag in `If-Match` to reject a stale replacement with `412 configuration_changed`. A successful PUT returns `200` for applied settings or `202` for a pending restart.
 
-The binary reads no environment variable other than `CC_AUTOMUX_CONFIG`. A missing configuration file is created by `cc-automux init`, which the installer runs for you. `--listen-addr` and `--log-max-bytes` set the initial service values, and `--generate-management-key` creates the management key instead of prompting for it:
+## Troubleshooting
 
-```bash
-./dist/cc-automux init --generate-management-key --listen-addr 127.0.0.1:8765
-```
+- **Console unreachable:** check `./scripts/status.sh`, the configured port, and startup errors. macOS writes early errors to `~/Library/Logs/cc-automux/bootstrap.log`; Linux uses `journalctl --user -u cc-automux.service`.
+- **Sign-in rejected / 401:** use the management key for the console and the gateway key for Claude Code. A rotated management key invalidates other sessions.
+- **Model unavailable:** check the exact requested model, enabled providers, and their health. Open Providers for the upstream's original error and diagnostics.
+- **Auto mode fails:** set its classifier model and a usable candidate or Anthropic fixed target. Unsupported OpenAI protocols return 501.
+- **Save conflict / 412:** keep a copy of the draft if needed, then load current values and reapply the intended change.
+- **Profile is out of sync:** inspect the selected path and reactivate the intended profile. On write failure the page reports an error instead of declaring it active.
+- **Reinstall did not reset settings:** existing configuration and keys are deliberately preserved.
 
-Once the file exists it is authoritative, and `init` leaves it untouched.
-
-## Service and logs
-
-```bash
-./scripts/status.sh
-./scripts/stop.sh
-./scripts/start.sh
-```
-
-Installed paths on macOS:
-
-```text
-~/Library/Application Support/cc-automux/bin/cc-automux
-~/Library/Application Support/cc-automux/config.json
-~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist
-~/Library/Logs/cc-automux/cc-automux.log
-~/Library/Logs/cc-automux/cc-automux.log.1
-~/Library/Logs/cc-automux/bootstrap.log
-```
-
-Installed paths on Linux, honouring `XDG_CONFIG_HOME` and `XDG_STATE_HOME` when set:
-
-```text
-~/.config/cc-automux/bin/cc-automux
-~/.config/cc-automux/config.json
-~/.config/systemd/user/cc-automux.service
-~/.local/state/cc-automux/cc-automux.log
-~/.local/state/cc-automux/cc-automux.log.1
-```
-
-The process owns the two JSON Lines files. Structured log history is read through authenticated `GET /api/v1/logs`, live records use authenticated `GET /api/v1/logs/stream`, and one complete record is read with `GET /api/v1/logs/record`; there is no command-line log-viewing script. Oversized fields are bounded in both the history and the stream, and the complete value is fetched by reference.
-
-`GET /api/v1/status` reports whether the process can still write its own log. A log write failure does not stop the gateway, so that field is how a broken log becomes visible instead of looking like an idle period.
-
-Fatal startup errors that happen before structured logging is ready go to stderr. On macOS they land in `bootstrap.log`, which the installer truncates on every run. On Linux they go to the journal, read with `journalctl --user -u cc-automux.service`.
-
-## Upgrade and uninstall
-
-After rebuilding, rerun the installer to replace the installed binary and service registration while preserving the existing configuration:
-
-```bash
-./scripts/install.sh
-```
-
-Uninstall the service, binary, configuration, and logs:
-
-```bash
-./scripts/uninstall.sh
-```
-
-Keep logs with:
-
-```bash
-./scripts/uninstall.sh --keep-logs
-```
-
-On macOS the uninstaller uses the Trash when Finder is available; in a headless session it warns and permanently removes the same named targets. On Linux removal is always permanent. A configuration stored outside the application directory through `CC_AUTOMUX_CONFIG` is not removed.
-
-## Basic troubleshooting
-
-- **The service does not start:** run `./scripts/status.sh`, then inspect `~/Library/Logs/cc-automux/bootstrap.log` on macOS or `journalctl --user -u cc-automux.service` on Linux.
-- **A reinstall appears to ignore a new port or upstream:** the existing configuration is authoritative; change it in `/admin`.
-- **`401` or `403`:** verify the route key/account and the selected `/any` or `/cpa` base URL.
-- **A manual JSON edit has no effect:** restart with `./scripts/stop.sh` followed by `./scripts/start.sh`.
-- **An upstream is temporarily unavailable:** inspect `GET /api/v1/logs` with management authentication. AnyRouter failover occurs automatically for transport errors, `429`, and `5xx` responses.
-
-The configuration desk has no separate authentication and returns configured keys to the local browser. It is protected by the loopback-only listener; do not expose the port through a reverse proxy or tunnel.
+For service start/stop, upgrades, log paths, and uninstall behavior, see the [script reference](../scripts/README.md).
