@@ -116,10 +116,10 @@
         sync();
 
         // Right column
-        const detectCard = h('div', { class: 'card' }, h('p', { class: 'eyebrow' }, 'How requests are recognised'),
-          h('p', { class: 'lede' }, 'Claude Code’s auto mode sends a security-monitor prompt before running a tool. CC AutoMux classifies a Messages request as a classifier call when:'),
-          h('div', { class: 'am-detect' }, h('div', null, h('span', { class: 'k' }, 'raw body'), ' contains "You are a security monitor for autonomous AI coding agents"'), h('div', null, h('span', { class: 'k' }, 'system[0].text'), ' starts with that sentence')),
-          h('p', { class: 'lede', style: { marginTop: '12px' } }, 'Everything else is a normal request. Detection never looks at the model name, URL or provider.'),
+        const detectCard = h('div', { class: 'card' }, h('p', { class: 'eyebrow' }, 'Auto mode compatibility'),
+          h('p', { class: 'lede' }, 'Claude Code’s auto mode can run into compatibility issues with third-party APIs. CC AutoMux helps restore it while letting you choose the model and provider used for auto mode.'),
+          h('div', { class: 'am-detect' }, h('div', null, h('span', { class: 'k' }, 'Model choice'), ' — use a dedicated classifier model without changing your main model.'), h('div', null, h('span', { class: 'k' }, 'Provider choice'), ' — use your provider pool or a fixed provider for auto mode.')),
+          h('p', { class: 'lede', style: { marginTop: '12px' } }, 'Apply provider compatibility patches as needed to help auto mode work with your chosen upstream.'),
           h('div', { class: 'am-flow' }, h('span', null, 'detect'), h('i', null, '→'), h('span', { class: 'iris' }, 'override model'), h('i', null, '→'), h('span', null, 'request patches'), h('i', null, '→'), h('span', { class: 'iris' }, 'pool or fixed target'), h('i', null, '→'), h('span', null, 'response patches')));
         const lastCallCard = h('div', { class: 'card am-lastcall' }, h('p', { class: 'eyebrow' }, 'Last fixed-target call'), h('p', { class: 'lede' }, 'The fixed target has no pool health; its most recent call is kept in memory for diagnosis.'), h('div', { class: 'lc-body' }));
         function renderLastCall() {
