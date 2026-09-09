@@ -181,13 +181,19 @@ def publish(tag, output):
         raise ValueError("publication requires a version tag event in the product repository")
     check_tag(tag)
     names = checksums(tag, output)
-    # --verify-tag below prevents gh from creating a tag. This read also covers
-    # the existing-release path, which must never retarget a release.
+    # Require an existing source tag before creating or resuming its Release.
+    # An existing Release must never be retargeted.
     api(f"git/ref/tags/{tag}")
     existing = next((r for r in releases() if r["tag_name"] == tag), None)
     if existing is None:
-        subprocess.run(["gh", "release", "create", tag, "--repo", REPO, "--verify-tag", "--draft", "--title", f"CC AutoMux {tag}", "--notes", "macOS and Linux binaries with the embedded web console. Verify downloads with SHA256SUMS."], check=True)
-        existing = next(r for r in releases() if r["tag_name"] == tag)
+        # The list endpoint may not immediately show a newly created draft.
+        # Its creation response is authoritative and already contains its ID.
+        existing = api("releases", "POST", {
+            "tag_name": tag,
+            "draft": True,
+            "name": f"CC AutoMux {tag}",
+            "body": "macOS and Linux binaries with the embedded web console. Verify downloads with SHA256SUMS.",
+        })
     if existing["draft"]:
         # An interrupted upload can be resumed, but never clobber existing bytes.
         uploaded = {a["name"] for a in existing["assets"]}
