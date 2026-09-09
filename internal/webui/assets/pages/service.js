@@ -128,7 +128,7 @@
           try {
             let restartPlan;
             const result = await store.saveConfig(config, body, (result, applied) => {
-              restartPlan = { config: applied, oldKey: CCAM.auth.key(), start: store.state.status && store.state.status.start_time };
+              restartPlan = { config: applied, oldKey: CCAM.auth.key() };
               if (!result.restart_required) CCAM.auth.adopt(applied.auth.management_key);
             });
             bar.busy(false);
@@ -174,7 +174,9 @@
                   CCAM.auth.adopt(key);
                   throw new Error('Restart failed. The previous configuration is still active: ' + st.restart.last_error);
                 }
-                if (!changedOrigin && st.start_time !== plan.start && !st.restart_in_progress && !st.pending &&
+                // For a same-port restart, the changed startup-bound log limit
+                // proves promotion even when two starts share one timestamp second.
+                if (!changedOrigin && !st.restart_in_progress && !st.pending &&
                     st.listen_addr === plan.config.service.listen_addr && st.log_max_bytes === plan.config.service.log_max_bytes && key === plan.config.auth.management_key) {
                   CCAM.auth.adopt(key); toast('Restarted with the new configuration'); return false;
                 }
