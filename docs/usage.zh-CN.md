@@ -36,7 +36,7 @@ CC_AUTOMUX_CONFIG=/absolute/path/config.json ./dist/cc-automux
 
 ## 登录并连接 Claude Code
 
-打开 [http://127.0.0.1:8765/ui/](http://127.0.0.1:8765/ui/)，按实际配置调整端口，使用 management key 登录。默认只保存到标签页会话；勾选 **Remember on this device** 才持久保存在该浏览器。**Sign out** 清除保存的密钥。
+打开 [http://127.0.0.1:8765/management](http://127.0.0.1:8765/management)，按实际配置调整端口，使用 management key 登录。默认只保存到标签页会话；勾选 **Remember on this device** 才持久保存在该浏览器。**Sign out** 清除保存的密钥。
 
 1. 在 **Service** 设置或生成 gateway key，它必须与 management key 不同。未配置时 Messages 请求返回 `503 gateway_not_configured`。
 2. 在 **Providers** 添加兼容上游、上游密钥和准确的模型名。
@@ -55,6 +55,8 @@ claude
 如果不激活 Profile，需要另行设置 Claude Code 的模型映射。
 
 ## 控制台页面
+
+总览地址为 `/management`；其他页面使用 `/management#/providers`、`/management#/logs` 等 hash 路径，`#` 前没有斜杠。
 
 | 页面 | 用途 |
 |---|---|

@@ -29,7 +29,7 @@ go build -trimpath -buildvcs=false -ldflags="-s -w" \
 
 安装器初始化配置，提示输入或生成 management key，并启动用户级服务。保存该密钥，用于登录控制台。
 
-打开 [http://127.0.0.1:8765/ui/](http://127.0.0.1:8765/ui/)；如果修改过默认端口，请使用配置中的端口。然后：
+打开 [http://127.0.0.1:8765/management](http://127.0.0.1:8765/management)；如果修改过默认端口，请使用配置中的端口。然后：
 
 1. 用 **management key** 登录。
 2. 在 **Service** 设置或生成独立的 **gateway key**。

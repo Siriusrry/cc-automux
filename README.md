@@ -29,7 +29,7 @@ go build -trimpath -buildvcs=false -ldflags="-s -w" \
 
 The installer initializes the configuration, asks you to enter or generate a management key, and starts a per-user service. Keep that key for signing into the console.
 
-Open [http://127.0.0.1:8765/ui/](http://127.0.0.1:8765/ui/) using the configured port if it differs from the default. Then:
+Open [http://127.0.0.1:8765/management](http://127.0.0.1:8765/management) using the configured port if it differs from the default. Then:
 
 1. Sign in with the **management key**.
 2. In **Service**, set or generate a separate **gateway key**.

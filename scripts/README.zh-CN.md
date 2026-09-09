@@ -33,7 +33,7 @@ go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-
 
 安装器调用共享初始化核心，不自行写 JSON。重新安装会保留已有配置和 key。
 
-唯一支持的环境覆盖是 CC_AUTOMUX_CONFIG，且必须是绝对路径。监听地址和 log_max_bytes 等服务配置保存在 config.json 中，通过 `/ui/` Web 控制台或管理 API 修改。
+唯一支持的环境覆盖是 CC_AUTOMUX_CONFIG，且必须是绝对路径。监听地址和 log_max_bytes 等服务配置保存在 config.json 中，通过 `/management` Web 控制台或管理 API 修改。
 
 macOS 安装路径：
 

@@ -41,7 +41,7 @@ An existing configuration and its keys are preserved on reinstall.
 
 The only environment override is CC_AUTOMUX_CONFIG, which must be an absolute
 path. The service configuration, including listen_addr and log_max_bytes, is
-stored in config.json and changed through the Web console at `/ui/` or the management API.
+stored in config.json and changed through the Web console at `/management` or the management API.
 
 Installed paths on macOS:
 

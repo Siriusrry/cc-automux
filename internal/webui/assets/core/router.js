@@ -32,27 +32,45 @@
     return { name: 'not-found', params: {}, query, path };
   }
 
+  function normalized(path) { return path.startsWith('/') ? path : '/' + path; }
+  function fragment(path) { path = normalized(path); return path === '/' ? '' : '#' + path; }
+  function href(path) { return '/management' + fragment(path); }
+  function canonicalOverview() {
+    if (!location.hash || location.hash === '#/') history.replaceState(null, '', location.pathname + location.search);
+  }
+  function go(path) { location.hash = fragment(path); }
+  function onClick(e) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const link = e.target.closest('a');
+    if (link && !link.target && link.getAttribute('href') === href('/')) {
+      e.preventDefault();
+      go('/');
+    }
+  }
+  canonicalOverview();
+
   let guard = null;      // () => Promise<boolean> | boolean; true = may leave
   let current = parse(location.hash);
   let handler = null;
   let ignoreNext = false;
 
   async function onHashChange() {
-    if (ignoreNext) { ignoreNext = false; return; }
+    if (ignoreNext) { ignoreNext = false; canonicalOverview(); return; }
     const next = parse(location.hash);
     if (guard && next.path !== current.path) {
       const ok = await guard();
-      if (!ok) { ignoreNext = true; location.hash = '#' + current.path; return; }
+      if (!ok) { ignoreNext = true; location.hash = fragment(current.path); return; }
     }
     guard = null;
     current = next;
+    canonicalOverview();
     if (handler) handler(current);
   }
 
   const router = {
-    start(fn) { handler = fn; window.removeEventListener('hashchange', onHashChange); window.addEventListener('hashchange', onHashChange); current = parse(location.hash); handler(current); },
-    go(path) { location.hash = '#' + (path.startsWith('/') ? path : '/' + path); },
-    replace(path) { ignoreNext = false; history.replaceState(null, '', '#' + path); current = parse(location.hash); if (handler) handler(current); },
+    start(fn) { handler = fn; window.removeEventListener('hashchange', onHashChange); window.addEventListener('hashchange', onHashChange); document.removeEventListener('click', onClick); document.addEventListener('click', onClick); canonicalOverview(); current = parse(location.hash); handler(current); },
+    go, href,
+    replace(path) { ignoreNext = false; history.replaceState(null, '', href(path)); current = parse(location.hash); if (handler) handler(current); },
     setGuard(fn) { guard = fn; },
     clearGuard() { guard = null; },
     get current() { return current; },

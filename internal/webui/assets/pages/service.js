@@ -23,7 +23,7 @@
       const finish = ok => { if (finished) return; finished = true; clearTimeout(timer); img.onload = img.onerror = null; img.removeAttribute('src'); resolve(ok); };
       const timer = setTimeout(() => finish(false), 1000);
       img.onload = () => finish(true); img.onerror = () => finish(false);
-      img.src = origin + '/ui/assets/favicon.svg?restart=' + Date.now();
+      img.src = origin + '/management/assets/favicon.svg?restart=' + Date.now();
     });
   }
 
@@ -146,7 +146,7 @@
         async function waitForRestart(plan) {
           const target = new URL(location.href);
           target.hostname = '127.0.0.1'; target.port = plan.config.service.listen_addr.split(':')[1];
-          target.pathname = '/ui/'; target.search = ''; target.hash = '#/service';
+          target.pathname = '/management'; target.search = ''; target.hash = '#/service';
           const changedOrigin = target.origin !== location.origin;
           const ov = overlay('Restarting CC AutoMux…', changedOrigin
             ? 'Opening ' + target.origin + '. Sign in again at the new address.'

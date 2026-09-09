@@ -44,7 +44,7 @@
 
   function buildShell() {
     clear(root);
-    const navLinks = NAV.map(n => h('a', { href: '#' + n.path, dataset: { name: n.name } }, icon(n.icon), h('span', null, n.label)));
+    const navLinks = NAV.map(n => h('a', { href: CCAM.router.href(n.path), dataset: { name: n.name } }, icon(n.icon), h('span', null, n.label)));
     const themeSegs = [];
     const makeThemeSeg = () => {
       const s = CCAM.ui.seg({ class: 'sm icons quiet', ariaLabel: 'Theme', value: themePref(), options: [
@@ -114,7 +114,7 @@
     window.scrollTo({ top: 0 });
     let page = CCAM.pages[r.name];
     if (r.name === 'provider' || r.name === 'provider-new') page = CCAM.pages.provider;
-    if (!page) { shell.titleEl.textContent = 'Not found'; shell.pageHost.appendChild(CCAM.ui.empty({ title: 'Nothing here', text: 'That address does not match a page.', action: h('a', { class: 'btn', href: '#/' }, 'Back to overview') })); return; }
+    if (!page) { shell.titleEl.textContent = 'Not found'; shell.pageHost.appendChild(CCAM.ui.empty({ title: 'Nothing here', text: 'That address does not match a page.', action: h('a', { class: 'btn', href: CCAM.router.href('/') }, 'Back to overview') })); return; }
     const ctx = {
       root: shell.pageHost, params: r.params, query: r.query, route: r,
       title(t) { shell.titleEl.textContent = t; document.title = t + ' · CC AutoMux'; },

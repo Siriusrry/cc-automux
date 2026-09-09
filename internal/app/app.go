@@ -469,7 +469,7 @@ func (a *App) rootHandler() http.Handler {
 			return
 		}
 		switch {
-		case r.URL.Path == "/" || r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/"):
+		case r.URL.Path == "/" || r.URL.Path == webui.Path || strings.HasPrefix(r.URL.Path, webui.Path+"/"):
 			console.ServeHTTP(w, r)
 		case r.URL.Path == gateway.MessagesPath:
 			a.gateway.ServeHTTP(w, r)

@@ -18,6 +18,9 @@ var files embed.FS
 
 const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: http://127.0.0.1:*; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
+// Path is the canonical browser entry point.
+const Path = "/management"
+
 type Handler struct{ shell []byte }
 
 func New() *Handler {
@@ -38,13 +41,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if r.URL.Path == "/" || r.URL.Path == "/ui" {
-		http.Redirect(w, r, "/ui/", http.StatusFound)
+	if r.URL.Path == "/" || r.URL.Path == Path+"/" {
+		http.Redirect(w, r, Path, http.StatusFound)
 		return
 	}
 	data, kind := h.shell, "text/html; charset=utf-8"
-	if r.URL.Path != "/ui/" {
-		name, ok := strings.CutPrefix(r.URL.Path, "/ui/assets/")
+	if r.URL.Path != Path {
+		name, ok := strings.CutPrefix(r.URL.Path, Path+"/assets/")
 		types := map[string]string{".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
 		kind = types[path.Ext(name)]
 		if !ok || !fs.ValidPath(name) || kind == "" {

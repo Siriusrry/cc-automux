@@ -36,7 +36,7 @@ CC_AUTOMUX_CONFIG=/absolute/path/config.json ./dist/cc-automux
 
 ## Sign in and connect Claude Code
 
-Open [http://127.0.0.1:8765/ui/](http://127.0.0.1:8765/ui/) with the configured port and sign in with the management key. By default the browser stores it for the tab session; **Remember on this device** stores it persistently in that browser. **Sign out** clears the stored key.
+Open [http://127.0.0.1:8765/management](http://127.0.0.1:8765/management) with the configured port and sign in with the management key. By default the browser stores it for the tab session; **Remember on this device** stores it persistently in that browser. **Sign out** clears the stored key.
 
 1. In **Service**, generate or enter a gateway key. It must differ from the management key. Without it, Messages requests return `503 gateway_not_configured`.
 2. In **Providers**, add a compatible upstream, its key, and exact model names.
@@ -55,6 +55,8 @@ claude
 Set Claude Code's model mappings separately if you do not activate a profile.
 
 ## Console pages
+
+The overview uses `/management`; other pages use `/management#/providers`, `/management#/logs`, and similar hash paths. There is no slash before `#`.
 
 | Page | Purpose |
 |---|---|
