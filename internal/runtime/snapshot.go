@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -11,6 +13,16 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
+
+// ConfigETag identifies the complete configuration independently of process
+// lifetime. A revision counter alone can repeat after a restart.
+func (s *Snapshot) ConfigETag() string {
+	data, err := json.Marshal(s.config)
+	if err != nil {
+		panic(err) // Config contains only JSON values validated before publication.
+	}
+	return fmt.Sprintf("\"%x\"", sha256.Sum256(data))
+}
 
 func compileAutoMode(auto config.AutoModeConfig, context provider.RuntimeContext) (CompiledAutoMode, error) {
 	auto = auto.Normalize()

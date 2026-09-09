@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -346,10 +347,23 @@ func (m *Manager) Apply(next config.Config) (ApplyResult, error) {
 // The request object has no active profile field; the current server-owned
 // state is preserved or invalidated by the same atomic transaction.
 func (m *Manager) ApplyClientUpdate(update config.ClientConfigUpdate) (ApplyResult, error) {
+	return m.ApplyClientUpdateIfMatch(update, "")
+}
+
+// ErrConfigChanged means the caller read a different configuration.
+var ErrConfigChanged = errors.New("configuration changed")
+
+// ApplyClientUpdateIfMatch checks a strong configuration validator inside the
+// same mutation lock used by every configuration and harness transaction.
+// An empty condition preserves unconditional API replacement.
+func (m *Manager) ApplyClientUpdateIfMatch(update config.ClientConfigUpdate, condition string) (ApplyResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.restartStatus.InProgress {
 		return ApplyResult{}, ErrRestartInProgress
+	}
+	if condition != "" && !matchesConfigETag(condition, m.current.Load().ConfigETag()) {
+		return ApplyResult{}, ErrConfigChanged
 	}
 	current := m.current.Load().Config()
 	prepared, err := current.ApplyClientRequest(update)
@@ -357,6 +371,18 @@ func (m *Manager) ApplyClientUpdate(update config.ClientConfigUpdate) (ApplyResu
 		return ApplyResult{}, err
 	}
 	return m.applyLocked(prepared)
+}
+
+func matchesConfigETag(condition, tag string) bool {
+	if strings.TrimSpace(condition) == "*" {
+		return true
+	}
+	for _, candidate := range strings.Split(condition, ",") {
+		if strings.TrimSpace(candidate) == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // Update serializes read-modify-write operations such as Provider CRUD so two

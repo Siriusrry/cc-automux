@@ -185,13 +185,17 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// A GET is a complete resource response. It intentionally includes
 		// server-owned state such as active_profile_id for display.
-		writeJSON(w, http.StatusOK, h.manager.Snapshot().Config())
+		snapshot := h.manager.Snapshot()
+		w.Header().Set("ETag", snapshot.ConfigETag())
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, snapshot.Config())
 	case http.MethodPut:
 		update, err := h.decodeClientConfigUpdate(w, r)
 		if err != nil {
 			return
 		}
-		result, err := h.manager.ApplyClientUpdate(update)
+		condition := strings.Join(r.Header.Values("If-Match"), ",")
+		result, err := h.manager.ApplyClientUpdateIfMatch(update, condition)
 		if err != nil {
 			h.writeApplyError(w, err)
 			return
@@ -711,6 +715,10 @@ func (h *Handler) writeSemanticError(w http.ResponseWriter, err error) {
 }
 
 func (h *Handler) writeApplyError(w http.ResponseWriter, err error) {
+	if errors.Is(err, runtime.ErrConfigChanged) {
+		writeError(w, http.StatusPreconditionFailed, "configuration_changed", "Configuration changed. Reload it before saving.")
+		return
+	}
 	if errors.Is(err, runtime.ErrRestartInProgress) {
 		writeError(w, http.StatusConflict, "restart_in_progress", "restart_in_progress")
 		return
