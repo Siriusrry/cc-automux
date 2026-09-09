@@ -26,6 +26,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/runtime"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
+	"github.com/Siriusrry/cc-automux/internal/webui"
 )
 
 type Options struct {
@@ -461,12 +462,15 @@ func newHTTPServer(handler http.Handler) *http.Server {
 }
 
 func (a *App) rootHandler() http.Handler {
+	console := webui.New()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a == nil || r == nil || r.URL == nil {
 			http.NotFound(w, r)
 			return
 		}
 		switch {
+		case r.URL.Path == "/" || r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/"):
+			console.ServeHTTP(w, r)
 		case r.URL.Path == gateway.MessagesPath:
 			a.gateway.ServeHTTP(w, r)
 		case r.URL.Path == "/api/v1" || strings.HasPrefix(r.URL.Path, "/api/v1/"):

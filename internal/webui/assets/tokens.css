@@ -1,0 +1,90 @@
+/* CC AutoMux Web UI — design tokens.
+   Light-first "soft depth": tinted lavender-gray background, elevated white cards,
+   soft layered shadows, generous radius. Dark theme is the same system on deep indigo. */
+
+:root {
+  color-scheme: light;
+
+  --bg: #eceff6;
+  --bg-2: #f6f8fc;
+  --card: #ffffff;
+  --raise: #eef1f8;
+  --line: #e2e7f0;
+  --line-2: #d2d9e6;
+  --paper: #1a2238;
+  --mist: #5b647e;
+  --mist-2: #8a93ab;
+
+  --iris: #4d63f0;
+  --iris-deep: #3a4fd6;
+  --iris-soft: rgba(77, 99, 240, 0.10);
+  --iris-line: rgba(77, 99, 240, 0.22);
+  --iris-ring: rgba(77, 99, 240, 0.16);
+  --emerald: #12a374;
+  --emerald-soft: rgba(18, 163, 116, 0.12);
+  --amber: #c9760d;
+  --amber-soft: rgba(201, 118, 13, 0.14);
+  --coral: #ec5b50;
+  --coral-soft: rgba(236, 91, 80, 0.12);
+  --focus: #4d63f0;
+
+  --mascot-body: #d67656;
+  --mascot-eye: #000000;
+
+  --shadow: 0 12px 34px -14px rgba(40, 52, 96, 0.22), 0 3px 8px -3px rgba(40, 52, 96, 0.12);
+  --shadow-sm: 0 4px 14px -8px rgba(40, 52, 96, 0.25);
+  --shadow-pop: 0 24px 60px -24px rgba(40, 52, 96, 0.35), 0 6px 18px -8px rgba(40, 52, 96, 0.18);
+
+  --glow-a: rgba(77, 99, 240, 0.10);
+  --glow-b: rgba(18, 163, 116, 0.08);
+
+  --r: 20px;
+  --r-md: 14px;
+  --r-sm: 12px;
+  --r-xs: 8px;
+
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Monaco, "Courier New", monospace;
+
+  --dur: 150ms;
+  --side-w: 236px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0e1320;
+  --bg-2: #141b2a;
+  --card: #1b2334;
+  --raise: #222c41;
+  --line: #2a3346;
+  --line-2: #384358;
+  --paper: #eef1f8;
+  --mist: #9aa3b8;
+  --mist-2: #6b748c;
+
+  --iris: #7d8fff;
+  --iris-deep: #6d83ff;
+  --iris-soft: rgba(125, 143, 255, 0.14);
+  --iris-line: rgba(125, 143, 255, 0.30);
+  --iris-ring: rgba(125, 143, 255, 0.22);
+  --emerald: #2bd39a;
+  --emerald-soft: rgba(43, 211, 154, 0.14);
+  --amber: #ffae4d;
+  --amber-soft: rgba(255, 174, 77, 0.16);
+  --coral: #ff7a70;
+  --coral-soft: rgba(255, 122, 112, 0.16);
+  --focus: #7d8fff;
+
+  --shadow: 0 22px 52px -22px rgba(0, 0, 0, 0.7), 0 3px 10px -4px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 6px 18px -10px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 30px 70px -26px rgba(0, 0, 0, 0.85), 0 8px 22px -8px rgba(0, 0, 0, 0.6);
+
+  --glow-a: rgba(125, 143, 255, 0.14);
+  --glow-b: rgba(43, 211, 154, 0.10);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur: 0ms; }
+}

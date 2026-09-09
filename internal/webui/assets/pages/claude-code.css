@@ -1,0 +1,30 @@
+/* Claude Code page */
+.cc-state { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.cc-state .reason { font-size: 12.5px; color: var(--mist); }
+.cc-path { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--mist); margin-top: 8px; }
+.cc-path code { font-family: var(--mono); font-size: 12px; background: var(--raise); padding: 3px 8px; border-radius: 7px; color: var(--paper); overflow-wrap: anywhere; }
+.cc-path-row { display: flex; gap: 10px; align-items: flex-start; }
+.cc-path-row .in { flex: 1; }
+.cc-managed { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; font-family: var(--mono); font-size: 11.5px; color: var(--mist); }
+.cc-managed span b { color: var(--paper); font-weight: 600; }
+.cc-managed .opt { color: var(--mist-2); }
+.cc-tele { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.cc-tele-fields { margin-top: 12px; display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 12px; color: var(--mist); }
+.cc-tele-fields code { font-family: var(--mono); font-size: 11.5px; color: var(--paper); }
+
+.profile { position: relative; padding: 14px 16px 14px 18px; background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--shadow-sm); display: grid; grid-template-columns: minmax(150px, 0.8fr) minmax(0, 2fr) auto; gap: 12px 18px; align-items: center; }
+.profile.active { border-color: var(--emerald); box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--emerald); }
+.profile .p-name { font-weight: 700; font-size: 14.5px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.profile .p-sub { font-size: 12px; color: var(--mist-2); margin-top: 3px; }
+.profile .p-map { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 16px; min-width: 0; }
+.profile .p-map .mp { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12.5px; }
+.profile .p-map .mp .k { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--mist-2); width: 76px; flex: none; white-space: nowrap; }
+.profile .p-map .mp .v { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile .p-map .mp.opt .v { color: var(--mist); }
+.profile .p-acts { display: flex; gap: 6px; align-items: center; }
+
+@media (max-width: 900px) {
+  .profile { grid-template-columns: 1fr; }
+  .profile .p-acts { justify-content: flex-start; }
+  .cc-managed { grid-template-columns: 1fr; }
+}

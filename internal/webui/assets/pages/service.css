@@ -1,0 +1,22 @@
+/* Service page */
+/* Same vertical rhythm as the shared field rows: the row owns the spacing so stacking on a narrow viewport keeps
+   the 16px step instead of adding the fields' own margins to the grid gap. */
+.sv-host { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px 14px; margin-bottom: 16px; }
+.sv-host > .field { margin-bottom: 0; }
+.sv-host:last-child { margin-bottom: 0; }
+.sv-runtime .kv dd .pill { vertical-align: middle; }
+.sv-log { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--bg-2); margin-top: 6px; }
+.sv-log svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+.sv-log.ok { border-color: rgba(18, 163, 116, 0.3); background: var(--emerald-soft); }
+.sv-log.ok svg { color: var(--emerald); }
+.sv-log.bad { border-color: rgba(236, 91, 80, 0.4); background: var(--coral-soft); }
+.sv-log.bad svg { color: var(--coral); }
+.sv-log .t { font-weight: 700; font-size: 13px; }
+.sv-log .d { font-size: 12.5px; color: var(--mist); margin-top: 2px; line-height: 1.5; overflow-wrap: anywhere; }
+.sv-rotate { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.sv-json { position: relative; }
+.sv-json .code { max-height: 460px; }
+.sv-json-acts { display: flex; gap: 8px; align-items: center; }
+.sv-keyrow { display: flex; gap: 8px; align-items: flex-start; }
+.sv-keyrow .in-wrap { flex: 1; }
+@media (max-width: 900px) { .sv-host { grid-template-columns: minmax(0, 1fr); } }

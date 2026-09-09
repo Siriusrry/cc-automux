@@ -112,6 +112,13 @@ func TestNewBindsLoopbackAndServesManagementAndMessagesRoutes(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status endpoint = %d %s", rec.Code, rec.Body.String())
 	}
+	for _, route := range []string{"/ui/", "/ui/assets/app.js"} {
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, route, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("console route %s = %d", route, rec.Code)
+		}
+	}
 	for _, route := range []string{"/any", "/cpa", "/admin", "/v1/messages/count_tokens"} {
 		rec = httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, route, nil))

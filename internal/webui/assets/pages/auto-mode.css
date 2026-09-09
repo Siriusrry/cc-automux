@@ -1,0 +1,17 @@
+/* Auto Mode page */
+.am-mode { display: flex; flex-direction: column; gap: 14px; }
+.am-mode .seg { align-self: flex-start; }
+.am-desc { font-size: 13px; color: var(--mist); line-height: 1.55; }
+.am-desc b { color: var(--paper); }
+.am-cands { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.am-cand { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; background: var(--bg-2); border: 1px solid var(--line); font-size: 13px; }
+.am-cand .n { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.am-cand .prio { font-family: var(--mono); font-size: 11.5px; color: var(--mist); }
+.am-proto-opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.am-detect { font-family: var(--mono); font-size: 12px; line-height: 1.55; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 12px 14px; color: var(--paper); overflow-wrap: anywhere; }
+.am-detect .k { color: var(--iris); }
+.am-lastcall .kv { margin-top: 10px; }
+.am-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--mist); margin: 10px 0 0; }
+.am-flow span { background: var(--raise); padding: 3px 8px; border-radius: 7px; }
+.am-flow span.iris { color: var(--iris); background: var(--iris-soft); }
+.am-flow i { color: var(--mist-2); font-style: normal; }
