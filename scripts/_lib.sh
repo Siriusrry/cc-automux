@@ -25,7 +25,7 @@ if [[ "$PLATFORM" == "macos" ]]; then
   DEFAULT_CONFIG_PATH="$APP_DIR/config.json"
   LOG_DIR="$HOME/Library/Logs/$APP_NAME"
   # macOS has no system-managed store for a service's stderr, so launchd is
-  # pointed at a file. install.sh truncates it on every run: this channel only
+  # pointed at a file. Installation replacement truncates it: this channel only
   # carries fatal startup errors, which always need a human, and a previous
   # round's output has no diagnostic value for the current one. Truncating also
   # removes the unbounded growth this file would otherwise show while a
@@ -98,6 +98,99 @@ fi
 CC_AUTOMUX_CONFIG="$_cfg"
 unset _cfg
 
+die() { echo "CC AutoMux: $*" >&2; exit 1; }
+
+refresh_paths() {
+  BIN_DIR="$APP_DIR/bin"
+  BIN_PATH="$BIN_DIR/$APP_NAME"
+  DEFAULT_CONFIG_PATH="$APP_DIR/config.json"
+  SERVICE_DIR="$(dirname "$SERVICE_PATH")"
+  # shellcheck disable=SC2034 # reported by consumers
+  ACTIVE_LOG="$LOG_DIR/$APP_NAME.log"
+  # shellcheck disable=SC2034 # reported by consumers
+  ARCHIVE_LOG="$LOG_DIR/$APP_NAME.log.1"
+  if [[ "$PLATFORM" == macos ]]; then BOOTSTRAP_LOG="$LOG_DIR/bootstrap.log"; fi
+}
+
+read_install_paths() {
+  local record="$APP_DIR/install-paths" values=() value
+  [[ -f "$record" && ! -L "$record" ]] || return 1
+  while IFS= read -r value || [[ -n "$value" ]]; do values+=("$value"); done < "$record"
+  [[ ${#values[@]} -eq 3 ]] || die "Invalid installation path record: $record"
+  for value in "${values[@]}"; do
+    [[ "$value" == /* && "$value" != *$'\n'* && "$value" != *$'\r'* && "/$value/" != */../* ]] || die "Invalid installed path."
+  done
+  CONFIG_PATH="${values[0]}" LOG_DIR="${values[1]}" SERVICE_PATH="${values[2]}"
+  [[ "$(basename "$LOG_DIR")" == "$APP_NAME" ]] || die "Invalid application log path."
+  if [[ "$PLATFORM" == macos ]]; then
+    [[ "$(basename "$SERVICE_PATH")" == "$LABEL.plist" ]] || die "Invalid service path."
+  else
+    [[ "$(basename "$SERVICE_PATH")" == "$APP_NAME.service" ]] || die "Invalid service path."
+  fi
+}
+
+# Resolve an existing registration before considering the caller's environment.
+# Installed scripts have their own path record, so they survive download cleanup
+# and a change in the terminal's XDG or CC_AUTOMUX_CONFIG values.
+resolve_installation() {
+  local checker="$1" registered="" details values=() value
+  if [[ -f "$REPO_ROOT/install-paths" ]]; then
+    APP_DIR="$REPO_ROOT"
+    read_install_paths
+  else
+    if [[ "$PLATFORM" == linux ]]; then
+      registered="$(systemctl --user show "$SERVICE_NAME" --property=FragmentPath --value 2>/dev/null || true)"
+      if [[ -n "$registered" ]]; then
+        [[ "$registered" == /* ]] || die "Cannot resolve the existing service registration."
+        if [[ -f "$SERVICE_PATH" && "$SERVICE_PATH" != "$registered" ]]; then die "Multiple service registrations found; resolve them before installing."; fi
+        SERVICE_PATH="$registered"
+      fi
+    fi
+    if [[ -f "$SERVICE_PATH" ]]; then
+      [[ -x "$checker" ]] || die "An executable binary is required to inspect the existing service."
+      details="$("$checker" inspect-service "$SERVICE_PATH")" || die "Cannot safely inspect the existing registration."
+      while IFS= read -r value; do values+=("$value"); done <<< "$details"
+      [[ ${#values[@]} -eq 3 ]] || die "Invalid service inspection result."
+      APP_DIR="${values[0]}" CONFIG_PATH="${values[1]}"
+      if [[ "$PLATFORM" == linux ]]; then LOG_DIR="${values[2]}/$APP_NAME"; fi
+      if [[ -f "$APP_DIR/install-paths" ]]; then
+        read_install_paths
+        [[ "$CONFIG_PATH" == "${values[1]}" ]] || die "The service configuration path differs from its installation record; reconcile them before upgrading."
+      fi
+    elif [[ -f "$APP_DIR/install-paths" ]]; then
+      read_install_paths
+    fi
+  fi
+  [[ "$(basename "$APP_DIR")" == "$APP_NAME" && ! -L "$APP_DIR" ]] || die "Invalid application directory."
+  refresh_paths
+  CC_AUTOMUX_CONFIG="$CONFIG_PATH"
+  export CC_AUTOMUX_CONFIG
+  if [[ "$PLATFORM" == linux ]]; then XDG_STATE_HOME="$(dirname "$LOG_DIR")"; export XDG_STATE_HOME; fi
+}
+
+require_manager() {
+  if [[ "$PLATFORM" == linux ]]; then
+    if ! command -v systemctl >/dev/null || ! systemctl --user show-environment >/dev/null 2>&1; then
+      die "Linux requires an available systemd user manager in a logged-in user session."
+    fi
+  else
+    launchctl print "$LAUNCH_DOMAIN" >/dev/null 2>&1 || die "macOS requires a logged-in graphical user session."
+  fi
+}
+
+acquire_install_lock() {
+  INSTALL_LOCK="$HOME/.cc-automux-install.lock"
+  mkdir "$INSTALL_LOCK" 2>/dev/null || die "Another operation is running or an interrupted operation left $INSTALL_LOCK; resolve it before retrying."
+}
+
+service_running() {
+  if [[ "$PLATFORM" == macos ]]; then
+    launchctl print "$SERVICE_NAME" 2>/dev/null | grep -q 'state = running'
+  else
+    systemctl --user is-active --quiet "$SERVICE_NAME"
+  fi
+}
+
 xml_escape() {
   local value="$1"
   value=${value//&/&amp;}
@@ -129,6 +222,12 @@ unit_quote() {
 unit_env_quote() {
   local name="$1" value="$2"
   unit_quote "$name=$value"
+}
+
+unit_exec_quote() {
+  local value="$1"
+  value=${value//\$/\$\$}
+  unit_quote "$value"
 }
 
 # unit_path renders one value for a single-path directive such as
@@ -165,9 +264,8 @@ render_plist() {
 
   require_template
 
-  # Only carry CC_AUTOMUX_CONFIG into the LaunchAgent env when an override was
-  # set at install time; otherwise the binary uses its own default path and the
-  # placeholder collapses to nothing.
+  # Installation pins the resolved path; standalone template rendering can
+  # still omit an override and let the binary use its default path.
   if [[ -n "${CC_AUTOMUX_CONFIG:-}" ]]; then
     config_env="
     <key>CC_AUTOMUX_CONFIG</key>
@@ -199,14 +297,19 @@ render_systemd_unit() {
   fi
 
   rendered="$(<"$TEMPLATE_PATH")"
-  rendered=${rendered//__BINARY_PATH__/$(unit_quote "$BIN_PATH")}
+  rendered=${rendered//__BINARY_PATH__/$(unit_exec_quote "$BIN_PATH")}
   rendered=${rendered//__WORKING_DIRECTORY__/$(unit_path "$APP_DIR")}
   rendered=${rendered//__CONFIG_ENV__/$config_env}
+  if [[ -n "${XDG_STATE_HOME:-}" ]]; then
+    rendered+=$'\n'
+    # Append within [Service], before [Install], so the log directory is pinned.
+    rendered=${rendered/\[Install\]/Environment=$(unit_env_quote XDG_STATE_HOME "$XDG_STATE_HOME")$'\n\n'[Install]}
+  fi
 
   mkdir -p "$SERVICE_DIR"
   printf '%s\n' "$rendered" > "$SERVICE_PATH"
   chmod 600 "$SERVICE_PATH"
-  systemctl --user daemon-reload
+  if [[ "${RENDER_ONLY:-0}" != 1 ]]; then systemctl --user daemon-reload; fi
 }
 
 start_service() {
@@ -216,6 +319,7 @@ start_service() {
     return 1
   fi
   if [[ "$PLATFORM" == "macos" ]]; then
+    launchctl enable "$SERVICE_NAME"
     launchctl bootstrap "$LAUNCH_DOMAIN" "$SERVICE_PATH" 2>/dev/null || true
     launchctl kickstart -k "$SERVICE_NAME"
   else
@@ -228,13 +332,9 @@ start_service() {
 
 stop_service() {
   if [[ "$PLATFORM" == "macos" ]]; then
-    if [[ -f "$SERVICE_PATH" ]]; then
-      launchctl bootout "$LAUNCH_DOMAIN" "$SERVICE_PATH" 2>/dev/null || true
-    else
-      launchctl bootout "$SERVICE_NAME" 2>/dev/null || true
-    fi
+    if launchctl print "$SERVICE_NAME" >/dev/null 2>&1; then launchctl bootout "$SERVICE_NAME"; fi
   else
-    systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl --user stop "$SERVICE_NAME" 2>/dev/null || { [[ ! -f "$SERVICE_PATH" ]] || return 1; }
   fi
 }
 
@@ -245,7 +345,7 @@ stop_service() {
 unregister_service() {
   stop_service
   if [[ "$PLATFORM" == "linux" ]]; then
-    systemctl --user disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl --user disable "$SERVICE_NAME" >/dev/null 2>&1 || { [[ ! -f "$SERVICE_PATH" ]] || return 1; }
   fi
 }
 
@@ -254,7 +354,7 @@ unregister_service() {
 # told to reload, and would otherwise keep reporting the deleted unit.
 forget_service() {
   if [[ "$PLATFORM" == "linux" ]]; then
-    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user daemon-reload
     systemctl --user reset-failed "$SERVICE_NAME" 2>/dev/null || true
   fi
 }
@@ -296,7 +396,7 @@ remove_path() {
 # structured log itself is always read through the management API.
 describe_fallback() {
   if [[ "$PLATFORM" == "macos" ]]; then
-    printf '%s\n' "  $BOOTSTRAP_LOG (truncated on each install)"
+    printf '%s\n' "  $BOOTSTRAP_LOG (truncated when replacing the installation)"
   else
     printf '%s\n' "  journalctl --user -u $SERVICE_NAME"
   fi

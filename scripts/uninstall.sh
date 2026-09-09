@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
+uninstall_main() {
 KEEP_LOGS=false
 if [[ $# -eq 1 && "${1:-}" == "--keep-logs" ]]; then
   KEEP_LOGS=true
@@ -13,6 +14,12 @@ elif [[ $# -gt 0 ]]; then
   echo "Usage: ./scripts/uninstall.sh [--keep-logs]" >&2
   exit 1
 fi
+
+require_manager
+resolve_installation "$BIN_PATH"
+umask 077
+acquire_install_lock
+trap 'rmdir "$INSTALL_LOCK"' EXIT
 
 # Stop the service and drop the autostart registration before deleting anything.
 # On Linux the unit file must still exist for disable to resolve the name.
@@ -38,3 +45,7 @@ else
   remove_path "$LOG_DIR"
   echo "Uninstalled $SERVICE_NAME and removed the autostart registration, app data, and logs."
 fi
+echo 'Claude Code settings were not restored. Any custom configuration outside the application directory was kept.'
+}
+
+uninstall_main "$@"

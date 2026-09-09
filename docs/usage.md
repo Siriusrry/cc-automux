@@ -2,47 +2,61 @@
 
 [简体中文](usage.zh-CN.md) · [README](../README.md)
 
-## Install or run directly
+## Install and upgrade
 
-Build with Go 1.22 or newer:
+Supports macOS 12 or newer and Linux with `systemd --user`, with amd64 and arm64 binaries. Installation requires Bash, curl, tar, a SHA-256 utility, and a terminal in a logged-in user session. Go and Node.js are not required.
+
+Install or upgrade:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Siriusrry/cc-automux/main/scripts/install.sh | bash
+```
+
+The installer downloads and verifies the latest complete stable Release. On first use, choose a port (default `8765`) and generate or enter a management key. An occupied port prompts you to choose another. Piped installation reads prompts from the controlling terminal and exits clearly when none is available.
+
+macOS uses a LaunchAgent; Linux uses `systemd --user`. Installation enables login autostart without system elevation. After checking that the service and console are ready, the installer prints the actual version, configuration path, and Web UI address, such as `http://127.0.0.1:9000/management`.
+
+Upgrades preserve the port, keys, providers, auto mode, profiles, and other settings without repeating initialization. Configuration compatibility is checked before replacing the program. A replacement or startup failure restores the previous program and service registration and reports failure. A complete installation already at the latest version is not restarted. Invalid configuration, an unfinished restart, or an unrecognized installed version stops the operation without resetting data. See the [script reference](../scripts/README.md) for maintenance paths and details.
+
+## Local builds and direct execution
+
+Developers can build with Go 1.22 or newer and explicitly install the project's `dist/` binary:
 
 ```bash
 go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-automux
+./scripts/install.sh --local
 ```
 
-For a per-user service on macOS or Linux:
+`--local` neither downloads nor builds, and installs the selected binary even at the same version. It uses the same application directory, service, and configuration. Back up any program or configuration you need to keep before installing a local build.
 
-```bash
-./scripts/install.sh
-```
+The public command only upgrades to a higher version that supports the existing configuration, for example `v1.1.0-dev → v1.1.0`. It will not downgrade `v1.1.0-dev` to `v1.0.1` or replace a same-version local build. Returning to the same or an older public version requires manual preparation of the program and configuration.
 
-The installer prompts for a management key on first use and preserves an existing configuration on reinstall. macOS uses a LaunchAgent; Linux uses `systemd --user`. Installation enables autostart. See the [script reference](../scripts/README.md) for platform paths and removal behavior.
-
-To run directly instead:
+To run a local build directly:
 
 ```bash
 ./dist/cc-automux init --generate-management-key
 ./dist/cc-automux
 ```
 
-Do not start a second instance on the installed service's port. To choose a separate configuration, use an absolute path:
+Avoid using the installed service's port for a second instance. To choose a separate configuration, use an absolute path:
 
 ```bash
 ./dist/cc-automux init --generate-management-key --config /absolute/path/config.json --listen-addr 127.0.0.1:8766
 CC_AUTOMUX_CONFIG=/absolute/path/config.json ./dist/cc-automux
 ```
 
-`init` without `--generate-management-key` prompts for a key. Repeating initialization preserves an existing configuration and key. `./dist/cc-automux --version` prints the embedded product version.
+`init` without `--generate-management-key` prompts for a key. Repeated initialization preserves the existing configuration and key. `./dist/cc-automux --version` prints the product version.
 
 ## Sign in and connect Claude Code
 
-Open [http://127.0.0.1:8765/management](http://127.0.0.1:8765/management) with the configured port and sign in with the management key. By default the browser stores it for the tab session; **Remember on this device** stores it persistently in that browser. **Sign out** clears the stored key.
+Open the actual Web UI address printed by the installer and sign in with the management key. By default the browser stores it for the tab session; **Remember on this device** stores it persistently in that browser. **Sign out** clears the stored key.
 
 1. In **Service**, generate or enter a gateway key. It must differ from the management key. Without it, Messages requests return `503 gateway_not_configured`.
-2. In **Providers**, add a compatible upstream, its key, and exact model names.
-3. In **Claude Code**, create a named profile with the four required mappings: Haiku, Sonnet, Opus, and Fable. Each mapping names a model declared by a provider. Subagent and Teammate mappings are optional.
-4. Activate the profile. CC AutoMux writes the gateway address/key and mappings into the selected Claude Code settings file.
-5. Start a new Claude Code session so it reads the configuration.
+2. In **Providers**, add upstreams, their keys, and exact model names.
+3. Configure **Auto Mode** if needed.
+4. In **Claude Code**, create a named profile with the four required mappings: Haiku, Sonnet, Opus, and Fable. Each mapping names a model declared by a provider. Subagent and Teammate mappings are optional.
+5. Activate the profile. CC AutoMux writes the gateway address/key and mappings into the selected Claude Code settings file.
+6. Start a new Claude Code session so it reads the configuration.
 
 For manual setup, use the gateway's base address without an endpoint suffix:
 
@@ -71,7 +85,7 @@ Forms with a save bar require **Save changes**; **Revert** discards the draft. I
 
 ### Providers and routing
 
-Ordinary upstreams must accept the Anthropic Messages API. Enter their base URL; CC AutoMux appends `/v1/messages`. Do not append that endpoint yourself. Model names are case-sensitive and matched exactly.
+Provider requests use the Anthropic Messages API. Enter the base URL; CC AutoMux appends `/v1/messages`. Do not append that endpoint yourself. Model names are case-sensitive and matched exactly.
 
 Higher numeric priorities are tried first. New sessions round-robin within the highest available priority; sessions with a valid `X-Claude-Code-Session-Id` stay on a provider for the same model and request type. Lower tiers are used when higher ones are unavailable. Normal requests may try up to three different providers on eligible failures. Disabling health cooldown prevents failure-based scheduling suppression; diagnostics remain available.
 
@@ -83,7 +97,7 @@ TLS uses system roots by default. A custom CA file and skipping certificate veri
 - **Provider pool:** set the shared classifier model. Enabled providers declaring that model are candidates, using priority, stickiness, and a separate classifier health channel. A classifier request makes at most one provider attempt.
 - **Fixed provider:** supply a base URL, key, protocol, TLS settings, and optional classifier patches. This target serves only classifier requests and does not join the provider pool.
 
-Anthropic Messages fixed targets work directly. OpenAI Responses and OpenAI-compatible conversion are not implemented; saving those selections is allowed, but classifier requests return `501 protocol_not_implemented`. Failed parsing or conversion never produces a fabricated allow/block result.
+Fixed classifier targets can use Anthropic Messages, OpenAI Responses, or OpenAI-compatible APIs. Choose the protocol matching the upstream endpoint and specify the model you want to use.
 
 ### Claude Code files and profiles
 
@@ -139,10 +153,10 @@ Config GET includes server-owned `active_profile_id`; remove it when constructin
 
 ## Troubleshooting
 
-- **Console unreachable:** check `./scripts/status.sh`, the configured port, and startup errors. macOS writes early errors to `~/Library/Logs/cc-automux/bootstrap.log`; Linux uses `journalctl --user -u cc-automux.service`.
+- **Console unreachable:** run the installed `status.sh` printed by the installer and check the configured port and startup errors. macOS writes early errors to `~/Library/Logs/cc-automux/bootstrap.log`; Linux uses `journalctl --user -u cc-automux.service`.
 - **Sign-in rejected / 401:** use the management key for the console and the gateway key for Claude Code. A rotated management key invalidates other sessions.
 - **Model unavailable:** check the exact requested model, enabled providers, and their health. Open Providers for the upstream's original error and diagnostics.
-- **Auto mode fails:** set its classifier model and a usable candidate or Anthropic fixed target. Unsupported OpenAI protocols return 501.
+- **Auto mode fails:** check the classifier model, upstream URL, key, protocol, and compatibility patches; inspect the original error in the console.
 - **Save conflict / 412:** keep a copy of the draft if needed, then load current values and reapply the intended change.
 - **Profile is out of sync:** inspect the selected path and reactivate the intended profile. On write failure the page reports an error instead of declaring it active.
 - **Reinstall did not reset settings:** existing configuration and keys are deliberately preserved.

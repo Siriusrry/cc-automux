@@ -2,23 +2,36 @@
 
 [English](usage.md) · [README](../README.zh-CN.md)
 
-## 安装或直接运行
+## 安装与升级
 
-使用 Go 1.22 或更新版本构建：
+支持 macOS 12 或更新版本，以及提供 `systemd --user` 的 Linux，均提供 amd64、arm64 二进制。安装需要 Bash、curl、tar、SHA-256 校验工具，以及已登录用户的终端；无需 Go 或 Node.js。
+
+安装与升级命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Siriusrry/cc-automux/main/scripts/install.sh | bash
+```
+
+安装器获取最新完整稳定 Release，校验下载包后安装。首次使用时选择端口（默认 `8765`）以及自动生成或手动设置 management key。端口占用时会要求重新选择；管道中的交互从控制终端读取，没有控制终端时会清晰退出。
+
+macOS 使用 LaunchAgent，Linux 使用 `systemd --user`；安装启用用户登录自启，不请求系统提权。安装器检查服务和控制台真正就绪后，显示实际版本、配置路径与 Web UI 地址，例如 `http://127.0.0.1:9000/management`。
+
+升级保留端口、密钥、Providers、Auto Mode、Profiles 和其他配置，不重复询问初始化设置。替换程序前检查配置兼容性；安装或启动失败时恢复原程序与服务注册并报告失败。已是最新且安装完整时不重启；配置损坏、未完成重启或版本无法识别时停止并保留现场。详情及运维路径见[脚本说明](../scripts/README.zh-CN.md)。
+
+## 本地构建与直接运行
+
+开发者使用 Go 1.22 或更新版本构建，再显式安装项目 `dist/` 中的产物：
 
 ```bash
 go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-automux
+./scripts/install.sh --local
 ```
 
-在 macOS 或 Linux 安装为用户级服务：
+`--local` 不联网、不自动构建，同版本也会替换为本次选定产物。使用同一应用目录、服务和配置。安装前自行备份需要保留的程序与配置。
 
-```bash
-./scripts/install.sh
-```
+公开安装命令只允许向前升级到更高且支持现有配置的版本，例如 `v1.1.0-dev → v1.1.0`；不会从 `v1.1.0-dev` 降到 `v1.0.1`，也不会同版本覆盖本地构建。需要切回同版本或较低公开版时，先手动处理程序与配置。
 
-首次安装时输入或生成 management key；重新安装保留已有配置。macOS 使用 LaunchAgent，Linux 使用 `systemd --user`，安装即启用自启动。平台路径和卸载行为见[脚本说明](../scripts/README.zh-CN.md)。
-
-也可以直接运行：
+也可以直接运行本地构建：
 
 ```bash
 ./dist/cc-automux init --generate-management-key
@@ -32,17 +45,18 @@ go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-
 CC_AUTOMUX_CONFIG=/absolute/path/config.json ./dist/cc-automux
 ```
 
-`init` 不带 `--generate-management-key` 时交互输入密钥；重复初始化不会覆盖已有配置和密钥。`./dist/cc-automux --version` 显示嵌入的产品版本。
+`init` 不带 `--generate-management-key` 时交互输入密钥；重复初始化不会覆盖已有配置和密钥。`./dist/cc-automux --version` 显示产品版本。
 
 ## 登录并连接 Claude Code
 
-打开 [http://127.0.0.1:8765/management](http://127.0.0.1:8765/management)，按实际配置调整端口，使用 management key 登录。默认只保存到标签页会话；勾选 **Remember on this device** 才持久保存在该浏览器。**Sign out** 清除保存的密钥。
+打开安装器显示的实际 Web UI 地址，使用 management key 登录。默认只保存到标签页会话；勾选 **Remember on this device** 才持久保存在该浏览器。**Sign out** 清除保存的密钥。
 
 1. 在 **Service** 设置或生成 gateway key，它必须与 management key 不同。未配置时 Messages 请求返回 `503 gateway_not_configured`。
-2. 在 **Providers** 添加兼容上游、上游密钥和准确的模型名。
-3. 在 **Claude Code** 创建 Profile，填写 Haiku、Sonnet、Opus、Fable 四个必填模型映射，指向 Provider 声明的模型；Subagent、Teammate 映射可选。
-4. 激活 Profile，将网关地址、密钥和模型映射写入选定的 Claude Code 配置文件。
-5. 启动新的 Claude Code 会话，使其读取配置。
+2. 在 **Providers** 添加上游、上游密钥和准确的模型名。
+3. 按需配置 **Auto Mode**。
+4. 在 **Claude Code** 创建 Profile，填写 Haiku、Sonnet、Opus、Fable 四个必填模型映射，指向 Provider 声明的模型；Subagent、Teammate 映射可选。
+5. 激活 Profile，将网关地址、密钥和模型映射写入选定的 Claude Code 配置文件。
+6. 启动新的 Claude Code 会话，使其读取配置。
 
 手动配置时，Base URL 只填网关基础地址，不附加 endpoint：
 
@@ -71,7 +85,7 @@ claude
 
 ### Provider 与路由
 
-普通上游必须支持 Anthropic Messages API。填写基础 URL，CC AutoMux 会追加 `/v1/messages`，不要重复填写该 endpoint。模型按大小写敏感的完整名称匹配。
+Provider 请求采用 Anthropic Messages API。填写基础 URL，CC AutoMux 会追加 `/v1/messages`，不要重复填写该 endpoint。模型按大小写敏感的完整名称匹配。
 
 优先级数值越大越优先；新会话在最高可用同级 Provider 中轮询。有合法 `X-Claude-Code-Session-Id` 的会话，对相同模型和请求类型保持粘性。高层不可用时才使用低层。普通请求在允许重试的错误下最多尝试三个不同 Provider。关闭健康冷却只取消失败导致的调度抑制，诊断仍保留。
 
@@ -83,7 +97,7 @@ TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼
 - **Provider pool**：设置共用分类器模型。启用且声明该模型的 Provider 参与候选，使用优先级、粘性及独立分类器健康通道；每个分类器请求最多尝试一个 Provider。
 - **Fixed provider**：配置基础 URL、密钥、协议、TLS 和可选分类器补丁。该目标只服务分类器，不进入普通 Provider 池。
 
-Anthropic Messages 固定目标直接可用。OpenAI Responses 与 OpenAI-compatible 协议转换尚未实现，允许保存配置，但分类器请求会返回 `501 protocol_not_implemented`。解析或转换失败时不会伪造 allow/block 结果。
+固定分类器目标可使用 Anthropic Messages、OpenAI Responses 和 OpenAI-compatible。选择与上游接口一致的协议，并指定需要使用的模型。
 
 ### Claude Code 文件与 Profile
 
@@ -139,10 +153,10 @@ Config GET 包含服务端只读 `active_profile_id`，构造 PUT 时须移除�
 
 ## 排障
 
-- **控制台打不开**：检查 `./scripts/status.sh`、实际端口和启动错误。macOS 早期错误位于 `~/Library/Logs/cc-automux/bootstrap.log`；Linux 使用 `journalctl --user -u cc-automux.service`。
+- **控制台打不开**：运行安装器显示的 `status.sh`，检查实际端口和启动错误。macOS 早期错误位于 `~/Library/Logs/cc-automux/bootstrap.log`；Linux 使用 `journalctl --user -u cc-automux.service`。
 - **登录失败或 401**：控制台使用 management key，Claude Code 使用 gateway key。Management key 轮换会使其他会话失效。
 - **模型不可用**：检查准确模型名、Provider 是否启用及健康状态，在 Providers 查看上游原始错误。
-- **Auto mode 失败**：配置分类器模型及可用候选或 Anthropic 固定目标；未实现的 OpenAI 协议返回 501。
+- **Auto mode 失败**：检查分类器模型、上游地址、密钥和协议，以及对应的兼容补丁；查看控制台中的原始错误。
 - **保存冲突或 412**：必要时先保留草稿，再重新加载当前配置并应用需要的改动。
 - **Profile 不同步**：检查目标路径并重新激活；写入失败会报错，不会假报 Active。
 - **重新安装没有重置设置**：安装器会保留已有配置和密钥。

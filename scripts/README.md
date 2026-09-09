@@ -2,113 +2,89 @@
 
 [简体中文](README.zh-CN.md) · [Usage guide](../docs/usage.md)
 
-These scripts install and manage CC AutoMux as a per-user service on macOS and
-Linux. They detect the platform at run time and dispatch to the platform's own
-service manager: a LaunchAgent on macOS, a `systemd --user` unit on Linux.
-Registration is always per-user and never requests elevation. The scripts do not
-implement configuration or construct JSON.
+CC AutoMux runs as a per-user LaunchAgent on macOS or a `systemd --user` service on Linux. Installation enables login autostart without requesting system elevation. A logged-in graphical session is required on macOS; Linux requires an available systemd user manager. Binaries are available for amd64 and arm64, with macOS 12 as the minimum macOS version.
 
-## Scripts
+## Install and upgrade
 
-| Script | Purpose |
-|---|---|
-| install.sh | Install the binary, initialize v1 configuration through cc-automux init, register the per-user service, and start it. |
-| start.sh | Start the installed service. |
-| stop.sh | Stop the service. |
-| status.sh | Print the service status. |
-| uninstall.sh | Stop the service, remove its registration, and delete its installed files. |
-| _lib.sh | Shared implementation helpers; do not run directly. |
+```bash
+curl -fsSL https://raw.githubusercontent.com/Siriusrry/cc-automux/main/scripts/install.sh | bash
+```
 
-## Install
+This command installs or upgrades to the latest complete public stable Release. It requires Bash, curl, tar, and either `sha256sum` or `shasum`; it does not require a source checkout, Go, or Node.js. Downloads use one fixed release version, and the installer checks SHA-256, platform, and binary version before proceeding.
 
-Build the binary first:
+On first installation, choose a port (default `8765`) and either generate a management key or enter one visibly. Prompts read from the controlling terminal, so `curl … | bash` works. First installation without a controlling terminal exits with an explanation. Configuration is initialized by the binary, not assembled in shell.
 
-~~~
+Existing configuration is checked with the target binary and kept. Upgrades retain port, keys, providers, profiles, auto-mode settings, and Claude Code paths; they do not activate profiles or edit Claude Code settings. An invalid configuration, unsupported version, or unfinished configuration restart stops installation before replacement. After downloading and checking the candidate, the installer preserves the old program and registration. Replacement or readiness failure restores them and reports failure. If recovery itself fails, it prints the retained recovery-directory path.
+
+Success is reported only after authenticated service status matches the expected product, version, and listener, and the web console responds. The output includes the actual URL, configuration path, version, and installed maintenance commands. An already-current complete public installation is left running; an unhealthy service is reported separately rather than restarted without a change.
+
+Concurrent installation and maintenance operations are rejected. If an interrupted operation leaves `~/.cc-automux-install.lock`, first check that no installer or maintenance script is still running and resolve any reported recovery state, then remove that empty lock directory and retry.
+
+## Local development builds
+
+```bash
 go build -trimpath -buildvcs=false -ldflags="-s -w" -o dist/cc-automux ./cmd/cc-automux
-~~~
+./scripts/install.sh --local
+```
 
-Run the installer:
+Build with Go 1.22 or newer. `--local` reads only `dist/cc-automux` beside the script's project, never downloads or builds, and uses the same installed service and configuration. It installs the selected binary even if the version string is unchanged. Back up any program and configuration you need to retain before trying a local build.
 
-~~~
-./scripts/install.sh
-~~~
+Without `--local`, the installer always uses the public Release, even when the current directory contains `dist/`. Public upgrades from a local build require both a higher semantic version and configuration support: `v1.1.0-dev → v1.1.0` is forward; `v1.1.0-dev → v1.0.1` is a downgrade. Same-version local replacement and public downgrades are refused. Prepare the program and configuration manually when returning to an equal or older public version. A local installation with a missing binary cannot bypass the version check through repair.
 
-On the first installation, the script asks whether to generate a high-strength
-management key. Choosing manual entry uses the binary's visible prompt.
+## Installed locations
 
-The installer calls the shared initialization core and never writes JSON itself.
-An existing configuration and its keys are preserved on reinstall.
+| Item | macOS | Linux default |
+|---|---|---|
+| Application | `~/Library/Application Support/cc-automux/` | `~/.config/cc-automux/` |
+| Binary | Application + `bin/cc-automux` | Application + `bin/cc-automux` |
+| Configuration | Application + `config.json` | Application + `config.json` |
+| Maintenance scripts | Application + `scripts/` | Application + `scripts/` |
+| Registration | `~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist` | `~/.config/systemd/user/cc-automux.service` |
+| Logs | `~/Library/Logs/cc-automux/` | `~/.local/state/cc-automux/` |
 
-The only environment override is CC_AUTOMUX_CONFIG, which must be an absolute
-path. The service configuration, including listen_addr and log_max_bytes, is
-stored in config.json and changed through the Web console at `/management` or the management API.
+On Linux, `XDG_CONFIG_HOME` selects the application and registration root; `XDG_STATE_HOME` selects the log root. `CC_AUTOMUX_CONFIG` selects an absolute configuration path on either platform. During an upgrade the existing registration and installed path record take precedence over a changed terminal environment. The registration pins configuration and Linux log paths for subsequent starts.
 
-Installed paths on macOS:
+The application directory also holds user documentation, service templates, an `install-paths` record, and an `install-source` value of `public` or `local`. These are installation metadata, separate from product configuration. The installed scripts do not depend on the extracted download directory.
 
-~~~
-~/Library/Application Support/cc-automux/bin/cc-automux
-~/Library/Application Support/cc-automux/config.json
-~/Library/LaunchAgents/com.Siriusrry.cc-automux.plist
-~/Library/Logs/cc-automux/cc-automux.log
-~/Library/Logs/cc-automux/cc-automux.log.1
-~/Library/Logs/cc-automux/bootstrap.log
-~~~
+Structured logs are `cc-automux.log` and `cc-automux.log.1`. Their combined capacity is configured in the console. Startup errors before logging is available go to `bootstrap.log` on macOS (truncated when replacing an installation) or the systemd user journal on Linux:
 
-Installed paths on Linux, honouring XDG_CONFIG_HOME and XDG_STATE_HOME when set:
-
-~~~
-~/.config/cc-automux/bin/cc-automux
-~/.config/cc-automux/config.json
-~/.config/systemd/user/cc-automux.service
-~/.local/state/cc-automux/cc-automux.log
-~/.local/state/cc-automux/cc-automux.log.1
-~~~
-
-The registration carries only the optional CC_AUTOMUX_CONFIG override. It does
-not seed legacy route or upstream environment variables.
-
-The process writes structured JSON Lines to `cc-automux.log` and keeps one older
-generation in `cc-automux.log.1`. The configured `log_max_bytes` is the combined
-budget.
-
-Fatal startup errors that happen before the structured log exists go to stderr,
-which each platform collects differently:
-
-- **macOS:** into `~/Library/Logs/cc-automux/bootstrap.log`. The installer
-  truncates this file on every run. It carries only errors that need a human, so a
-  previous round's output has no value for the current one.
-- **Linux:** into the journal, read with `journalctl --user -u cc-automux.service`.
-  journald applies its own system-wide capacity limit and rotation, so the unit
-  names no log path.
+```bash
+journalctl --user -u cc-automux.service
+```
 
 ## Start, stop, and status
 
-~~~
-./scripts/start.sh
-./scripts/stop.sh
-./scripts/status.sh
-~~~
+Use the exact application directory printed by the installer. For the default macOS installation:
 
-The service is named com.Siriusrry.cc-automux on macOS and cc-automux.service on
-Linux. It remains loopback-only on both.
+```bash
+APP_DIR="$HOME/Library/Application Support/cc-automux"
+"$APP_DIR/scripts/status.sh"
+"$APP_DIR/scripts/stop.sh"
+"$APP_DIR/scripts/start.sh"
+```
 
-Structured log history is read through authenticated `GET /api/v1/logs`; live
-records use authenticated `GET /api/v1/logs/stream`, and one complete record is
-read with `GET /api/v1/logs/record`. There is no command-line log-viewing script.
-`GET /api/v1/status` reports whether the process can still write its own log.
+For the default Linux installation, set `APP_DIR="$HOME/.config/cc-automux"` before running the same commands. `start.sh` checks readiness; `status.sh` reports supervisor state and authenticated gateway readiness. Request history and live logs are available in the console's **Logs** page.
 
 ## Uninstall
 
-~~~
-./scripts/uninstall.sh
-./scripts/uninstall.sh --keep-logs
-~~~
+First change Claude Code's connection settings if it should no longer use this gateway. Then use the installed script:
 
-The uninstaller targets only this application's own registration file,
-application directory, and log directory; shared parent directories are left
-intact. A configuration outside the application directory selected with
-CC_AUTOMUX_CONFIG is not removed.
+```bash
+"$APP_DIR/scripts/uninstall.sh"
+# Or retain the application log directory:
+"$APP_DIR/scripts/uninstall.sh" --keep-logs
+```
 
-On macOS the removed items go to the Trash and stay recoverable through Finder's
-"Put Back". On Linux they are deleted permanently, since there is no equivalent
-user-level Trash guarantee for arbitrary paths.
+Uninstall stops the service, removes login autostart, and removes the application directory, including its default configuration. Logs are removed unless `--keep-logs` is supplied. A custom configuration outside the application directory is kept. Claude Code's `settings.json` and its backup are not automatically restored or deleted.
+
+On macOS removal uses the Trash through Finder when available, with permanent removal as the headless fallback. Linux removal is permanent. Shared parent directories are left intact.
+
+## Script roles
+
+| Script | Purpose |
+|---|---|
+| `install.sh` | Public download entry point, or explicit `--local` installation. |
+| `start.sh`, `stop.sh`, `status.sh` | Operate the installed user service and check its state. |
+| `uninstall.sh` | Remove the installation, optionally retaining logs. |
+| `_install.sh`, `_lib.sh` | Shared implementation; use the entry points above. |
+| `release.py` | Build and inspect platform archives and checksums; requires Python 3.11+ and Go. |

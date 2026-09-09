@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -31,6 +32,25 @@ func handleArgs(args []string, stdout, stderr io.Writer) (bool, int) {
 	}
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintln(stdout, productversion.Display())
+		return true, 0
+	}
+	if len(args) == 1 && args[0] == "--platform" {
+		_, _ = fmt.Fprintf(stdout, "%s/%s\n", runtime.GOOS, runtime.GOARCH)
+		return true, 0
+	}
+	if args[0] == "check" {
+		return true, runCheck(args[1:], stdout, stderr)
+	}
+	if args[0] == "inspect-service" {
+		return true, runInspectService(args[1:], stdout, stderr)
+	}
+	if len(args) == 2 && args[0] == "compare-version" {
+		compared, err := productversion.Compare(productversion.Current(), args[1])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return true, 1
+		}
+		fmt.Fprintln(stdout, compared)
 		return true, 0
 	}
 	if len(args) > 0 && args[0] == "init" {
