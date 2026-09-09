@@ -52,6 +52,16 @@ func TestHarnessRuntimePersistsActiveIDAndReconcilesClientUpdates(t *testing.T) 
 
 	clientUpdate = manager.Config()
 	clientUpdate.Harnesses.ClaudeCode.ActiveProfileID = ""
+	clientUpdate.Harnesses.ClaudeCode.Profiles[0].Name = "Renamed"
+	if _, err := manager.Apply(clientUpdate); err != nil {
+		t.Fatalf("profile rename error = %v", err)
+	}
+	if got := manager.Config().Harnesses.ClaudeCode.ActiveProfileID; got != profile.ID {
+		t.Fatalf("profile rename lost active ID: %q", got)
+	}
+
+	clientUpdate = manager.Config()
+	clientUpdate.Harnesses.ClaudeCode.ActiveProfileID = ""
 	clientUpdate.Harnesses.ClaudeCode.Profiles[0].SonnetModel = "changed"
 	if _, err := manager.Apply(clientUpdate); err != nil {
 		t.Fatalf("active profile client update error = %v", err)

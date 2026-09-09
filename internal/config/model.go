@@ -492,6 +492,9 @@ func (current Config) ActiveProfileInputsEqual(next Config) bool {
 	}
 	leftProfile, leftOK := findProfile(left.Profiles, activeID)
 	rightProfile, rightOK := findProfile(right.Profiles, activeID)
+	// The display name does not contribute to the managed settings.
+	leftProfile.Name = ""
+	rightProfile.Name = ""
 	return leftOK && rightOK && leftProfile == rightProfile
 }
 

@@ -751,6 +751,54 @@ func TestManagerProfileCRUDPreservesActiveNonTargetProfile(t *testing.T) {
 	}
 }
 
+func TestManagerRenamePreservesOnlyVerifiedActiveProfile(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		changeModel  bool
+		changeTarget bool
+		wantActive   bool
+	}{
+		{name: "rename only", wantActive: true},
+		{name: "rename and model change", changeModel: true},
+		{name: "rename after external change", changeTarget: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newHarnessFixture(t, "gateway-key")
+			if _, err := fixture.harness.Activate(ClaudeCodeAdapterID, testProfileOneID); err != nil {
+				t.Fatal(err)
+			}
+			if test.changeTarget {
+				writeSettingsFixture(t, fixture.target, []byte(`{"env":{}}`))
+			}
+			before := readFixture(t, fixture.target)
+			profile := fixture.profiles[0]
+			profile.Name = "Renamed"
+			if test.changeModel {
+				profile.SonnetModel = "changed-model"
+			}
+			updated, err := fixture.harness.UpdateProfile(ClaudeCodeAdapterID, profile.ID, profile)
+			if err != nil || updated.Name != "Renamed" || updated.Active != test.wantActive {
+				t.Fatalf("renamed profile = %#v, err %v", updated, err)
+			}
+			if !bytes.Equal(before, readFixture(t, fixture.target)) {
+				t.Fatal("profile edit rewrote the settings file")
+			}
+			wantID := ""
+			if test.wantActive {
+				wantID = profile.ID
+			}
+			status, err := fixture.harness.Status(ClaudeCodeAdapterID)
+			if err != nil || status.ActiveProfileID != wantID || (status.State == StateInSync) != test.wantActive {
+				t.Fatalf("status after rename = %#v, err %v", status, err)
+			}
+			persisted, err := fixture.store.Load()
+			if err != nil || persisted.Harnesses.ClaudeCode.ActiveProfileID != wantID || persisted.Harnesses.ClaudeCode.Profiles[0].Name != "Renamed" {
+				t.Fatalf("persisted harness = %#v, err %v", persisted.Harnesses.ClaudeCode, err)
+			}
+		})
+	}
+}
+
 func TestManagerErrorMessagesDoNotIncludeTargetContents(t *testing.T) {
 	fixture := newHarnessFixture(t, "gateway-key")
 	secret := "target-secret-that-must-not-be-returned"
