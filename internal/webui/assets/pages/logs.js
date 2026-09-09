@@ -11,7 +11,7 @@
   const KIND_TIP = {
     forward: 'Forwarded — the request was sent to this provider.',
     success: "Success — the upstream answered and the provider's health channel was marked healthy.",
-    failure: "Failure — the upstream request failed and counted against the provider's health.",
+    failure: 'Failure — the request could not be completed. Expand the record for details.',
     failover: 'Failover — after this failure the request moved on to the next provider.'
   };
   const EVENT_TIP = {

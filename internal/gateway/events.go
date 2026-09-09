@@ -16,6 +16,8 @@ const (
 	EventFailure  EventKind = "failure"
 )
 
+const ErrorCodeModelNotConfigured = "model_not_configured"
+
 // Event contains the complete diagnostic values observed by the data plane.
 // Recorders decide how those values are rendered or persisted.
 //
@@ -32,6 +34,7 @@ type Event struct {
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int
+	ErrorCode              string
 	RawError               string
 	PatchID                string
 	PatchStage             string

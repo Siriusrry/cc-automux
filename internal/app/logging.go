@@ -350,12 +350,22 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover {
 		level = slog.LevelError
 	}
+	if event.Kind == gateway.EventFailure && event.ErrorCode == gateway.ErrorCodeModelNotConfigured {
+		level = slog.LevelWarn
+	}
 	attrs := []slog.Attr{
 		slog.String("kind", string(event.Kind)),
 		slog.String("model", event.Model),
 		slog.String("request_type", string(event.RequestType)),
-		slog.Int("attempt", event.Attempt),
-		slog.String("upstream_url", event.UpstreamURL),
+	}
+	if event.Attempt > 0 {
+		attrs = append(attrs, slog.Int("attempt", event.Attempt))
+	}
+	if event.UpstreamURL != "" {
+		attrs = append(attrs, slog.String("upstream_url", event.UpstreamURL))
+	}
+	if event.ErrorCode != "" {
+		attrs = append(attrs, slog.String("error_code", event.ErrorCode))
 	}
 	if event.ProviderID != "" {
 		attrs = append(attrs, slog.String("provider_id", event.ProviderID))

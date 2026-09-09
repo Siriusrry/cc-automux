@@ -565,6 +565,109 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 	}
 }
 
+func TestAppLogsUnconfiguredModelBeforeProviderSelection(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		provider   bool
+		enabled    bool
+		model      string
+		classifier bool
+		session    string
+	}{
+		{name: "empty pool"},
+		{name: "disabled matching provider", provider: true, model: "missing-model", session: "session-disabled"},
+		{name: "different model", provider: true, enabled: true, model: "other-model", session: "session-other"},
+		{name: "classifier effective model", provider: true, enabled: true, model: "client-model", classifier: true, session: "session-classifier"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var upstreamCalls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				upstreamCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			cfg := config.Default()
+			cfg.Service.ListenAddr = freeListenAddr(t)
+			cfg.Auth.ManagementKey = "management-key"
+			cfg.Auth.GatewayKey = "gateway-key"
+			if test.provider {
+				cfg.Providers = []config.ProviderConfig{{
+					ID: "11111111-1111-4111-8111-111111111111", Name: "provider", BaseURL: upstream.URL,
+					APIKey: "provider-key", Models: []string{test.model}, Enabled: test.enabled,
+				}}
+			}
+			body := `{"model":"missing-model"}`
+			requestType := "normal"
+			if test.classifier {
+				cfg.AutoMode = config.AutoModeConfig{Mode: config.AutoModeProviderPool, Model: "missing-model"}
+				body = `{"model":"client-model","system":[{"text":"` + automode.SecurityMarker + `"}]}`
+				requestType = "classifier"
+			}
+			writeAppConfig(t, path, cfg)
+			application, err := New(Options{
+				ConfigPath: path, LogDir: filepath.Join(dir, "logs"),
+				HarnessHomeDir: func() (string, error) { return dir, nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer application.Close()
+			subscription, err := application.logBroker.Subscribe(logstore.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer gateway-key")
+			if test.session != "" {
+				request.Header.Set("X-Claude-Code-Session-Id", test.session)
+			}
+			response := httptest.NewRecorder()
+			application.server.Handler.ServeHTTP(response, request)
+			if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"error":"model_not_configured"`) {
+				t.Fatalf("response = %d %s", response.Code, response.Body.String())
+			}
+			if upstreamCalls.Load() != 0 || len(application.selector.Assignments("")) != 0 {
+				t.Fatal("unconfigured model reached upstream or acquired an assignment")
+			}
+			history := httptest.NewRecorder()
+			query := httptest.NewRequest(http.MethodGet, "/api/v1/logs?level=WARN&kind=failure&error_code=model_not_configured", nil)
+			query.Header.Set("Authorization", "Bearer management-key")
+			application.server.Handler.ServeHTTP(history, query)
+			var page struct {
+				Items []map[string]any `json:"items"`
+			}
+			if err := json.Unmarshal(history.Body.Bytes(), &page); err != nil || history.Code != http.StatusOK || len(page.Items) != 1 {
+				t.Fatalf("warning history = %d %s, err = %v", history.Code, history.Body.String(), err)
+			}
+			record := page.Items[0]
+			if record["msg"] != "gateway" || record["model"] != "missing-model" || record["request_type"] != requestType ||
+				record["http_status"] != float64(404) || record["raw_error"] != "Requested model is not configured in any enabled provider." {
+				t.Fatalf("warning = %#v", record)
+			}
+			if test.session != "" && record["session_id"] != test.session || test.session == "" && record["session_id"] != nil {
+				t.Fatalf("session = %#v", record["session_id"])
+			}
+			for _, field := range []string{"provider_id", "provider_name", "attempt", "upstream_url", "global_health", "channel_health", "next_provider_id"} {
+				if _, present := record[field]; present {
+					t.Errorf("warning contains inapplicable field %s", field)
+				}
+			}
+			select {
+			case message := <-subscription.Messages():
+				live := decodeLogLines(t, message.Record.Bytes())
+				if message.Kind != logstore.MessageRecord || len(live) != 1 || live[0]["seq"] != record["seq"] || live[0]["raw_error"] != record["raw_error"] {
+					t.Fatalf("live record = %#v", message)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("warning was not published to the live stream")
+			}
+		})
+	}
+}
+
 func TestAppLogsStructuredFailoverWithCompleteSourceAndNextProvider(t *testing.T) {
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

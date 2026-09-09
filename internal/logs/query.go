@@ -26,6 +26,7 @@ var stringFilterNames = map[string]struct{}{
 	"model":         {},
 	"session_id":    {},
 	"patch_id":      {},
+	"error_code":    {},
 }
 
 type ValidationError struct {

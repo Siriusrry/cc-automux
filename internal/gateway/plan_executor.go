@@ -123,7 +123,16 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 		return
 	}
 	if len(snapshot.Candidates(prepared.Plan.EffectiveModel)) == 0 {
-		writeError(w, http.StatusNotFound, "model_not_configured", "model is not configured")
+		h.record(Event{
+			Kind:        EventFailure,
+			SessionID:   prepared.Plan.OriginalSessionID,
+			Model:       prepared.Plan.EffectiveModel,
+			RequestType: prepared.Plan.RequestType,
+			HTTPStatus:  http.StatusNotFound,
+			ErrorCode:   ErrorCodeModelNotConfigured,
+			RawError:    "Requested model is not configured in any enabled provider.",
+		})
+		writeError(w, http.StatusNotFound, ErrorCodeModelNotConfigured, "model is not configured")
 		return
 	}
 	if incoming == nil || incoming.URL == nil {
