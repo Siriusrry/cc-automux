@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[1-9]*.[0-9]*.[0-9]*']
+
+permissions:
+  contents: read
+
+# Serialize publication across versions so an older run cannot move latest back.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'Siriusrry/cc-automux'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [darwin, linux]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - name: Verify tag and source version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/release.py tag "$RELEASE_TAG"
+      - name: Test shared code
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: go test ./...
+      - name: Build and inspect package
+        run: python3 scripts/release.py build '${{ matrix.goos }}' '${{ matrix.goarch }}' artifacts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cc-automux-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: github.repository == 'Siriusrry/cc-automux'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cc-automux-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify complete assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/release.py publish "$RELEASE_TAG" artifacts
