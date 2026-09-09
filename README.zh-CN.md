@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-面向 Claude Code 的多 Provider 网关与 auto mode 兼容层。
+面向 Claude Code 的多 Provider 网关，支持模型调度、auto mode 扩展与兼容修复。
 
 CC AutoMux 在本机转发 Anthropic Messages 请求，通过本地 Web 控制台管理 Provider、模型映射、auto mode 修复设置和日志。前端嵌入 Go 二进制，无需独立前端服务或 Node.js。
 

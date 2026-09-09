@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-A multi-provider gateway and auto-mode compatibility layer for Claude Code.
+A multi-provider gateway for Claude Code, with model routing, auto-mode extensions, and compatibility fixes.
 
 CC AutoMux runs on your computer, forwards Anthropic Messages requests, and provides a local web console for providers, model mappings, auto-mode compatibility settings, and logs. The console is embedded in the Go binary; it needs no separate frontend server or Node.js installation.
 
