@@ -102,3 +102,84 @@ type observedCloseBody struct {
 }
 
 func (b *observedCloseBody) Close() error { b.closed = true; return nil }
+
+func TestIdleTimeoutInterruptsWireAndBufferedResponse(t *testing.T) {
+	for _, buffered := range []bool{false, true} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"partial":`)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}))
+		item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", upstream.URL, "key", "m", false)
+		if buffered {
+			item.PatchPlan = normalResponsePatchPlan(t, fixedTestResponsePatch(func(patch.PatchContext, *patch.MutableResponse) error { return nil }))
+		}
+		snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}}
+		selector := &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(item, "m")}}
+		events := &eventCollector{}
+		h := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{Recorder: events, UpstreamLimits: UpstreamLimits{ResponseIdle: 25 * time.Millisecond}})
+		server := httptest.NewServer(h)
+		req, _ := http.NewRequest(http.MethodPost, server.URL+MessagesPath, strings.NewReader(`{"model":"m"}`))
+		req.Header.Set("Authorization", "Bearer gateway")
+		response, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		server.Close()
+		h.Close()
+		upstream.Close()
+		if buffered {
+			if response.StatusCode != 504 || !strings.Contains(string(data), "upstream_idle_timeout") || readErr != nil {
+				t.Fatalf("buffered = %d %s %v", response.StatusCode, data, readErr)
+			}
+		} else if response.StatusCode != 200 || string(data) != `{"partial":` || readErr == nil {
+			t.Fatalf("stream = %d %s %v", response.StatusCode, data, readErr)
+		}
+		_, reports := selector.snapshot()
+		if len(reports) != 1 || reports[0].Class != scheduler.FailureChannelImmediate || events.snapshot()[1].EndReason != "response_idle_timeout" {
+			t.Fatalf("reports = %#v events=%#v", reports, events.snapshot())
+		}
+	}
+}
+
+func TestFixedIdleTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	h := NewWithOptions(nil, &fakeSelector{}, Options{UpstreamLimits: UpstreamLimits{ResponseIdle: 20 * time.Millisecond}})
+	defer h.Close()
+	plan := fixedTestExecutionPlan(t, fixedTestTarget(t, upstream.URL, config.ProtocolAnthropicMessages, patch.Plan{}))
+	w := httptest.NewRecorder()
+	h.forwardFixedExecution(w, fixedTestIncoming(""), nil, plan)
+	if w.Code != 504 || h.FixedTargetDiagnostics().GatewayError != "upstream_idle_timeout" {
+		t.Fatalf("fixed = %d %#v", w.Code, h.FixedTargetDiagnostics())
+	}
+}
+
+func TestIdleTimeoutResetsOnEveryChunk(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 8; i++ {
+			_, _ = io.WriteString(w, "ping\n")
+			w.(http.Flusher).Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+	item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", upstream.URL, "key", "m", false)
+	snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}}
+	h := NewWithOptions(func() scheduler.Snapshot { return snapshot }, &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(item, "m")}}, Options{UpstreamLimits: UpstreamLimits{ResponseIdle: 50 * time.Millisecond}})
+	defer h.Close()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`))
+	if w.Code != 200 || w.Body.String() != strings.Repeat("ping\n", 8) {
+		t.Fatalf("response = %d %s", w.Code, w.Body.String())
+	}
+}

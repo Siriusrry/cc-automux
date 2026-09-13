@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -114,6 +115,10 @@ func (a *upstreamAttempt) receiveHeaders(response *http.Response, err error) (*h
 	stopped := a.stopped
 	if stopped == nil && err == nil && response != nil {
 		a.headersAt = time.Now()
+		if response.Body != nil {
+			a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+			response.Body = &attemptBodyReader{ReadCloser: response.Body, attempt: a}
+		}
 	}
 	a.mu.Unlock()
 	if stopped != nil {
@@ -159,4 +164,45 @@ func timeoutResponse(err error) (string, string, bool) {
 		return "upstream_idle_timeout", stop.message, true
 	}
 	return "", "", false
+}
+
+// attemptBodyReader resolves timeout/data races before exposing bytes to callers.
+type attemptBodyReader struct {
+	io.ReadCloser
+	attempt  *upstreamAttempt
+	once     sync.Once
+	closeErr error
+}
+
+func (b *attemptBodyReader) Read(p []byte) (int, error) {
+	a := b.attempt
+	a.mu.Lock()
+	stopped := a.stopped
+	a.mu.Unlock()
+	if stopped != nil {
+		return 0, stopped
+	}
+	n, err := b.ReadCloser.Read(p)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped != nil {
+		return 0, a.stopped
+	}
+	if n > 0 {
+		a.bytes += int64(n)
+		a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+	}
+	if err != nil {
+		a.stopTimerLocked()
+	}
+	return n, err
+}
+func (b *attemptBodyReader) Close() error {
+	b.once.Do(func() {
+		b.attempt.mu.Lock()
+		b.attempt.stopTimerLocked()
+		b.attempt.mu.Unlock()
+		b.closeErr = b.ReadCloser.Close()
+	})
+	return b.closeErr
 }

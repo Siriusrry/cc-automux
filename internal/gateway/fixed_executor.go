@@ -676,6 +676,10 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	responseCloseErr := response.Body.Close()
 	own(rawBody)
 	lifecycle.observeResponse(response.StatusCode, response.Header, rawBody)
+	if code, message, timeout := timeoutResponse(captureErr); timeout {
+		h.fixedTerminalForModelWithRaw(ctx, w, model, target, sessionID, upstream, http.StatusGatewayTimeout, code, message, captureErr, response.StatusCode, response.Header, "", "")
+		return
+	}
 	if captureErr != nil || responseCloseErr != nil {
 		cause := errors.Join(captureErr, responseCloseErr)
 		if requestCanceled(ctx) {

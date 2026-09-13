@@ -430,6 +430,14 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 				flusher.Flush()
 			}
 		}
+		if _, message, timeout := timeoutResponse(readErr); timeout {
+			value := outcome
+			value.Class = scheduler.FailureChannelImmediate
+			value.RawError = message
+			_ = closeBody()
+			report(EventFailure, value)
+			panic(http.ErrAbortHandler)
+		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				closeErr := closeBody()
@@ -460,10 +468,8 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 			value.Class = scheduler.FailureChannelStream
 			value.RawError = errors.Join(readErr, closeBody()).Error()
 			report(EventFailure, value)
-			// Headers and a prefix of the body may already be visible to the
-			// caller. Returning leaves that partial stream intact and prevents a
-			// retry that could duplicate side effects.
-			return
+			// Preserve an abnormal upstream ending on the downstream connection.
+			panic(http.ErrAbortHandler)
 		}
 	}
 }

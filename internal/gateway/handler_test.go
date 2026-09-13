@@ -1171,10 +1171,22 @@ func TestGatewayMidStreamFailureIsNotRetried(t *testing.T) {
 		return &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{firstItem, secondItem}}
 	}, selector, Options{Recorder: events})
 	defer handler.Close()
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`))
-	if response.Code != http.StatusOK || response.Body.String() != "data: first\n\n" {
-		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, _ := http.NewRequest(http.MethodPost, server.URL+MessagesPath, strings.NewReader(`{"model":"m"}`))
+	request.Header.Set("Authorization", "Bearer gateway")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr == nil {
+		t.Fatal("interrupted upstream ended normally")
+	}
+
+	if response.StatusCode != http.StatusOK || string(data) != "data: first\n\n" {
+		t.Fatalf("response = %d %q", response.StatusCode, string(data))
 	}
 	if secondCalls.Load() != 0 {
 		t.Fatal("gateway retried after response stream had started")

@@ -600,6 +600,17 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 	}
 	body, index, captureErr := bodyfile.CaptureAndScanCompiled(response.Body, spec, h.replayDirectory)
 	closeErr := closeResponse()
+	if code, message, timeout := timeoutResponse(captureErr); timeout {
+		if body != nil {
+			_ = body.Close()
+		}
+		_ = execution.Close()
+		report(EventFailure, scheduler.Outcome{Class: scheduler.FailureChannelImmediate, HTTPStatus: responseStatusCode, UpstreamURL: upstream, SessionID: sessionID, RawError: message})
+		if !requestCanceled(ctx) {
+			writeError(w, http.StatusGatewayTimeout, code, message)
+		}
+		return nil, true
+	}
 	if requestCanceled(ctx) {
 		bodyErr := error(nil)
 		if body != nil {
