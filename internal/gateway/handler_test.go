@@ -763,7 +763,7 @@ func TestGatewayCancellationAfterDoStopsBeforeResponseAndFailover(t *testing.T) 
 		t.Fatalf("reports = %#v", reports)
 	}
 	got := events.snapshot()
-	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventFailure || got[1].NextProviderID != "" {
+	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventCanceled || got[1].NextProviderID != "" {
 		t.Fatalf("events = %#v", got)
 	}
 }
@@ -790,7 +790,7 @@ func TestStreamResponseCancellationBeforeWriteHeaderReportsOnce(t *testing.T) {
 		t.Fatalf("reports = %#v", reports)
 	}
 	got := events.snapshot()
-	if len(got) != 1 || got[0].Kind != EventFailure {
+	if len(got) != 1 || got[0].Kind != EventCanceled {
 		t.Fatalf("events = %#v", got)
 	}
 }
@@ -837,7 +837,7 @@ func TestBufferedResponseCancellationAfterPatchStopsBeforeWriteHeader(t *testing
 		t.Fatalf("reports = %#v", reports)
 	}
 	got := events.snapshot()
-	if len(got) != 1 || got[0].Kind != EventFailure {
+	if len(got) != 1 || got[0].Kind != EventCanceled {
 		t.Fatalf("events = %#v", got)
 	}
 }
@@ -1442,3 +1442,40 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 }
 
 func (w *countingWriter) Flush() {}
+
+func TestCanceledEventPhasesAndDownstreamFailure(t *testing.T) {
+	item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", "https://provider.invalid", "key", "m", false)
+	h := NewWithOptions(nil, &fakeSelector{}, Options{})
+	defer h.Close()
+	for _, test := range []struct {
+		started bool
+		status  int
+		phase   string
+	}{
+		{false, 0, "before_upstream"}, {true, 0, "awaiting_response"}, {true, 200, "receiving_response"},
+	} {
+		event := h.outcomeEvent(EventFailure, requestAttemptLease{AttemptLease: leaseFor(item, "m"), stream: true, started: test.started}, scheduler.Outcome{Class: scheduler.FailureClientCanceled, HTTPStatus: test.status, UpstreamURL: "https://provider.invalid/v1/messages", RawError: "context canceled"}, 1, scheduler.HealthUpdate{})
+		if event.Kind != EventCanceled || event.CancelPhase != test.phase || event.CancelReason != "client_canceled" || event.RawError != "" || !event.Stream || event.ResponseStarted {
+			t.Fatalf("event = %#v", event)
+		}
+		if !test.started && event.UpstreamURL != "" {
+			t.Fatalf("unstarted URL: %#v", event)
+		}
+	}
+	events := &eventCollector{}
+	h.recorder = events
+	w := &failedDownstreamWriter{header: make(http.Header)}
+	h.streamResponse(w, context.Background(), &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data"))}, requestAttemptLease{AttemptLease: leaseFor(item, "m"), stream: true, started: true}, scheduler.Outcome{HTTPStatus: 200}, 1)
+	event := events.snapshot()[0]
+	if event.Kind != EventCanceled || event.CancelReason != "client_disconnected" || event.CancelPhase != "receiving_response" || !event.ResponseStarted || event.RawError != "client write failed" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+type failedDownstreamWriter struct{ header http.Header }
+
+func (w *failedDownstreamWriter) Header() http.Header { return w.header }
+func (w *failedDownstreamWriter) WriteHeader(int)     {}
+func (w *failedDownstreamWriter) Write([]byte) (int, error) {
+	return 0, errors.New("client write failed")
+}

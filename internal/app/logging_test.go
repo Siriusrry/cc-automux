@@ -547,3 +547,23 @@ func (w *toggleWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+func TestCanceledLogFieldsAndLevel(t *testing.T) {
+	var output bytes.Buffer
+	logs, err := openLogger(appLogOpenerFor(&output), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	for _, reason := range []string{"client_canceled", "client_disconnected"} {
+		(&App{logs: logs}).recordGatewayEvent(gateway.Event{Kind: gateway.EventCanceled, CancelReason: reason, CancelPhase: "receiving_response", ResponseStarted: true, Stream: false, RawError: "write error"})
+	}
+	for i, record := range decodeLogLines(t, output.Bytes()) {
+		if record["level"] != "INFO" || record["kind"] != "canceled" || record["response_started"] != true || record["stream"] != false || record["cancel_phase"] != "receiving_response" {
+			t.Fatalf("record = %#v", record)
+		}
+		if i == 0 && record["raw_error"] != nil || i == 1 && record["raw_error"] != "write error" {
+			t.Fatalf("raw_error = %#v", record)
+		}
+	}
+}

@@ -27,6 +27,8 @@ var stringFilterNames = map[string]struct{}{
 	"session_id":    {},
 	"patch_id":      {},
 	"error_code":    {},
+	"cancel_reason": {},
+	"cancel_phase":  {},
 }
 
 var boolFilterNames = map[string]struct{}{

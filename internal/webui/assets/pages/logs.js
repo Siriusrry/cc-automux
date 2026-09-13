@@ -12,6 +12,7 @@
     forward: 'Forwarded — the request was sent to this provider.',
     success: "Success — the upstream answered and the provider's health channel was marked healthy.",
     failure: 'Failure — the request could not be completed. Expand the record for details.',
+    canceled: 'Canceled — Claude Code canceled or disconnected before the upstream call finished. Not a provider failure.',
     failover: 'Failover — after this failure the request moved on to the next provider.'
   };
   const EVENT_TIP = {
@@ -34,7 +35,7 @@
   const PAGE = 200;
   const BUFFER_MAX = 2000;
   const LEVELS = ['INFO', 'WARN', 'ERROR'];
-  const KINDS = ['forward', 'success', 'failure', 'failover'];
+  const KINDS = ['forward', 'success', 'failure', 'failover', 'canceled'];
   const EVENTS = ['listening', 'pending_rejected', 'restart_failed'];
   const KNOWN = ['time', 'level', 'msg', 'seq', 'kind', 'event', 'truncated', 'ref'];
 

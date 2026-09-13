@@ -308,7 +308,8 @@ func (h *Handler) fixedDiagnosticScope(snapshot scheduler.Snapshot, target *prov
 // requestAttemptLease keeps request facts outside the scheduler and health state.
 type requestAttemptLease struct {
 	scheduler.AttemptLease
-	stream bool
+	stream  bool
+	started bool
 }
 
 type capturedFailure struct {
@@ -408,13 +409,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 				writeErr = io.ErrShortWrite
 			}
 			if writeErr != nil {
-				if requestCanceled(ctx) {
-					cancel(writeErr)
-					return
-				}
 				value := outcome
 				value.Class = scheduler.FailureDownstream
-				value.RawError = errors.Join(writeErr, closeBody()).Error()
+				value.RawError = writeErr.Error()
+				_ = closeBody()
 				report(EventFailure, value)
 				return
 			}
@@ -527,6 +525,21 @@ func (h *Handler) outcomeEvent(kind EventKind, lease requestAttemptLease, outcom
 		ChannelEnteredCooldown: update.ChannelEnteredCooldown,
 		CooldownUntil:          update.CooldownUntil,
 	}
+	if outcome.Class == scheduler.FailureClientCanceled || outcome.Class == scheduler.FailureDownstream {
+		event.Kind = EventCanceled
+		event.ResponseStarted = outcome.ResponseStarted
+		event.CancelReason = "client_canceled"
+		event.RawError = ""
+		if outcome.Class == scheduler.FailureDownstream {
+			event.CancelReason = "client_disconnected"
+			event.RawError = outcome.RawError
+		}
+		event.CancelPhase = cancelPhase(lease.started, outcome.HTTPStatus)
+		if !lease.started {
+			event.UpstreamURL = ""
+		}
+		event.GlobalEnteredCooldown, event.ChannelEnteredCooldown, event.CooldownUntil = false, false, nil
+	}
 	if item != nil {
 		event.ProviderID = item.ID
 		event.ProviderName = item.Name
@@ -585,7 +598,7 @@ func responseStatus(response *http.Response) int {
 // normal or classifier pool attempt.  Cancellation is deliberately kept
 // outside the Provider health failure classes, but the lease still must be
 // reported so a half-open probe is released and the event stream has one
-// matching failure.  The helper never writes a client response.
+// matching cancellation. The helper never writes a client response.
 func (h *Handler) reportClientCanceledWithAttempt(lease requestAttemptLease, sessionID, upstream string, status, attempt int, cause error) {
 	h.reportClientCanceledState(lease, sessionID, upstream, status, attempt, false, cause)
 }
@@ -601,7 +614,7 @@ func (h *Handler) reportClientCanceledState(lease requestAttemptLease, sessionID
 		Class:           scheduler.FailureClientCanceled,
 		HTTPStatus:      status,
 		UpstreamURL:     upstream,
-		RawError:        cause.Error(),
+		RawError:        "",
 		SessionID:       sessionID,
 		ResponseStarted: responseStarted,
 		ClientCanceled:  true,

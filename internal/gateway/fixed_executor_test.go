@@ -640,7 +640,7 @@ func TestFixedExecutionSuccessDistinguishesGatewayAndUpstreamStatus(t *testing.T
 	}
 }
 
-func TestFixedExecutionCancellationAfterPatchedStatusPreservesWrittenGatewayStatus(t *testing.T) {
+func TestFixedExecutionCancellationAfterPatchedStatusRecordsCanceled(t *testing.T) {
 	plan := fixedTestPatchPlan(t, nil, fixedTestResponsePatch(func(_ patch.PatchContext, response *patch.MutableResponse) error {
 		response.Status = http.StatusAccepted
 		return nil
@@ -677,11 +677,11 @@ func TestFixedExecutionCancellationAfterPatchedStatusPreservesWrittenGatewayStat
 		t.Fatalf("written response status=%d headers=%d writes=%d", response.status, response.headerCalls, response.writeCalls)
 	}
 	call := diagnostics.Snapshot()
-	if call == nil || call.GatewayStatus != http.StatusAccepted || call.UpstreamStatus != http.StatusCreated || call.GatewayError != "client_canceled" {
+	if call == nil || call.GatewayStatus != 0 || call.UpstreamStatus != http.StatusCreated || call.GatewayError != "client_canceled" {
 		t.Fatalf("diagnostics = %#v", call)
 	}
 	gotEvents := events.snapshot()
-	if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventFailure {
+	if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventCanceled || !gotEvents[1].ResponseStarted || gotEvents[1].CancelPhase != "receiving_response" || gotEvents[1].CancelReason != "client_canceled" || gotEvents[1].RawError != "" {
 		t.Fatalf("events = %#v", gotEvents)
 	}
 }
@@ -736,7 +736,7 @@ func TestFixedExecutionCancellationDuringResponsePatchWinsAndCleansBodies(t *tes
 		t.Fatalf("replacement body lifecycle = opens:%d reader_closes:%d closes:%d", opens, readerCloses, closes)
 	}
 	gotEvents := events.snapshot()
-	if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventFailure {
+	if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventCanceled {
 		t.Fatalf("events = %#v", gotEvents)
 	}
 }

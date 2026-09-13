@@ -14,6 +14,7 @@ const (
 	EventFailover EventKind = "failover"
 	EventSuccess  EventKind = "success"
 	EventFailure  EventKind = "failure"
+	EventCanceled EventKind = "canceled"
 )
 
 const ErrorCodeModelNotConfigured = "model_not_configured"
@@ -32,6 +33,9 @@ type Event struct {
 	Model                  string
 	RequestType            traffic.RequestType
 	Stream                 bool
+	ResponseStarted        bool
+	CancelReason           string
+	CancelPhase            string
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int

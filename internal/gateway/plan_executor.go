@@ -396,6 +396,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	if requestCanceled(ctx) {
 		return cancelAttempt(mutable.Body, requestBody, nil)
 	}
+	lease.started = true
 	h.record(Event{Kind: EventForward, Stream: prepared.Plan.Stream, ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
 	response, requestErr := clientLease.Client().Do(request)
 	requestCloseErr := requestBody.Close()
@@ -706,9 +707,14 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 		_ = closeResponseBodies(body, mutable.Body)
 		return nil, true
 	}
-	_, copyErr := io.Copy(w, reader)
+	writer := &downstreamWriter{Writer: w}
+	_, copyErr := io.Copy(writer, reader)
 	readerCloseErr := closeReader()
 	bodyCloseErr := closeResponseBodies(body, mutable.Body)
+	if writer.err != nil {
+		report(EventCanceled, scheduler.Outcome{Class: scheduler.FailureDownstream, HTTPStatus: responseStatusCode, UpstreamURL: upstream, SessionID: sessionID, ResponseStarted: true, RawError: writer.err.Error()})
+		return nil, true
+	}
 	if requestCanceled(ctx) {
 		cancel(errors.Join(copyErr, readerCloseErr, bodyCloseErr), responseStarted)
 		return nil, true
