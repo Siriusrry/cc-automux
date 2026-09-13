@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Siriusrry/cc-automux/internal/automode"
+	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
 	"github.com/Siriusrry/cc-automux/internal/patch"
@@ -105,5 +106,18 @@ func TestClassifierAndUnconfiguredModelStream(t *testing.T) {
 		if fixed && response.Code != 429 {
 			t.Fatalf("fixed response = %d %s", response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestRequestStreamDoesNotOpenBody(t *testing.T) {
+	snapshot := &fakeSnapshot{}
+	body, index, err := bodyfile.CaptureAndScanCompiled(strings.NewReader(`{"model":"m","stream":false,"stream":true}`), snapshot.RequestScanSpec(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.Close()
+	// The sealed body is already closed; opening it would fail.
+	if !requestStream(index) {
+		t.Fatal("stream fact was not retained in the index")
 	}
 }

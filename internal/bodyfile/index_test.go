@@ -192,3 +192,19 @@ func mustCapture(t *testing.T, data []byte) Body {
 	}
 	return body
 }
+
+func TestFieldBoolValueUsesValidatedLiteralShape(t *testing.T) {
+	for _, test := range []struct {
+		kind      JSONValueType
+		length    int64
+		value, ok bool
+	}{
+		{JSONBool, 4, true, true}, {JSONBool, 5, false, true}, {JSONString, 4, false, false}, {JSONNull, 4, false, false}, {JSONBool, 0, false, false},
+	} {
+		field := Field{Type: test.kind, ValueRange: ByteRange{Start: 123, End: 123 + test.length}}
+		value, ok := field.BoolValue()
+		if value != test.value || ok != test.ok {
+			t.Fatalf("BoolValue(%#v) = %v, %v", field, value, ok)
+		}
+	}
+}

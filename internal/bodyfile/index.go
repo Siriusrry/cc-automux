@@ -66,6 +66,23 @@ type Field struct {
 	Depth int
 }
 
+// BoolValue returns a boolean from its validated literal's type and length.
+// The scanner validates every literal byte, so true has length 4 and false 5;
+// callers must use scanner-produced fields rather than unvalidated ranges.
+func (f Field) BoolValue() (value, ok bool) {
+	if f.Type != JSONBool {
+		return false, false
+	}
+	switch f.ValueRange.Len() {
+	case 4:
+		return true, true
+	case 5:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // ContainerInfo retains aggregate boundaries for a selected object/array. It
 // intentionally does not retain unrelated child Field records.
 type ContainerInfo struct {

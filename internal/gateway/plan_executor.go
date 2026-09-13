@@ -62,10 +62,7 @@ func capturedFlowView(runtimeSnapshot, capturedSnapshot scheduler.Snapshot, norm
 func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, request *http.Request) (traffic.IngressRequest, error) {
 	model := index.ModelValue()
 	session := singleSessionHeader(request.Header)
-	stream, err := requestStream(body, index)
-	if err != nil {
-		return traffic.IngressRequest{}, err
-	}
+	stream := requestStream(index)
 	detection := traffic.NewDetectionRequest(body, index, model, session, traffic.NewHeaderView(request.Header))
 	detection.Stream = stream
 	if h.detectors == nil {
