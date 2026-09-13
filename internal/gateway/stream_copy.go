@@ -3,9 +3,10 @@ package gateway
 import (
 	"context"
 	"errors"
-	"github.com/Siriusrry/cc-automux/internal/scheduler"
 	"io"
 	"net/http"
+
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 type streamCopyResult struct {

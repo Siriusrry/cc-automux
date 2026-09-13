@@ -558,6 +558,9 @@ func (h *Handler) reportClientCanceledState(lease requestAttemptLease, sessionID
 		ClientCanceled:  true,
 	}
 	update, _ := h.selector.Report(lease.AttemptLease, outcome)
+	// A cancellation before this request's first forward is not an event:
+	// nothing has been sent upstream.  Attempt numbers above one only exist
+	// after attempt one reached Do, so they always follow a forward.
 	if lease.started || attempt > 1 {
 		h.recordOutcome(EventCanceled, lease, outcome, attempt, update)
 	}

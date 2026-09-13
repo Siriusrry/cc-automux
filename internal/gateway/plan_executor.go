@@ -204,11 +204,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			if last != nil {
 				h.recordCapturedFailure(last)
 			}
-			if last == nil && attempt == 1 {
-				h.selector.Report(lease.AttemptLease, scheduler.Outcome{Class: scheduler.FailureClientCanceled})
-			} else {
-				h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
-			}
+			h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
 			return
 		}
 		if _, duplicate := excluded[lease.Provider.ID]; duplicate {

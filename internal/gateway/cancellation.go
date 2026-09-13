@@ -1,8 +1,9 @@
 package gateway
 
 import (
-	"github.com/Siriusrry/cc-automux/internal/traffic"
 	"io"
+
+	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
 func cancelPhase(started bool, status int) cancellationPhase {
