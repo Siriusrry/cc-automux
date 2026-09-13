@@ -33,6 +33,7 @@ type Record struct {
 	Seq        uint64
 	Raw        json.RawMessage
 	stringData map[string]string
+	boolData   map[string]bool
 	status     int
 	hasStatus  bool
 }
@@ -79,6 +80,7 @@ func ParseRecord(line []byte) (Record, error) {
 		Seq:        seq,
 		Raw:        append(json.RawMessage(nil), line...),
 		stringData: make(map[string]string),
+		boolData:   make(map[string]bool),
 	}
 	for name := range stringFilterNames {
 		value, ok := fields[name]
@@ -90,6 +92,17 @@ func ParseRecord(line []byte) (Record, error) {
 			return Record{}, fmt.Errorf("log %s is invalid", name)
 		}
 		record.stringData[name] = decoded
+	}
+	for name := range boolFilterNames {
+		value, ok := fields[name]
+		if !ok {
+			continue
+		}
+		var decoded bool
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) || json.Unmarshal(value, &decoded) != nil {
+			return Record{}, fmt.Errorf("log %s is invalid", name)
+		}
+		record.boolData[name] = decoded
 	}
 	if value, ok := fields["http_status"]; ok {
 		if err := json.Unmarshal(value, &record.status); err != nil {

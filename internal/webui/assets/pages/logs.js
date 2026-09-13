@@ -169,6 +169,7 @@
           if (r.provider_name) parts.push(h('span', { class: 'p' }, r.provider_name));
           if (r.model) parts.push(h('span', { class: 'm' }, r.model));
           if (r.request_type) parts.push(h('span', { class: 'rt ' + r.request_type, 'data-tip': RT_TIP[r.request_type] || '' }, r.request_type));
+          if (typeof r.stream === 'boolean') parts.push(h('span', { class: 'rt' }, r.stream ? 'stream' : 'non-stream'));
           if (r.http_status) parts.push(h('span', { class: 'hs' + (r.http_status >= 400 ? ' bad' : '') }, 'HTTP ' + r.http_status));
           if (r.attempt) parts.push(h('span', { class: 'm' }, 'attempt ' + r.attempt));
           if (r.kind === 'failover' && r.next_provider_name) parts.push(h('span', { class: 'arrow' }, '→ ' + r.next_provider_name + ' (attempt ' + r.next_attempt + ')'));

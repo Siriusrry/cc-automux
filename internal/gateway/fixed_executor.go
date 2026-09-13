@@ -29,7 +29,8 @@ type fixedDiagnosticContextKey struct{}
 // terminal outcome after EventForward; the lifecycle also lets that outcome
 // include cleanup errors before a response is made visible.
 type fixedLifecycle struct {
-	mu sync.Mutex
+	stream bool
+	mu     sync.Mutex
 
 	started         bool
 	responseStarted bool
@@ -359,7 +360,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		execution = nil
 		return current.Close()
 	}
-	lifecycle := &fixedLifecycle{}
+	lifecycle := &fixedLifecycle{stream: prepared.Plan.Stream}
 	upstream := ""
 	lifecycle.cleanup = func() error {
 		patchErr := closeExecution()
@@ -601,7 +602,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 	lifecycle.markStarted()
-	h.recordFixedEvent(EventForward, target, sessionID, model, upstream, 1, 0, "")
+	h.recordFixedEvent(ctx, EventForward, target, sessionID, model, upstream, 1, 0, "")
 	response, requestErr := clientLease.Client().Do(request)
 	requestCloseErr := lifecycle.closeRequestBody()
 	if requestErr != nil {
@@ -1137,7 +1138,7 @@ func (h *Handler) fixedTerminalForModelWithRaw(ctx context.Context, w http.Respo
 		Error:           errText,
 	}
 	h.recordFixedCall(ctx, target, call)
-	h.recordFixedEvent(EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, errText)
+	h.recordFixedEvent(ctx, EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, errText)
 	if status > 0 && w != nil && (lifecycle == nil || !lifecycle.hasResponseStarted()) && !requestCanceled(ctx) {
 		if code == "upstream_error" && upstreamStatus == status {
 			copyResponseHeaders(w.Header(), upstreamHeaders)
@@ -1195,7 +1196,7 @@ func (h *Handler) fixedTerminalAfterWriteWithFacts(ctx context.Context, target *
 	}
 	call := automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: gatewayStatus, GatewayError: code, UpstreamStatus: upstreamStatus, UpstreamHeaders: cloneOrEmptyHeaders(upstreamHeaders), UpstreamBody: upstreamBody, SessionID: sessionID, Error: errText}
 	h.recordFixedCall(ctx, target, call)
-	h.recordFixedEvent(EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, errText)
+	h.recordFixedEvent(ctx, EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, errText)
 }
 
 func (h *Handler) fixedSuccess(ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status, upstreamStatus int) {
@@ -1229,11 +1230,11 @@ func (h *Handler) fixedSuccess(ctx context.Context, target *provider.CompiledFix
 		}
 		call := automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: gatewayStatus, GatewayError: code, UpstreamStatus: upstreamStatus, SessionID: sessionID, Error: cleanupErr.Error()}
 		h.recordFixedCall(ctx, target, call)
-		h.recordFixedEvent(EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, cleanupErr.Error())
+		h.recordFixedEvent(ctx, EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, cleanupErr.Error())
 		return
 	}
 	h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: status, UpstreamStatus: upstreamStatus, SessionID: sessionID})
-	h.recordFixedEvent(EventSuccess, target, sessionID, model, upstream, 1, upstreamStatus, "")
+	h.recordFixedEvent(ctx, EventSuccess, target, sessionID, model, upstream, 1, upstreamStatus, "")
 }
 
 func (h *Handler) fixedCanceledWithFacts(ctx context.Context, target *provider.CompiledFixedTarget, model, sessionID, upstream string, upstreamStatus int, upstreamHeaders http.Header, upstreamBody string, cause error) {
@@ -1258,7 +1259,7 @@ func (h *Handler) fixedCanceledWithFacts(ctx context.Context, target *provider.C
 		}
 	}
 	h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: gatewayStatus, GatewayError: "client_canceled", UpstreamStatus: upstreamStatus, UpstreamHeaders: cloneOrEmptyHeaders(upstreamHeaders), UpstreamBody: upstreamBody, SessionID: sessionID, Error: errText})
-	h.recordFixedEvent(EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, errText)
+	h.recordFixedEvent(ctx, EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, errText)
 }
 
 func (h *Handler) recordFixedCall(ctx context.Context, target *provider.CompiledFixedTarget, call automode.FixedTargetCall) {
@@ -1278,8 +1279,12 @@ func (h *Handler) recordFixedCall(ctx context.Context, target *provider.Compiled
 	h.fixedDiagnostics.Record(call)
 }
 
-func (h *Handler) recordFixedEvent(kind EventKind, target *provider.CompiledFixedTarget, sessionID, model, upstream string, attempt, status int, raw string) {
-	event := Event{Kind: kind, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
+func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *provider.CompiledFixedTarget, sessionID, model, upstream string, attempt, status int, raw string) {
+	stream := false
+	if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+		stream = lifecycle.stream
+	}
+	event := Event{Kind: kind, Stream: stream, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
 	if target != nil {
 		event.ProviderID = target.ID
 	}

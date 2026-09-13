@@ -35,6 +35,7 @@ func (p *NormalPlanner) Build(_ context.Context, snapshot SnapshotView, ingress 
 		EffectiveModel:    ingress.OriginalModel,
 		OriginalSessionID: ingress.OriginalSessionID,
 		RequestType:       ingress.RequestType,
+		Stream:            ingress.Stream,
 	}, ingress.CapturedBody, ingress.CapturedIndex)
 	if err != nil {
 		return ExecutionPlan{}, err

@@ -357,6 +357,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		slog.String("kind", string(event.Kind)),
 		slog.String("model", event.Model),
 		slog.String("request_type", string(event.RequestType)),
+		slog.Bool("stream", event.Stream),
 	}
 	if event.Attempt > 0 {
 		attrs = append(attrs, slog.Int("attempt", event.Attempt))

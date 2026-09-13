@@ -305,8 +305,14 @@ func (h *Handler) fixedDiagnosticScope(snapshot scheduler.Snapshot, target *prov
 	return scope, bound
 }
 
+// requestAttemptLease keeps request facts outside the scheduler and health state.
+type requestAttemptLease struct {
+	scheduler.AttemptLease
+	stream bool
+}
+
 type capturedFailure struct {
-	lease        scheduler.AttemptLease
+	lease        requestAttemptLease
 	outcome      scheduler.Outcome
 	update       scheduler.HealthUpdate
 	attempt      int
@@ -318,7 +324,7 @@ type capturedFailure struct {
 	patchStage   string
 }
 
-func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, response *http.Response, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int) {
+func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, response *http.Response, lease requestAttemptLease, outcome scheduler.Outcome, attempt int) {
 	// A response body is owned by this function from the moment it is passed in.
 	// Close it exactly once on every path, including cancellation, while keeping
 	// the health lease's terminal report exactly once.
@@ -330,7 +336,7 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 		outcome.Class = scheduler.FailureNeutral
 		outcome.RawError = "provider returned no response body"
 		if h != nil && h.selector != nil {
-			update := h.selector.Report(lease, outcome)
+			update := h.selector.Report(lease.AttemptLease, outcome)
 			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 		}
 		return
@@ -348,7 +354,7 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 		if h == nil || h.selector == nil {
 			return
 		}
-		update := h.selector.Report(lease, value)
+		update := h.selector.Report(lease.AttemptLease, value)
 		h.recordOutcome(kind, lease, value, attempt, update)
 	}
 	cancel := func(cause error) {
@@ -492,21 +498,22 @@ func (h *Handler) record(event Event) {
 	}
 }
 
-func (h *Handler) recordOutcome(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) {
+func (h *Handler) recordOutcome(kind EventKind, lease requestAttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) {
 	h.record(h.outcomeEvent(kind, lease, outcome, attempt, update))
 }
 
-func (h *Handler) recordOutcomeWithPatch(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate, patchID string, stage patch.Stage) {
+func (h *Handler) recordOutcomeWithPatch(kind EventKind, lease requestAttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate, patchID string, stage patch.Stage) {
 	event := h.outcomeEvent(kind, lease, outcome, attempt, update)
 	event.PatchID = patchID
 	event.PatchStage = string(stage)
 	h.record(event)
 }
 
-func (h *Handler) outcomeEvent(kind EventKind, lease scheduler.AttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) Event {
+func (h *Handler) outcomeEvent(kind EventKind, lease requestAttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) Event {
 	item := lease.Provider
 	event := Event{
 		Kind:                   kind,
+		Stream:                 lease.stream,
 		SessionID:              outcome.SessionID,
 		Model:                  lease.Model,
 		RequestType:            lease.RequestType,
@@ -537,7 +544,7 @@ func (h *Handler) recordCapturedFailure(failure *capturedFailure) {
 	h.record(event)
 }
 
-func (h *Handler) recordFailover(failure *capturedFailure, next scheduler.AttemptLease, nextAttempt int, incoming *http.Request) {
+func (h *Handler) recordFailover(failure *capturedFailure, next requestAttemptLease, nextAttempt int, incoming *http.Request) {
 	if failure == nil || next.Provider == nil {
 		return
 	}
@@ -579,11 +586,11 @@ func responseStatus(response *http.Response) int {
 // outside the Provider health failure classes, but the lease still must be
 // reported so a half-open probe is released and the event stream has one
 // matching failure.  The helper never writes a client response.
-func (h *Handler) reportClientCanceledWithAttempt(lease scheduler.AttemptLease, sessionID, upstream string, status, attempt int, cause error) {
+func (h *Handler) reportClientCanceledWithAttempt(lease requestAttemptLease, sessionID, upstream string, status, attempt int, cause error) {
 	h.reportClientCanceledState(lease, sessionID, upstream, status, attempt, false, cause)
 }
 
-func (h *Handler) reportClientCanceledState(lease scheduler.AttemptLease, sessionID, upstream string, status, attempt int, responseStarted bool, cause error) {
+func (h *Handler) reportClientCanceledState(lease requestAttemptLease, sessionID, upstream string, status, attempt int, responseStarted bool, cause error) {
 	if h == nil || h.selector == nil {
 		return
 	}
@@ -599,7 +606,7 @@ func (h *Handler) reportClientCanceledState(lease scheduler.AttemptLease, sessio
 		ResponseStarted: responseStarted,
 		ClientCanceled:  true,
 	}
-	update := h.selector.Report(lease, outcome)
+	update := h.selector.Report(lease.AttemptLease, outcome)
 	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 }
 

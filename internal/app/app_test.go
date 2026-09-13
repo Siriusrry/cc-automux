@@ -602,7 +602,7 @@ func TestAppLogsUnconfiguredModelBeforeProviderSelection(t *testing.T) {
 			requestType := "normal"
 			if test.classifier {
 				cfg.AutoMode = config.AutoModeConfig{Mode: config.AutoModeProviderPool, Model: "missing-model"}
-				body = `{"model":"client-model","system":[{"text":"` + automode.SecurityMarker + `"}]}`
+				body = `{"model":"client-model","stream":true,"system":[{"text":"` + automode.SecurityMarker + `"}]}`
 				requestType = "classifier"
 			}
 			writeAppConfig(t, path, cfg)
@@ -643,7 +643,7 @@ func TestAppLogsUnconfiguredModelBeforeProviderSelection(t *testing.T) {
 				t.Fatalf("warning history = %d %s, err = %v", history.Code, history.Body.String(), err)
 			}
 			record := page.Items[0]
-			if record["msg"] != "gateway" || record["model"] != "missing-model" || record["request_type"] != requestType ||
+			if record["stream"] != test.classifier || record["msg"] != "gateway" || record["model"] != "missing-model" || record["request_type"] != requestType ||
 				record["http_status"] != float64(404) || record["raw_error"] != "Requested model is not configured in any enabled provider." {
 				t.Fatalf("warning = %#v", record)
 			}

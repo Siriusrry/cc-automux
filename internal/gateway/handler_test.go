@@ -71,7 +71,7 @@ func (s *fakeSnapshot) RequestScanSpec() *bodyfile.CompiledScanSpec {
 		return nil
 	}
 	s.scanOnce.Do(func() {
-		paths := append([]string(nil), s.scanPaths...)
+		paths := append([]string{"/stream"}, s.scanPaths...)
 		for _, item := range s.providers {
 			if item == nil || !item.Enabled || len(item.Models) == 0 {
 				continue
@@ -780,7 +780,7 @@ func TestStreamResponseCancellationBeforeWriteHeaderReportsOnce(t *testing.T) {
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"X-Test": []string{"value"}},
 		Body:       io.NopCloser(strings.NewReader("body")),
-	}, leaseFor(item, "m"), scheduler.Outcome{Class: scheduler.FailureNone, UpstreamURL: "https://one.invalid/v1/messages", SessionID: "session"}, 1)
+	}, requestAttemptLease{AttemptLease: leaseFor(item, "m")}, scheduler.Outcome{Class: scheduler.FailureNone, UpstreamURL: "https://one.invalid/v1/messages", SessionID: "session"}, 1)
 
 	_, reports := selector.snapshot()
 	if w.headerCalls != 0 || w.writeCalls != 0 {
@@ -823,7 +823,7 @@ func TestBufferedResponseCancellationAfterPatchStopsBeforeWriteHeader(t *testing
 	if !ok {
 		t.Fatal("compiled response scan missing")
 	}
-	handler.executeBufferedResponse(w, request, leaseFor(item, "m"), "session", 1, &http.Response{
+	handler.executeBufferedResponse(w, request, requestAttemptLease{AttemptLease: leaseFor(item, "m")}, "session", 1, &http.Response{
 		StatusCode: http.StatusCreated,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),

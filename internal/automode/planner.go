@@ -91,6 +91,7 @@ func (p *ClassifierPlanner) Build(ctx context.Context, snapshot flow.SnapshotVie
 		_ = base.Close()
 		return flow.ExecutionPlan{}, fmt.Errorf("%w: %w", ErrInvalidClassifierPlan, err)
 	}
+	planFacts.Stream = ingress.Stream
 	prepared, err := traffic.NewPreparedRequest(planFacts, base, index)
 	if err != nil {
 		_ = base.Close()

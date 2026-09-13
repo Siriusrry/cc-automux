@@ -31,6 +31,7 @@ type Event struct {
 	SessionID              string
 	Model                  string
 	RequestType            traffic.RequestType
+	Stream                 bool
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int

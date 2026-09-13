@@ -31,7 +31,7 @@ func NewScanRequirements(detectorPaths, rawMarkers []string) (ScanRequirements, 
 }
 
 func compileRequestScan(catalog *provider.Catalog, auto CompiledAutoMode, requirements ScanRequirements) (*bodyfile.CompiledScanSpec, error) {
-	paths := append([]string(nil), requirements.detectorPaths...)
+	paths := appendUniqueScanPaths(append([]string(nil), requirements.detectorPaths...), "/stream")
 	providers := catalog.Providers()
 	for _, item := range providers {
 		if item == nil || !item.Enabled || len(item.Models) == 0 {

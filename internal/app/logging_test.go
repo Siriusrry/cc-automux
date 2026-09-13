@@ -98,6 +98,7 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 	}
 	forward := base
 	forward.Kind = gateway.EventForward
+	forward.Stream = true
 	forward.HTTPStatus = 999
 	forward.RawError = "must-not-appear"
 	application.recordGatewayEvent(forward)
@@ -147,7 +148,10 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 	if records[3]["level"] != "ERROR" || records[3]["next_provider_id"] != "next-id" || records[3]["next_attempt"] != float64(2) {
 		t.Fatalf("failover record = %#v", records[3])
 	}
-	for _, record := range records {
+	for i, record := range records {
+		if record["stream"] != (i == 0) {
+			t.Fatalf("stream missing or invalid: %#v", record)
+		}
 		if record["msg"] != "gateway" || record["event"] != nil {
 			t.Fatalf("gateway discriminator = %#v", record)
 		}

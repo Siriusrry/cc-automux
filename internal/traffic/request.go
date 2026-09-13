@@ -120,6 +120,7 @@ type DetectionRequest struct {
 	CapturedIndex     bodyfile.JSONIndex
 	OriginalModel     string
 	OriginalSessionID string
+	Stream            bool
 	Headers           HeaderView
 }
 
@@ -129,6 +130,7 @@ type RequestView struct {
 	Index             bodyfile.JSONIndex
 	OriginalModel     string
 	OriginalSessionID string
+	Stream            bool
 	Headers           HeaderView
 }
 
@@ -140,6 +142,7 @@ func (d DetectionRequest) View() RequestView {
 		Index:             d.CapturedIndex,
 		OriginalModel:     d.OriginalModel,
 		OriginalSessionID: d.OriginalSessionID,
+		Stream:            d.Stream,
 		Headers:           normalizeHeaders(d.Headers),
 	}
 }
@@ -162,6 +165,7 @@ func NewDetectionRequestFromView(view RequestView) DetectionRequest {
 		CapturedIndex:     view.Index,
 		OriginalModel:     view.OriginalModel,
 		OriginalSessionID: view.OriginalSessionID,
+		Stream:            view.Stream,
 		Headers:           normalizeHeaders(view.Headers),
 	}
 }
@@ -172,6 +176,7 @@ type IngressRequest struct {
 	CapturedIndex     bodyfile.JSONIndex
 	OriginalModel     string
 	OriginalSessionID string
+	Stream            bool
 	RequestType       RequestType
 }
 
@@ -191,6 +196,7 @@ func NewIngressRequest(d DetectionRequest, requestType RequestType) (IngressRequ
 		CapturedIndex:     d.CapturedIndex,
 		OriginalModel:     d.OriginalModel,
 		OriginalSessionID: d.OriginalSessionID,
+		Stream:            d.Stream,
 		RequestType:       requestType,
 	}, nil
 }
@@ -217,6 +223,7 @@ type RequestPlan struct {
 	OriginalModel     string
 	EffectiveModel    string
 	OriginalSessionID string
+	Stream            bool
 	RequestType       RequestType
 }
 

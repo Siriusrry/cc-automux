@@ -29,6 +29,10 @@ var stringFilterNames = map[string]struct{}{
 	"error_code":    {},
 }
 
+var boolFilterNames = map[string]struct{}{
+	"stream": {},
+}
+
 type ValidationError struct {
 	Field   string
 	Message string
@@ -99,6 +103,7 @@ func decodePosition(value, field string) (Cursor, error) {
 type Filter struct {
 	strings  map[string]map[string]struct{}
 	statuses map[int]struct{}
+	booleans map[string]map[bool]struct{}
 	since    *time.Time
 	until    *time.Time
 }
@@ -112,6 +117,15 @@ func (f Filter) Match(record Record) bool {
 	}
 	for name, allowed := range f.strings {
 		value, ok := record.stringData[name]
+		if !ok {
+			return false
+		}
+		if _, ok := allowed[value]; !ok {
+			return false
+		}
+	}
+	for name, allowed := range f.booleans {
+		value, ok := record.boolData[name]
 		if !ok {
 			return false
 		}
@@ -147,6 +161,7 @@ func ParseParameters(values url.Values, options ParseOptions) (Parameters, error
 		Filter: Filter{
 			strings:  make(map[string]map[string]struct{}),
 			statuses: make(map[int]struct{}),
+			booleans: make(map[string]map[bool]struct{}),
 		},
 		Limit: DefaultLimit,
 	}
@@ -166,6 +181,15 @@ func ParseParameters(values url.Values, options ParseOptions) (Parameters, error
 				allowed[entry] = struct{}{}
 			}
 			params.Filter.strings[name] = allowed
+		case isBoolFilter(name):
+			allowed := make(map[bool]struct{}, len(entries))
+			for _, entry := range entries {
+				if entry != "true" && entry != "false" {
+					return Parameters{}, validation(name, "must contain true or false")
+				}
+				allowed[entry == "true"] = struct{}{}
+			}
+			params.Filter.booleans[name] = allowed
 		case name == "http_status":
 			for _, entry := range entries {
 				status, err := strconv.Atoi(entry)
@@ -227,4 +251,9 @@ func isStringFilter(name string) bool {
 func IsValidationError(err error) bool {
 	var target *ValidationError
 	return errors.As(err, &target)
+}
+
+func isBoolFilter(name string) bool {
+	_, ok := boolFilterNames[name]
+	return ok
 }

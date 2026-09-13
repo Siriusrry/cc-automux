@@ -61,7 +61,7 @@ func TestSnapshotCompilesRequestScanByReachableFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer body.Close()
-			for _, path := range test.want {
+			for _, path := range append(test.want, "/stream") {
 				if _, ok := index.Lookup(path); !ok {
 					t.Errorf("required path %q was not retained", path)
 				}
@@ -224,7 +224,7 @@ func scanCacheProvider(id, name string, enabled bool, models []string, patches .
 }
 
 func scanCacheRequestBody() string {
-	return `{"model":"classifier-model","detector":true,"normal_matching":true,"normal_other":true,"normal_disabled":true,"normal_empty":true,"classifier_matching":true,"classifier_other":true,"classifier_disabled":true,"fixed_classifier":true,"marker":"detector-marker"}`
+	return `{"model":"classifier-model","stream":true,"detector":true,"normal_matching":true,"normal_other":true,"normal_disabled":true,"normal_empty":true,"classifier_matching":true,"classifier_other":true,"classifier_disabled":true,"fixed_classifier":true,"marker":"detector-marker"}`
 }
 
 var _ patch.RequestPatch = scanCacheRequestPatch{}
