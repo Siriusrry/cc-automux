@@ -71,7 +71,7 @@ type assignmentEntry struct {
 // pendingMigration is retained only across the remainder of a request's
 // fallback chain when a health transition removes the source assignment before
 // the replacement has succeeded. A later independent request clears it when it
-// enters Acquire with an empty exclusion set.
+// starts a new RequestSelection.
 type pendingMigration struct {
 	ProviderID string
 	Generation ProviderGeneration
@@ -100,7 +100,6 @@ type Scheduler struct {
 }
 
 var _ Selector = (*Scheduler)(nil)
-var _ RequestPolicySelector = (*Scheduler)(nil)
 
 func New(health HealthController, options Options) (*Scheduler, error) {
 	if health == nil {
@@ -151,214 +150,131 @@ func StaticAvailabilityOf(item *provider.CompiledProvider) StaticAvailability {
 	return StaticActive
 }
 
-func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, excluded map[string]struct{}) (AttemptLease, error) {
-	if snapshot == nil {
-		return AttemptLease{}, fmt.Errorf("%w: snapshot is required", ErrInvalidSchedulingKey)
+func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSelection) (AttemptLease, error) {
+	if snapshot == nil || request == nil {
+		return AttemptLease{}, fmt.Errorf("%w: snapshot and request selection are required", ErrInvalidSchedulingKey)
 	}
 	key.SessionID = strings.TrimSpace(key.SessionID)
-	if key.Model == "" {
-		return AttemptLease{}, fmt.Errorf("%w: model is required", ErrInvalidSchedulingKey)
+	if key.Model == "" || (key.RequestType != traffic.RequestTypeNormal && key.RequestType != traffic.RequestTypeClassifier) {
+		return AttemptLease{}, ErrInvalidSchedulingKey
 	}
-	if key.RequestType != traffic.RequestTypeNormal && key.RequestType != traffic.RequestTypeClassifier {
-		return AttemptLease{}, fmt.Errorf("%w: unsupported request type %q", ErrInvalidSchedulingKey, key.RequestType)
-	}
-	attemptPolicy, err := ResolveRequestAttemptPolicy(snapshot, key.RequestType)
-	if err != nil {
+	if err := request.policy.Validate(); err != nil {
 		return AttemptLease{}, fmt.Errorf("%w: %w", ErrInvalidSchedulingKey, err)
 	}
-	return s.acquire(snapshot, key, excluded, attemptPolicy)
-}
-
-// AcquireWithPolicy is the explicit request-level scheduling boundary. The
-// caller supplies the immutable AttemptPolicy captured in the current
-// ExecutionPlan; Scheduler never derives a classifier budget from its health
-// or ordinary request defaults when this method is used.
-func (s *Scheduler) AcquireWithPolicy(snapshot Snapshot, key StickyKey, excluded map[string]struct{}, attemptPolicy AttemptPolicy) (AttemptLease, error) {
-	if snapshot == nil {
-		return AttemptLease{}, fmt.Errorf("%w: snapshot is required", ErrInvalidSchedulingKey)
-	}
-	if key.Model == "" {
-		return AttemptLease{}, fmt.Errorf("%w: model is required", ErrInvalidSchedulingKey)
-	}
-	if key.RequestType != traffic.RequestTypeNormal && key.RequestType != traffic.RequestTypeClassifier {
-		return AttemptLease{}, fmt.Errorf("%w: unsupported request type %q", ErrInvalidSchedulingKey, key.RequestType)
-	}
-	if err := attemptPolicy.Validate(); err != nil {
-		return AttemptLease{}, fmt.Errorf("%w: %w", ErrInvalidSchedulingKey, err)
-	}
-	return s.acquire(snapshot, key, excluded, attemptPolicy)
-}
-
-// AcquireWithAttemptPolicy is retained as a descriptive alias for callers
-// that name the request budget explicitly.
-func (s *Scheduler) AcquireWithAttemptPolicy(snapshot Snapshot, key StickyKey, excluded map[string]struct{}, attemptPolicy AttemptPolicy) (AttemptLease, error) {
-	return s.AcquireWithPolicy(snapshot, key, excluded, attemptPolicy)
-}
-
-func (s *Scheduler) acquire(snapshot Snapshot, key StickyKey, excluded map[string]struct{}, attemptPolicy AttemptPolicy) (AttemptLease, error) {
-	key.SessionID = strings.TrimSpace(key.SessionID)
-	if len(excluded) >= attemptPolicy.MaxAttempts {
+	if !request.HasBudget() {
 		return AttemptLease{}, ErrAttemptBudgetExhausted
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	now := s.now()
 	s.expireLocked(now)
 	currentSnapshot := s.revision == 0 || snapshot.Revision() == s.revision
-	if currentSnapshot && len(excluded) == 0 && key.SessionID != "" {
-		// An empty-exclusion acquire starts a new client request.  Any pending
-		// migration belongs to an earlier fallback chain and must not be reused
-		// by this request (including when no candidate is currently available).
-		// Assignment versions still protect a fallback lease that races this
-		// invalidation from resurrecting the old affinity.  Stale/future snapshots
-		// must not mutate pending state at all.
-		delete(s.pending, key)
-	}
-	items := eligibleCandidates(snapshot.Candidates(key.Model), key.Model)
-
+	first := !request.initialized
 	var assigned *assignmentEntry
-	var assignedProvider *provider.CompiledProvider
-	pending, hasPending := s.pending[key]
-	// A pending tombstone only participates in an in-flight fallback chain. A
-	// fresh zero-exclusion request may create a new assignment; putAssignmentLocked
-	// then retires the tombstone. Keeping it visible until selection prevents an
-	// unrelated request from racing a fallback lease and accidentally reviving it.
-	hasPending = hasPending && len(excluded) > 0 && key.SessionID != ""
 	if currentSnapshot && key.SessionID != "" {
 		assigned = s.assignments[key]
-		if assigned != nil {
-			assignedProvider = findCandidate(items, assigned.assignment.ProviderID, assigned.assignment.Generation)
-			if assignedProvider == nil {
-				s.removeAssignmentLocked(assigned)
-				assigned = nil
-			}
-		}
 	}
-
-	ordered := s.orderCandidatesLocked(items, key, assignedProvider)
-	var earliestRetry time.Time
-
-	for _, item := range ordered {
-		if _, skip := excluded[item.ID]; skip {
-			continue
-		}
-		healthKey := HealthKey{
-			ProviderID:  item.ID,
-			Generation:  item.Generation,
-			Model:       key.Model,
-			RequestType: key.RequestType,
-		}
-		decision := s.health.Acquire(healthKey, item.DisableHealth)
-		if !decision.Available {
-			// RetryAt belongs to the exact scope inspected by this Acquire call.
-			// Re-querying Health by key after the loop can also find retired scopes
-			// with the same provider ID/generation and report an unrelated deadline.
-			if decision.RetryAt != nil && (earliestRetry.IsZero() || decision.RetryAt.Before(earliestRetry)) {
-				earliestRetry = *decision.RetryAt
-			}
-			if assigned != nil && item.ID == assigned.assignment.ProviderID &&
-				(decision.GlobalState == GlobalCooldown || decision.ChannelState == ChannelCooldown) {
-				// A source can enter cooldown between two attempts. Preserve its
-				// identity before removing the assignment so a later successful
-				// replacement can establish affinity only after it succeeds.
-				if len(excluded) > 0 && key.SessionID != "" {
-					s.markPendingMigrationLocked(AttemptLease{
-						Provider:    assignedProvider,
-						Generation:  assigned.assignment.Generation,
-						Model:       key.Model,
-						RequestType: key.RequestType,
-						stickyKey:   key,
-					})
-					pending, hasPending = s.pending[key]
+	if first {
+		items := eligibleCandidates(snapshot.Candidates(key.Model), key.Model)
+		var assignedProvider *provider.CompiledProvider
+		if currentSnapshot {
+			// A new request cannot revive a removed assignment from an older chain.
+			delete(s.pending, key)
+			if assigned != nil {
+				assignedProvider = findCandidate(items, assigned.assignment.ProviderID, assigned.assignment.Generation)
+				if assignedProvider == nil {
+					s.removeAssignmentLocked(assigned)
+					assigned = nil
 				}
-				s.removeAssignmentLocked(assigned)
-				assigned = nil
-				assignedProvider = nil
 			}
-			continue
 		}
-
-		fromSticky := assigned != nil && item.ID == assigned.assignment.ProviderID &&
-			item.Generation == assigned.assignment.Generation
-		if assigned != nil && assignedProvider != nil && item.Priority > assignedProvider.Priority {
-			if len(excluded) > 0 && key.SessionID != "" {
-				s.markPendingMigrationLocked(AttemptLease{
-					Provider:    assignedProvider,
-					Generation:  assigned.assignment.Generation,
-					Model:       key.Model,
-					RequestType: key.RequestType,
-					stickyKey:   key,
-				})
-				pending, hasPending = s.pending[key]
-			}
-			s.removeAssignmentLocked(assigned)
-			assigned = nil
-			assignedProvider = nil
-			fromSticky = false
-		}
-
-		sourceExcluded := false
 		if assigned != nil {
-			_, sourceExcluded = excluded[assigned.assignment.ProviderID]
+			request.source = migrationSource(assigned)
 		}
-		migration := hasPending || (!fromSticky && assigned != nil && sourceExcluded && key.SessionID != "" &&
-			(item.ID != assigned.assignment.ProviderID || item.Generation != assigned.assignment.Generation))
-		migrationProviderID := pending.ProviderID
-		migrationGeneration := pending.Generation
-		migrationVersion := pending.Version
-		if !hasPending && migration {
-			migrationProviderID = assigned.assignment.ProviderID
-			migrationGeneration = assigned.assignment.Generation
-			migrationVersion = assigned.version
-		}
-		// Never create a replacement assignment before the replacement request
-		// succeeds. This is especially important when the source was removed by a
-		// cooldown transition and is represented only by pendingMigration.
-		// An Acquire with exclusions is part of an in-flight fallback chain.
-		// Never create new affinity on selection alone; a known source migrates
-		// on success, while an expired/invalid source leaves no assignment.
-		allocate := !fromSticky && assigned == nil && !migration && len(excluded) == 0 && currentSnapshot
-		if allocate && key.SessionID != "" {
-			s.putAssignmentLocked(key, item, now)
-		}
-		if fromSticky {
-			s.touchAssignmentLocked(assigned, now)
-		}
-
-		advanceCursor := allocate && (key.SessionID != "" || len(excluded) == 0)
-		cursorKey := roundRobinKey{Model: key.Model, RequestType: key.RequestType, Priority: item.Priority}
-		cursor := s.cursors[cursorKey]
-		halfOpen := decision.Lease.GlobalProbe || decision.Lease.ChannelProbe
-		if advanceCursor && !halfOpen {
-			s.setCursorLocked(cursorKey, item.ID)
-		}
-
-		return AttemptLease{
-			SnapshotRevision:       snapshot.Revision(),
-			Provider:               item,
-			Model:                  key.Model,
-			RequestType:            key.RequestType,
-			Generation:             item.Generation,
-			FromSticky:             fromSticky,
-			HalfOpenProbe:          halfOpen,
-			HealthLease:            decision.Lease,
-			stickyKey:              key,
-			stickyMigration:        migration,
-			stickySourceProviderID: migrationProviderID,
-			stickySourceGeneration: migrationGeneration,
-			stickySourceVersion:    migrationVersion,
-			cursorKey:              cursorKey,
-			cursorVersion:          cursor.Version,
-			advanceCursorOnSuccess: advanceCursor && halfOpen,
-		}, nil
+		request.ordered = s.orderCandidatesLocked(items, key, assignedProvider)
+		request.visited = make(map[string]bool, len(items))
+		request.initialized = true
 	}
 
-	if !earliestRetry.IsZero() {
-		return AttemptLease{}, &UnavailableError{RetryAt: earliestRetry}
+	var earliestRetry time.Time
+	for start := 0; start < len(request.ordered); {
+		end := start + 1
+		for end < len(request.ordered) && request.ordered[end].Priority == request.ordered[start].Priority {
+			end++
+		}
+		group := request.ordered[start:end]
+		blocked := false
+		// Inspect unvisited targets first, then revisit this tier. Never skip a
+		// tier merely because its providers have already served this request.
+		for pass := 0; pass < 2; pass++ {
+			for _, item := range group {
+				if request.visited[item.ID] != (pass == 1) {
+					continue
+				}
+				decision := s.health.Acquire(HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: key.Model, RequestType: key.RequestType}, item.DisableHealth)
+				if !decision.Available {
+					if decision.RetryAt != nil && (earliestRetry.IsZero() || decision.RetryAt.Before(earliestRetry)) {
+						earliestRetry = *decision.RetryAt
+					}
+					cooling := decision.GlobalState == GlobalCooldown || decision.ChannelState == ChannelCooldown
+					// An occupied half-open probe blocks lower tiers without taking
+					// another lease or waiting for its owner.
+					blocked = blocked || !cooling
+					if cooling && assigned != nil && item.ID == assigned.assignment.ProviderID {
+						s.markPendingEntryLocked(assigned)
+						s.removeAssignmentLocked(assigned)
+						assigned = nil
+					}
+					continue
+				}
+				if pass == 1 {
+					for _, member := range group {
+						delete(request.visited, member.ID)
+					}
+				}
+				request.visited[item.ID] = true
+				fromSticky := assigned != nil && item.ID == assigned.assignment.ProviderID && item.Generation == assigned.assignment.Generation
+				allocate := first && assigned == nil && request.source.ProviderID == "" && currentSnapshot
+				if allocate && key.SessionID != "" {
+					s.putAssignmentLocked(key, item, now)
+					assigned = s.assignments[key]
+					request.source = migrationSource(assigned)
+				}
+				if fromSticky {
+					s.touchAssignmentLocked(assigned, now)
+				}
+				source := request.source
+				migration := source.ProviderID != "" && (item.ID != source.ProviderID || item.Generation != source.Generation)
+				cursorKey := roundRobinKey{Model: key.Model, RequestType: key.RequestType, Priority: item.Priority}
+				cursor := s.cursors[cursorKey]
+				halfOpen := decision.Lease.GlobalProbe || decision.Lease.ChannelProbe
+				advanceCursor := first && !fromSticky && currentSnapshot
+				if advanceCursor && !halfOpen {
+					s.setCursorLocked(cursorKey, item.ID)
+				}
+				return AttemptLease{
+					SnapshotRevision: snapshot.Revision(), Provider: item, Model: key.Model,
+					RequestType: key.RequestType, Generation: item.Generation,
+					FromSticky: fromSticky, HalfOpenProbe: halfOpen, HealthLease: decision.Lease,
+					stickyKey: key, stickyMigration: migration,
+					stickySourceProviderID: source.ProviderID, stickySourceGeneration: source.Generation,
+					stickySourceVersion: source.Version, cursorKey: cursorKey, cursorVersion: cursor.Version,
+					advanceCursorOnSuccess: advanceCursor && halfOpen,
+				}, nil
+			}
+		}
+		if blocked {
+			return AttemptLease{}, &UnavailableError{}
+		}
+		start = end
 	}
-	return AttemptLease{}, &UnavailableError{}
+	return AttemptLease{}, &UnavailableError{RetryAt: earliestRetry}
+}
+
+func migrationSource(entry *assignmentEntry) pendingMigration {
+	return pendingMigration{ProviderID: entry.assignment.ProviderID, Generation: entry.assignment.Generation,
+		CreatedAt: entry.assignment.CreatedAt, LastUsedAt: entry.assignment.LastUsedAt, Version: entry.version}
 }
 
 func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) (HealthUpdate, uint64) {

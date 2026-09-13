@@ -21,13 +21,13 @@ type cancellationSelector struct {
 	calls  int
 }
 
-func (s *cancellationSelector) Acquire(snapshot scheduler.Snapshot, key scheduler.StickyKey, excluded map[string]struct{}) (scheduler.AttemptLease, error) {
+func (s *cancellationSelector) Acquire(snapshot scheduler.Snapshot, key scheduler.StickyKey, selection *scheduler.RequestSelection) (scheduler.AttemptLease, error) {
 	s.calls++
 	if s.calls == 2 && s.point == "acquire_error" {
 		s.cancel()
 		return scheduler.AttemptLease{}, errors.New("no candidate")
 	}
-	lease, err := s.fakeSelector.Acquire(snapshot, key, excluded)
+	lease, err := s.fakeSelector.Acquire(snapshot, key, selection)
 	if s.calls == 2 && s.point == "acquired" {
 		s.cancel()
 	}

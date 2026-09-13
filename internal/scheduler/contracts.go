@@ -152,8 +152,8 @@ type AttemptLease struct {
 	HealthLease      HealthLease
 
 	stickyKey StickyKey
-	// stickyMigration records the assignment observed when this lease was
-	// acquired after an excluded provider. A successful replacement can then
+	// stickyMigration carries the assignment observed at the start of this
+	// request. A successful replacement can then
 	// atomically move the session affinity only if that source assignment is
 	// still current; unrelated concurrent requests cannot overwrite it.
 	stickyMigration        bool
@@ -182,26 +182,6 @@ type Snapshot interface {
 	Providers() []*provider.CompiledProvider
 }
 
-// RequestAttemptPolicyProvider exposes the immutable retry budget selected for
-// a particular request type. Runtime snapshots may implement this boundary so
-// the legacy Selector.Acquire method can still resolve classifier traffic
-// without falling back to the normal-request budget.
-//
-// A request path that already has an ExecutionPlan should prefer the explicit
-// RequestPolicySelector boundary below; this provider is the compatibility
-// path for callers that only have a request-time Snapshot.
-type RequestAttemptPolicyProvider interface {
-	AttemptPolicyFor(requestType traffic.RequestType) AttemptPolicy
-}
-
-// RequestAttemptPolicyView is the method-shaped variant already implemented
-// by runtime snapshots. It keeps scheduler independent from the flow package
-// while allowing legacy Acquire callers to resolve a type-specific budget.
-type RequestAttemptPolicyView interface {
-	NormalAttemptPolicy() AttemptPolicy
-	ClassifierAttemptPolicy() AttemptPolicy
-}
-
 // HealthController is the scheduler-facing health state boundary.
 type HealthController interface {
 	Reconcile(providers []*provider.CompiledProvider)
@@ -212,20 +192,36 @@ type HealthController interface {
 
 // Selector is the gateway-facing scheduling boundary.
 type Selector interface {
-	Acquire(snapshot Snapshot, key StickyKey, excluded map[string]struct{}) (AttemptLease, error)
+	Acquire(snapshot Snapshot, key StickyKey, request *RequestSelection) (AttemptLease, error)
 	Report(lease AttemptLease, outcome Outcome) (HealthUpdate, uint64)
 	Reconcile(snapshot Snapshot)
 	Assignments(providerID string) []Assignment
 	ActiveAssignmentCount() int
 }
 
-// RequestPolicySelector is an optional extension implemented by selectors
-// that can consume the immutable AttemptPolicy carried by an ExecutionPlan.
-// Keeping it separate preserves the original Selector interface for focused
-// callers and test doubles while allowing the gateway to pass a classifier's
-// one-attempt budget explicitly.
-type RequestPolicySelector interface {
-	AcquireWithPolicy(snapshot Snapshot, key StickyKey, excluded map[string]struct{}, policy AttemptPolicy) (AttemptLease, error)
+// RequestSelection belongs to one client request and captures its immutable
+// budget. Round membership only controls order, never eligibility or call count.
+// The gateway owns StartAttempt; the selector owns selection and affinity state.
+type RequestSelection struct {
+	policy       AttemptPolicy
+	attemptsUsed int
+	initialized  bool
+	ordered      []*provider.CompiledProvider
+	visited      map[string]bool
+	source       pendingMigration
+}
+
+func NewRequestSelection(policy AttemptPolicy) *RequestSelection {
+	return &RequestSelection{policy: policy}
+}
+
+func (r *RequestSelection) AttemptsUsed() int { return r.attemptsUsed }
+
+// StartAttempt is called immediately before issuing the upstream HTTP call.
+func (r *RequestSelection) StartAttempt() { r.attemptsUsed++ }
+
+func (r *RequestSelection) HasBudget() bool {
+	return r != nil && r.attemptsUsed < r.policy.MaxAttempts
 }
 
 // ErrorUpdater fills a current attempt's diagnostic without reporting health twice.

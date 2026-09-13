@@ -32,16 +32,6 @@ type countingAttemptSnapshot struct {
 	calls int
 }
 
-type typedAttemptSnapshot struct {
-	*fakeSnapshot
-	normal     AttemptPolicy
-	classifier AttemptPolicy
-}
-
-func (s *typedAttemptSnapshot) NormalAttemptPolicy() AttemptPolicy { return s.normal }
-
-func (s *typedAttemptSnapshot) ClassifierAttemptPolicy() AttemptPolicy { return s.classifier }
-
 func (s *countingAttemptSnapshot) AttemptPolicy() AttemptPolicy {
 	s.calls++
 	return s.fakeSnapshot.AttemptPolicy()
@@ -130,7 +120,11 @@ func (h *fakeHealth) Report(lease HealthLease, _ Outcome) (HealthUpdate, uint64)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.reports = append(h.reports, lease)
-	return h.updates[lease.Key], 0
+	update := h.updates[lease.Key]
+	if update.GlobalEnteredCooldown || update.ChannelEnteredCooldown {
+		h.decisions[lease.Key] = HealthDecision{GlobalState: update.GlobalState, ChannelState: update.ChannelState}
+	}
+	return update, 0
 }
 
 func (h *fakeHealth) EarliestRetry(keys []HealthKey) (time.Time, bool) {
@@ -247,26 +241,26 @@ func TestPriorityRoundRobinStickyAndExactModel(t *testing.T) {
 	}}
 	selector.Reconcile(snapshot)
 
-	lease1, err := selector.Acquire(snapshot, normalKey(" session-1 ", "Model"), nil)
+	lease1, err := selector.Acquire(snapshot, normalKey(" session-1 ", "Model"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, lease1, err); got != providerA {
 		t.Fatalf("first provider = %s", got)
 	}
 	if lease1.FromSticky {
 		t.Fatal("first assignment marked sticky")
 	}
-	sticky, err := selector.Acquire(snapshot, normalKey("session-1", "Model"), nil)
+	sticky, err := selector.Acquire(snapshot, normalKey("session-1", "Model"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, sticky, err); got != providerA || !sticky.FromSticky {
 		t.Fatalf("sticky lease = provider %s, sticky %v", got, sticky.FromSticky)
 	}
-	lease2, err := selector.Acquire(snapshot, normalKey("session-2", "Model"), nil)
+	lease2, err := selector.Acquire(snapshot, normalKey("session-2", "Model"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, lease2, err); got != providerB {
 		t.Fatalf("second provider = %s", got)
 	}
-	lease3, err := selector.Acquire(snapshot, normalKey("", "Model"), nil)
+	lease3, err := selector.Acquire(snapshot, normalKey("", "Model"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, lease3, err); got != providerA {
 		t.Fatalf("sessionless provider = %s", got)
 	}
-	lease4, err := selector.Acquire(snapshot, normalKey("", "Model"), nil)
+	lease4, err := selector.Acquire(snapshot, normalKey("", "Model"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, lease4, err); got != providerB {
 		t.Fatalf("second sessionless provider = %s", got)
 	}
@@ -274,11 +268,11 @@ func TestPriorityRoundRobinStickyAndExactModel(t *testing.T) {
 		t.Fatalf("assignment count = %d", selector.ActiveAssignmentCount())
 	}
 
-	caseLease, err := selector.Acquire(snapshot, normalKey("case-session", "model"), nil)
+	caseLease, err := selector.Acquire(snapshot, normalKey("case-session", "model"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, caseLease, err); got != providerC {
 		t.Fatalf("case-sensitive provider = %s", got)
 	}
-	_, err = selector.Acquire(snapshot, normalKey("missing", "MODEL"), nil)
+	_, err = selector.Acquire(snapshot, normalKey("missing", "MODEL"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if !errors.Is(err, ErrNoEligibleProvider) {
 		t.Fatalf("missing exact model error = %v", err)
 	}
@@ -294,7 +288,7 @@ func TestExecutablePatchCandidatesRemainEligible(t *testing.T) {
 	active := compileProvider(t, providerB, "active", []string{"m"}, 0)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{patched, active}}
 	selector.Reconcile(snapshot)
-	lease, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
+	lease, err := selector.Acquire(snapshot, normalKey("session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, lease, err); got != providerA {
 		t.Fatalf("selected provider = %s", got)
 	}
@@ -322,16 +316,16 @@ func TestInvalidSchedulingInputsAndPolicy(t *testing.T) {
 		{Model: "m"},
 		{Model: "m", RequestType: "unknown"},
 	} {
-		if _, err := selector.Acquire(snapshot, key, nil); !errors.Is(err, ErrInvalidSchedulingKey) {
+		if _, err := selector.Acquire(snapshot, key, NewRequestSelection(snapshot.AttemptPolicy())); !errors.Is(err, ErrInvalidSchedulingKey) {
 			t.Fatalf("key %#v error = %v", key, err)
 		}
 	}
-	if _, err := selector.Acquire(nil, normalKey("session", "m"), nil); !errors.Is(err, ErrInvalidSchedulingKey) {
+	if _, err := selector.Acquire(nil, normalKey("session", "m"), NewRequestSelection(DefaultAttemptPolicy())); !errors.Is(err, ErrInvalidSchedulingKey) {
 		t.Fatalf("nil snapshot error = %v", err)
 	}
 }
 
-func TestAttemptOrderAndMaximumDistinctProviders(t *testing.T) {
+func TestAttemptOrderRepeatsHighestTier(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, Policy{}, nil)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{
@@ -343,19 +337,23 @@ func TestAttemptOrderAndMaximumDistinctProviders(t *testing.T) {
 	selector.Reconcile(snapshot)
 	key := normalKey("sticky", "m")
 
-	first, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	first, err := selector.Acquire(snapshot, key, selection1)
 	if got := providerID(t, first, err); got != providerA {
 		t.Fatalf("first provider = %s", got)
 	}
-	second, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	second, err := selector.Acquire(snapshot, key, selection1)
 	if got := providerID(t, second, err); got != providerB {
 		t.Fatalf("same-priority fallback = %s", got)
 	}
-	third, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}, providerB: {}})
-	if got := providerID(t, third, err); got != providerC {
-		t.Fatalf("lower-priority fallback = %s", got)
+	selection1.StartAttempt()
+	third, err := selector.Acquire(snapshot, key, selection1)
+	if got := providerID(t, third, err); got != providerA {
+		t.Fatalf("next-round provider = %s", got)
 	}
-	_, err = selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}, providerB: {}, providerC: {}})
+	selection1.StartAttempt()
+	_, err = selector.Acquire(snapshot, key, selection1)
 	if !errors.Is(err, ErrAttemptBudgetExhausted) {
 		t.Fatalf("attempt budget error = %v", err)
 	}
@@ -380,82 +378,35 @@ func TestAttemptBudgetComesFromRequestSnapshot(t *testing.T) {
 	}
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
-	if _, err := selector.Acquire(snapshot, key, nil); err != nil {
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	if _, err := selector.Acquire(snapshot, key, selection1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}}); err != nil {
+	selection1.StartAttempt()
+	if _, err := selector.Acquire(snapshot, key, selection1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}, providerB: {}}); !errors.Is(err, ErrAttemptBudgetExhausted) {
+	selection1.StartAttempt()
+	if _, err := selector.Acquire(snapshot, key, selection1); !errors.Is(err, ErrAttemptBudgetExhausted) {
 		t.Fatalf("snapshot attempt budget error = %v", err)
 	}
 }
 
-func TestClassifierAcquireUsesTypedRequestBudget(t *testing.T) {
+func TestSelectionUsesCapturedPolicy(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
-	snapshot := &typedAttemptSnapshot{
-		fakeSnapshot: &fakeSnapshot{
-			revision: 1,
-			// The legacy ordinary budget is intentionally larger than the
-			// classifier budget; classifier selection must not read it.
-			attempts: AttemptPolicy{MaxAttempts: 3},
-			providers: []*provider.CompiledProvider{
-				compileProvider(t, providerA, "a", []string{"m"}, 0),
-				compileProvider(t, providerB, "b", []string{"m"}, 0),
-			},
-		},
-		normal:     AttemptPolicy{MaxAttempts: 3},
-		classifier: AttemptPolicy{MaxAttempts: 1},
-	}
-	selector.Reconcile(snapshot)
-	key := StickyKey{SessionID: "classifier-session", Model: "m", RequestType: traffic.RequestTypeClassifier}
-	first, err := selector.Acquire(snapshot, key, nil)
-	if err != nil {
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{compileProvider(t, providerA, "a", []string{"m"}, 0)}}
+	key := StickyKey{Model: "m", RequestType: traffic.RequestTypeClassifier}
+	selection := NewRequestSelection(AttemptPolicy{MaxAttempts: 1})
+	if _, err := selector.Acquire(snapshot, key, selection); err != nil {
 		t.Fatal(err)
 	}
-	if got := first.Provider.ID; got != providerA {
-		t.Fatalf("first classifier provider = %s", got)
+	selection.StartAttempt()
+	if _, err := selector.Acquire(snapshot, key, selection); !errors.Is(err, ErrAttemptBudgetExhausted) {
+		t.Fatal(err)
 	}
-	_, err = selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
-	if !errors.Is(err, ErrAttemptBudgetExhausted) {
-		t.Fatalf("classifier budget error = %v", err)
-	}
-}
-
-func TestAcquireWithPolicyUsesExplicitExecutionPlanBudget(t *testing.T) {
-	health := newFakeHealth()
-	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
-	snapshot := &fakeSnapshot{revision: 1, attempts: AttemptPolicy{MaxAttempts: 3}, providers: []*provider.CompiledProvider{
-		compileProvider(t, providerA, "a", []string{"m"}, 0),
-		compileProvider(t, providerB, "b", []string{"m"}, 0),
-	}}
-	selector.Reconcile(snapshot)
-	key := StickyKey{SessionID: "classifier-session", Model: "m", RequestType: traffic.RequestTypeClassifier}
-	first, err := selector.AcquireWithPolicy(snapshot, key, nil, AttemptPolicy{MaxAttempts: 1})
-	if err != nil || first.Provider == nil {
-		t.Fatalf("explicit classifier acquire = %#v, %v", first, err)
-	}
-	_, err = selector.AcquireWithPolicy(snapshot, key, map[string]struct{}{first.Provider.ID: {}}, AttemptPolicy{MaxAttempts: 1})
-	if !errors.Is(err, ErrAttemptBudgetExhausted) {
-		t.Fatalf("explicit budget error = %v", err)
-	}
-	if _, err := selector.AcquireWithPolicy(snapshot, key, nil, AttemptPolicy{}); !errors.Is(err, ErrInvalidSchedulingKey) {
-		t.Fatalf("invalid explicit budget error = %v", err)
-	}
-}
-
-func TestClassifierAcquireFailsClosedWithoutTypedBudget(t *testing.T) {
-	health := newFakeHealth()
-	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
-	snapshot := &fakeSnapshot{revision: 1, attempts: AttemptPolicy{MaxAttempts: 3}, providers: []*provider.CompiledProvider{
-		compileProvider(t, providerA, "a", []string{"m"}, 0),
-	}}
-	selector.Reconcile(snapshot)
-	key := StickyKey{SessionID: "classifier-session", Model: "m", RequestType: traffic.RequestTypeClassifier}
-	_, err := selector.Acquire(snapshot, key, nil)
-	if !errors.Is(err, ErrInvalidSchedulingKey) || !errors.Is(err, ErrRequestAttemptPolicyUnavailable) {
-		t.Fatalf("untyped classifier acquire error = %v", err)
+	if _, err := selector.Acquire(snapshot, key, NewRequestSelection(AttemptPolicy{})); !errors.Is(err, ErrInvalidSchedulingKey) {
+		t.Fatal(err)
 	}
 }
 
@@ -479,22 +430,6 @@ func TestCaptureAttemptPolicyFreezesOneSnapshotRead(t *testing.T) {
 	}
 }
 
-func TestCaptureAttemptPolicyPreservesTypedClassifierBudget(t *testing.T) {
-	source := &typedAttemptSnapshot{
-		fakeSnapshot: &fakeSnapshot{revision: 1, attempts: AttemptPolicy{MaxAttempts: 3}},
-		normal:       AttemptPolicy{MaxAttempts: 3},
-		classifier:   AttemptPolicy{MaxAttempts: 1},
-	}
-	captured, normal, err := CaptureAttemptPolicy(source)
-	if err != nil || normal.MaxAttempts != 3 {
-		t.Fatalf("CaptureAttemptPolicy() = %#v, %v", normal, err)
-	}
-	got, err := ResolveRequestAttemptPolicy(captured, traffic.RequestTypeClassifier)
-	if err != nil || got.MaxAttempts != 1 {
-		t.Fatalf("captured classifier policy = %#v, %v", got, err)
-	}
-}
-
 func TestConcurrentFirstAssignmentIsSingleAndStable(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, Policy{}, nil)
@@ -512,7 +447,7 @@ func TestConcurrentFirstAssignmentIsSingleAndStable(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			lease, err := selector.Acquire(snapshot, normalKey("one-session", "m"), nil)
+			lease, err := selector.Acquire(snapshot, normalKey("one-session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 			if err != nil {
 				errs <- err
 				return
@@ -549,7 +484,7 @@ func TestAssignmentsAreReturnedDeterministically(t *testing.T) {
 	}}
 	selector.Reconcile(snapshot)
 	for _, session := range []string{"z", "a", "m"} {
-		if _, err := selector.Acquire(snapshot, normalKey(session, "m"), nil); err != nil {
+		if _, err := selector.Acquire(snapshot, normalKey(session, "m"), NewRequestSelection(snapshot.AttemptPolicy())); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -575,19 +510,19 @@ func TestStickyTTLAndLRUEviction(t *testing.T) {
 	}}
 	selector.Reconcile(snapshot)
 
-	if _, err := selector.Acquire(snapshot, normalKey("s1", "m"), nil); err != nil {
+	if _, err := selector.Acquire(snapshot, normalKey("s1", "m"), NewRequestSelection(snapshot.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
-	if _, err := selector.Acquire(snapshot, normalKey("s2", "m"), nil); err != nil {
+	if _, err := selector.Acquire(snapshot, normalKey("s2", "m"), NewRequestSelection(snapshot.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
-	if _, err := selector.Acquire(snapshot, normalKey("s1", "m"), nil); err != nil {
+	if _, err := selector.Acquire(snapshot, normalKey("s1", "m"), NewRequestSelection(snapshot.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
-	if _, err := selector.Acquire(snapshot, normalKey("s3", "m"), nil); err != nil {
+	if _, err := selector.Acquire(snapshot, normalKey("s3", "m"), NewRequestSelection(snapshot.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 
@@ -615,12 +550,12 @@ func TestStickyTTLRefreshesFromLastAccess(t *testing.T) {
 		compileProvider(t, providerA, "a", []string{"m"}, 0),
 	}}
 	selector.Reconcile(snapshot)
-	if _, err := selector.Acquire(snapshot, normalKey("sliding", "m"), nil); err != nil {
+	if _, err := selector.Acquire(snapshot, normalKey("sliding", "m"), NewRequestSelection(snapshot.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 	// A hit just before the original deadline must move the deadline forward.
 	now = now.Add(policy.StickyTTL - time.Minute)
-	lease, err := selector.Acquire(snapshot, normalKey("sliding", "m"), nil)
+	lease, err := selector.Acquire(snapshot, normalKey("sliding", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if err != nil || !lease.FromSticky {
 		t.Fatalf("refreshing sticky lease = %#v, %v", lease, err)
 	}
@@ -644,7 +579,7 @@ func TestDefaultStickyCapacityIsEnforcedAt8192(t *testing.T) {
 	selector.Reconcile(snapshot)
 	for i := 0; i <= DefaultPolicy().StickyCapacity; i++ {
 		session := "session-" + time.Unix(int64(i), 0).UTC().Format("150405.000000000")
-		if _, err := selector.Acquire(snapshot, normalKey(session, "m"), nil); err != nil {
+		if _, err := selector.Acquire(snapshot, normalKey(session, "m"), NewRequestSelection(snapshot.AttemptPolicy())); err != nil {
 			t.Fatal(err)
 		}
 		now = now.Add(time.Nanosecond)
@@ -672,7 +607,7 @@ func TestHigherPriorityDegradationAndRecovery(t *testing.T) {
 		Lease: HealthLease{Key: highKey},
 	}
 
-	lowLease, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
+	lowLease, err := selector.Acquire(snapshot, normalKey("session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, lowLease, err); got != providerB {
 		t.Fatalf("degraded provider = %s", got)
 	}
@@ -683,10 +618,14 @@ func TestHigherPriorityDegradationAndRecovery(t *testing.T) {
 	health.mu.Lock()
 	delete(health.decisions, highKey)
 	health.mu.Unlock()
-	recovered, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
+	recovered, err := selector.Acquire(snapshot, normalKey("session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, recovered, err); got != providerA || recovered.FromSticky {
 		t.Fatalf("recovered lease = provider %s, sticky %v", got, recovered.FromSticky)
 	}
+	if len(selector.Assignments(providerB)) != 1 {
+		t.Fatal("selection moved the source binding")
+	}
+	selector.Report(recovered, Outcome{Class: FailureNone})
 	if len(selector.Assignments(providerB)) != 0 || len(selector.Assignments(providerA)) != 1 {
 		t.Fatalf("assignments after recovery: high=%#v low=%#v", selector.Assignments(providerA), selector.Assignments(providerB))
 	}
@@ -707,7 +646,7 @@ func TestUnavailableErrorCarriesEarliestRetry(t *testing.T) {
 		Lease:   HealthLease{Key: key},
 	}
 
-	_, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
+	_, err := selector.Acquire(snapshot, normalKey("session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if !errors.Is(err, ErrNoEligibleProvider) {
 		t.Fatalf("unavailable error = %v", err)
 	}
@@ -740,7 +679,7 @@ func TestUnavailableErrorUsesEarliestCurrentHealthDecision(t *testing.T) {
 	health.decisions[keyA] = HealthDecision{Available: false, GlobalState: GlobalCooldown, RetryAt: &later, Lease: HealthLease{Key: keyA}}
 	health.decisions[keyB] = HealthDecision{Available: false, GlobalState: GlobalCooldown, RetryAt: &earlier, Lease: HealthLease{Key: keyB}}
 
-	_, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
+	_, err := selector.Acquire(snapshot, normalKey("session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if !errors.Is(err, ErrNoEligibleProvider) {
 		t.Fatalf("unavailable error = %v", err)
 	}
@@ -775,19 +714,19 @@ func TestHalfOpenSelectionDefersCursorWithoutOverwritingNewerRotation(t *testing
 		Lease: HealthLease{Key: bKey, GlobalProbe: true},
 	}
 
-	probe, err := selector.Acquire(snapshot, normalKey("probe", "m"), nil)
+	probe, err := selector.Acquire(snapshot, normalKey("probe", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, probe, err); got != providerB || !probe.HalfOpenProbe {
 		t.Fatalf("half-open lease = provider %s probe %v", got, probe.HalfOpenProbe)
 	}
 	health.decisions[bKey] = HealthDecision{Available: false, GlobalState: GlobalHalfOpen, ChannelState: ChannelHealthy}
-	concurrent, err := selector.Acquire(snapshot, normalKey("other", "m"), nil)
+	concurrent, err := selector.Acquire(snapshot, normalKey("other", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, concurrent, err); got != providerC {
 		t.Fatalf("selection while probe is in flight = %s", got)
 	}
 
 	selector.Report(probe, Outcome{Class: FailureNone, SessionID: "probe"})
 	delete(health.decisions, bKey)
-	next, err := selector.Acquire(snapshot, normalKey("next", "m"), nil)
+	next, err := selector.Acquire(snapshot, normalKey("next", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, next, err); got != providerB {
 		t.Fatalf("late probe success overwrote newer cursor: selected %s", got)
 	}
@@ -799,11 +738,11 @@ func TestCooldownUpdatesRemoveOnlyAffectedAssignments(t *testing.T) {
 	item := compileProvider(t, providerA, "a", []string{"m", "n"}, 0)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{item}}
 	selector.Reconcile(snapshot)
-	mLease, err := selector.Acquire(snapshot, normalKey("m-session", "m"), nil)
+	mLease, err := selector.Acquire(snapshot, normalKey("m-session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	nLease, err := selector.Acquire(snapshot, normalKey("n-session", "n"), nil)
+	nLease, err := selector.Acquire(snapshot, normalKey("n-session", "n"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -831,7 +770,8 @@ func TestCooldownFallbackCreatesAssignmentOnlyAfterSuccess(t *testing.T) {
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
 
-	failed, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	failed, err := selector.Acquire(snapshot, key, selection1)
 	if got := providerID(t, failed, err); got != providerA {
 		t.Fatalf("initial provider = %s", got)
 	}
@@ -844,7 +784,8 @@ func TestCooldownFallbackCreatesAssignmentOnlyAfterSuccess(t *testing.T) {
 		t.Fatalf("source assignment survived cooldown: %d", got)
 	}
 
-	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	fallback, err := selector.Acquire(snapshot, key, selection1)
 	if got := providerID(t, fallback, err); got != providerB {
 		t.Fatalf("fallback provider = %s", got)
 	}
@@ -867,13 +808,15 @@ func TestCooldownFallbackFailureDoesNotCreateAssignment(t *testing.T) {
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
 
-	failed, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	failed, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	health.updates[failed.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
 	selector.Report(failed, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
-	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	fallback, err := selector.Acquire(snapshot, key, selection1)
 	if got := providerID(t, fallback, err); got != providerB {
 		t.Fatalf("fallback provider = %s", got)
 	}
@@ -893,19 +836,21 @@ func TestCooldownRemovesAssignmentsButPreservesPendingMigrationForEverySession(t
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
 	selector.Reconcile(snapshot)
 
-	s1, err := selector.Acquire(snapshot, normalKey("s1", "m"), nil)
+	s1, err := selector.Acquire(snapshot, normalKey("s1", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if err != nil || s1.Provider.ID != providerA {
 		t.Fatalf("s1 initial lease = %#v, %v", s1, err)
 	}
-	s2, err := selector.Acquire(snapshot, normalKey("s2", "m"), nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	s2, err := selector.Acquire(snapshot, normalKey("s2", "m"), selection1)
 	if err != nil || s2.Provider.ID != providerA {
 		t.Fatalf("s2 initial lease = %#v, %v", s2, err)
 	}
 
-	// S2 has already acquired its replacement while its A assignment still
-	// exists. A later global cooldown removes both A assignments; both source
-	// identities must remain available for their respective migrations.
-	s2Fallback, err := selector.Acquire(snapshot, normalKey("s2", "m"), map[string]struct{}{providerA: {}})
+	// S2 observes a channel cooldown before S1 reports the global cooldown.
+	// Both source versions must remain available for their migrations.
+	health.decisions[s2.HealthLease.Key] = HealthDecision{GlobalState: GlobalHealthy, ChannelState: ChannelCooldown}
+	selection1.StartAttempt()
+	s2Fallback, err := selector.Acquire(snapshot, normalKey("s2", "m"), selection1)
 	if err != nil || s2Fallback.Provider.ID != providerB {
 		t.Fatalf("s2 fallback lease = %#v, %v", s2Fallback, err)
 	}
@@ -932,7 +877,8 @@ func TestLateFallbackSuccessCannotOverwriteNewerAssignment(t *testing.T) {
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
 
-	failed, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	failed, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -941,13 +887,14 @@ func TestLateFallbackSuccessCannotOverwriteNewerAssignment(t *testing.T) {
 	aKey := failed.HealthLease.Key
 	health.decisions[aKey] = HealthDecision{Available: false, GlobalState: GlobalHealthy, ChannelState: ChannelCooldown}
 
-	late, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	late, err := selector.Acquire(snapshot, key, selection1)
 	if got := providerID(t, late, err); got != providerB {
 		t.Fatalf("late fallback provider = %s", got)
 	}
 	bKey := late.HealthLease.Key
 	health.decisions[bKey] = HealthDecision{Available: false, GlobalState: GlobalHealthy, ChannelState: ChannelCooldown}
-	newer, err := selector.Acquire(snapshot, key, nil)
+	newer, err := selector.Acquire(snapshot, key, NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, newer, err); got != providerC {
 		t.Fatalf("newer provider = %s", got)
 	}
@@ -971,7 +918,8 @@ func TestPendingMigrationExpiresWithStickyTTL(t *testing.T) {
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
 
-	failed, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	failed, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +929,8 @@ func TestPendingMigrationExpiresWithStickyTTL(t *testing.T) {
 		t.Fatalf("pending migrations = %#v", selector.pending)
 	}
 	now = now.Add(policy.StickyTTL)
-	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	fallback, err := selector.Acquire(snapshot, key, selection1)
 	if got := providerID(t, fallback, err); got != providerB {
 		t.Fatalf("fallback provider = %s", got)
 	}
@@ -1002,13 +951,15 @@ func TestPendingMigrationExpiresBeforeLateReport(t *testing.T) {
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
 
-	initial, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	initial, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	health.updates[initial.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
 	selector.Report(initial, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
-	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	fallback, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil || fallback.Provider.ID != providerB {
 		t.Fatalf("fallback lease = %#v, %v", fallback, err)
 	}
@@ -1031,19 +982,21 @@ func TestFreshRequestClearsPendingMigrationEvenWhenNoCandidateIsAvailable(t *tes
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
-	initial, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	initial, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	health.updates[initial.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
 	selector.Report(initial, Outcome{Class: FailureChannelImmediate, SessionID: key.SessionID})
-	fallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	fallback, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil || fallback.Provider.ID != providerB {
 		t.Fatalf("fallback lease = %#v, %v", fallback, err)
 	}
 
-	// A new request begins while both candidates are unavailable. Its empty
-	// exclusion set must invalidate the old request's pending tombstone even
+	// A new request begins while both candidates are unavailable. It must
+	// invalidate the old request's pending tombstone even
 	// though no replacement assignment can be selected in this call.
 	health.decisions[fallback.HealthLease.Key] = HealthDecision{
 		Available:    false,
@@ -1055,7 +1008,7 @@ func TestFreshRequestClearsPendingMigrationEvenWhenNoCandidateIsAvailable(t *tes
 		GlobalState:  GlobalHealthy,
 		ChannelState: ChannelCooldown,
 	}
-	if _, err := selector.Acquire(snapshot, key, nil); !errors.Is(err, ErrNoEligibleProvider) {
+	if _, err := selector.Acquire(snapshot, key, NewRequestSelection(snapshot.AttemptPolicy())); !errors.Is(err, ErrNoEligibleProvider) {
 		t.Fatalf("fresh unavailable request error = %v", err)
 	}
 	delete(health.decisions, fallback.HealthLease.Key)
@@ -1069,17 +1022,19 @@ func TestFreshRequestClearsPendingMigrationEvenWhenNoCandidateIsAvailable(t *tes
 func TestSameGenerationLateFallbackCannotPassAssignmentABA(t *testing.T) {
 	health := newFakeHealth()
 	selector := newTestScheduler(t, health, Policy{}, nil)
-	a := compileProvider(t, providerA, "a", []string{"m"}, 10)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
 	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
 
-	initial, err := selector.Acquire(snapshot, key, nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	initial, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldFallback, err := selector.Acquire(snapshot, key, map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	oldFallback, err := selector.Acquire(snapshot, key, selection1)
 	if err != nil || oldFallback.Provider.ID != providerB {
 		t.Fatalf("old fallback lease = %#v, %v", oldFallback, err)
 	}
@@ -1094,7 +1049,7 @@ func TestSameGenerationLateFallbackCannotPassAssignmentABA(t *testing.T) {
 	// The fake health controller returns the configured update for every lease;
 	// clear the one-shot cooldown before the replacement A request succeeds.
 	health.updates[initial.HealthLease.Key] = HealthUpdate{}
-	fresh, err := selector.Acquire(snapshot, key, nil)
+	fresh, err := selector.Acquire(snapshot, key, NewRequestSelection(snapshot.AttemptPolicy()))
 	if err != nil || fresh.Provider.ID != providerA {
 		t.Fatalf("fresh A lease = %#v, %v", fresh, err)
 	}
@@ -1121,16 +1076,18 @@ func TestLateLeaseCannotRebindAfterStaticOrModelInvalidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			health := newFakeHealth()
 			selector := newTestScheduler(t, health, Policy{}, nil)
-			a := compileProvider(t, providerA, "a", []string{"m"}, 10)
+			a := compileProvider(t, providerA, "a", []string{"m"}, 0)
 			b := compileProvider(t, providerB, "b", []string{"m"}, 0)
 			first := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
 			selector.Reconcile(first)
 			key := normalKey("session", "m")
-			initial, err := selector.Acquire(first, key, nil)
+			selection1 := NewRequestSelection(first.AttemptPolicy())
+			initial, err := selector.Acquire(first, key, selection1)
 			if err != nil {
 				t.Fatal(err)
 			}
-			fallback, err := selector.Acquire(first, key, map[string]struct{}{providerA: {}})
+			selection1.StartAttempt()
+			fallback, err := selector.Acquire(first, key, selection1)
 			if err != nil || fallback.Provider.ID != providerB {
 				t.Fatalf("fallback lease = %#v, %v", fallback, err)
 			}
@@ -1165,15 +1122,16 @@ func TestDisableHealthFailureKeepsAssignmentUntilSuccessfulMigration(t *testing.
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
 	selector.Reconcile(snapshot)
 
-	failed, err := selector.Acquire(snapshot, normalKey("s1", "m"), nil)
+	selection1 := NewRequestSelection(snapshot.AttemptPolicy())
+	failed, err := selector.Acquire(snapshot, normalKey("s1", "m"), selection1)
 	if got := providerID(t, failed, err); got != providerA {
 		t.Fatalf("s1 provider = %s", got)
 	}
-	second, err := selector.Acquire(snapshot, normalKey("s2", "m"), nil)
+	second, err := selector.Acquire(snapshot, normalKey("s2", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, second, err); got != providerB {
 		t.Fatalf("s2 provider = %s", got)
 	}
-	third, err := selector.Acquire(snapshot, normalKey("s3", "m"), nil)
+	third, err := selector.Acquire(snapshot, normalKey("s3", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, third, err); got != providerA {
 		t.Fatalf("s3 provider = %s", got)
 	}
@@ -1187,7 +1145,8 @@ func TestDisableHealthFailureKeepsAssignmentUntilSuccessfulMigration(t *testing.
 		t.Fatalf("provider B assignment changed: %#v", selector.Assignments(providerB))
 	}
 
-	retry, err := selector.Acquire(snapshot, normalKey("s1", "m"), map[string]struct{}{providerA: {}})
+	selection1.StartAttempt()
+	retry, err := selector.Acquire(snapshot, normalKey("s1", "m"), selection1)
 	if got := providerID(t, retry, err); got != providerB {
 		t.Fatalf("failed session fallback = %s", got)
 	}
@@ -1198,7 +1157,7 @@ func TestDisableHealthFailureKeepsAssignmentUntilSuccessfulMigration(t *testing.
 	if assignments := selector.Assignments(providerB); len(assignments) != 2 {
 		t.Fatalf("provider B assignments after migration = %#v", assignments)
 	}
-	afterRound, err := selector.Acquire(snapshot, normalKey("s4", "m"), nil)
+	afterRound, err := selector.Acquire(snapshot, normalKey("s4", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if got := providerID(t, afterRound, err); got != providerB {
 		t.Fatalf("new session did not continue round-robin after migration: %s", got)
 	}
@@ -1211,7 +1170,7 @@ func TestDisableHealthStreamFailureKeepsAssignmentAfterResponseStarts(t *testing
 	item.DisableHealth = true
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{item}}
 	selector.Reconcile(snapshot)
-	lease, err := selector.Acquire(snapshot, normalKey("stream-session", "m"), nil)
+	lease, err := selector.Acquire(snapshot, normalKey("stream-session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1233,10 +1192,10 @@ func TestReconcilePrunesAssignmentsAndInvalidCursors(t *testing.T) {
 	c := compileProvider(t, providerC, "c", []string{"m"}, 0)
 	first := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b, c}}
 	selector.Reconcile(first)
-	if _, err := selector.Acquire(first, normalKey("s1", "m"), nil); err != nil {
+	if _, err := selector.Acquire(first, normalKey("s1", "m"), NewRequestSelection(first.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := selector.Acquire(first, normalKey("s2", "m"), nil); err != nil {
+	if _, err := selector.Acquire(first, normalKey("s2", "m"), NewRequestSelection(first.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1245,7 +1204,7 @@ func TestReconcilePrunesAssignmentsAndInvalidCursors(t *testing.T) {
 	if len(selector.Assignments(providerB)) != 0 {
 		t.Fatalf("removed provider assignments = %#v", selector.Assignments(providerB))
 	}
-	lease, err := selector.Acquire(second, normalKey("s3", "m"), nil)
+	lease, err := selector.Acquire(second, normalKey("s3", "m"), NewRequestSelection(second.AttemptPolicy()))
 	if got := providerID(t, lease, err); got != providerA {
 		t.Fatalf("selection after cursor provider removal = %s", got)
 	}
@@ -1258,7 +1217,7 @@ func TestReconcilePrunesAssignmentsAndInvalidCursors(t *testing.T) {
 	if len(selector.Assignments(providerA)) != 0 {
 		t.Fatalf("model-removed assignments = %#v", selector.Assignments(providerA))
 	}
-	if _, err := selector.Acquire(third, normalKey("s4", "m"), nil); err != nil {
+	if _, err := selector.Acquire(third, normalKey("s4", "m"), NewRequestSelection(third.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 	disabled := c.Clone()
@@ -1276,7 +1235,7 @@ func TestReconcilePreservesIdentityCompatibleAssignments(t *testing.T) {
 	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
 	first := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a}}
 	selector.Reconcile(first)
-	if _, err := selector.Acquire(first, normalKey("session", "m"), nil); err != nil {
+	if _, err := selector.Acquire(first, normalKey("session", "m"), NewRequestSelection(first.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1298,7 +1257,7 @@ func TestOldGenerationReportCannotRemoveNewAssignment(t *testing.T) {
 	oldProvider := compileProvider(t, providerA, "a", []string{"m"}, 0)
 	oldSnapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{oldProvider}}
 	selector.Reconcile(oldSnapshot)
-	oldLease, err := selector.Acquire(oldSnapshot, normalKey("session", "m"), nil)
+	oldLease, err := selector.Acquire(oldSnapshot, normalKey("session", "m"), NewRequestSelection(oldSnapshot.AttemptPolicy()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1311,7 +1270,7 @@ func TestOldGenerationReportCannotRemoveNewAssignment(t *testing.T) {
 	}
 	newSnapshot := &fakeSnapshot{revision: 2, providers: []*provider.CompiledProvider{newProvider}}
 	selector.Reconcile(newSnapshot)
-	if _, err := selector.Acquire(newSnapshot, normalKey("session", "m"), nil); err != nil {
+	if _, err := selector.Acquire(newSnapshot, normalKey("session", "m"), NewRequestSelection(newSnapshot.AttemptPolicy())); err != nil {
 		t.Fatal(err)
 	}
 	health.updates[oldLease.HealthLease.Key] = HealthUpdate{GlobalEnteredCooldown: true, GlobalState: GlobalCooldown}
@@ -1333,7 +1292,7 @@ func TestOldSnapshotAcquireDoesNotPersistStateAfterReconcile(t *testing.T) {
 	newProvider := compileProvider(t, providerB, "new", []string{"m"}, 0)
 	newSnapshot := &fakeSnapshot{revision: 2, providers: []*provider.CompiledProvider{newProvider}}
 	selector.Reconcile(newSnapshot)
-	lease, err := selector.Acquire(oldSnapshot, normalKey("old-request", "m"), nil)
+	lease, err := selector.Acquire(oldSnapshot, normalKey("old-request", "m"), NewRequestSelection(oldSnapshot.AttemptPolicy()))
 	if got := providerID(t, lease, err); got != providerA {
 		t.Fatalf("old snapshot provider = %s", got)
 	}
@@ -1365,7 +1324,7 @@ func TestConcurrentAcquireReportAndGenerationReconcile(t *testing.T) {
 			if i%2 == 0 {
 				snapshot = newSnapshot
 			}
-			lease, err := selector.Acquire(snapshot, normalKey("session", "m"), nil)
+			lease, err := selector.Acquire(snapshot, normalKey("session", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
 			if err == nil {
 				selector.Report(lease, Outcome{Class: FailureNone, SessionID: "session"})
 			}
@@ -1382,5 +1341,55 @@ func TestConcurrentAcquireReportAndGenerationReconcile(t *testing.T) {
 		if assignment.Generation != newProvider.Generation {
 			t.Fatalf("stale assignment survived reconcile: %#v", assignment)
 		}
+	}
+}
+
+func TestMigrationSourceSurvivesRoundsAndConcurrentUpdate(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+	old := NewRequestSelection(AttemptPolicy{MaxAttempts: 6})
+	first, err := selector.Acquire(snapshot, key, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceVersion := old.source.Version
+	selector.Report(first, Outcome{Class: FailureChannelTransient})
+	old.StartAttempt()
+	// A concurrent request also starts at A and succeeds at B.
+	newer := NewRequestSelection(AttemptPolicy{MaxAttempts: 3})
+	lease, err := selector.Acquire(snapshot, key, newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.Report(lease, Outcome{Class: FailureChannelTransient})
+	newer.StartAttempt()
+	lease, err = selector.Acquire(snapshot, key, newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.Report(lease, Outcome{Class: FailureNone})
+	currentVersion := selector.assignments[key].version
+	for i, want := range []string{providerB, providerA, providerB, providerA, providerB} {
+		lease, err = selector.Acquire(snapshot, key, old)
+		if err != nil || lease.Provider.ID != want {
+			t.Fatalf("attempt %d: %#v %v", i, lease, err)
+		}
+		if old.source.Version != sourceVersion {
+			t.Fatal("request recaptured newer affinity")
+		}
+		outcome := Outcome{Class: FailureChannelTransient}
+		if i == 4 {
+			outcome.Class = FailureNone
+		}
+		selector.Report(lease, outcome)
+		old.StartAttempt()
+	}
+	if selector.assignments[key].version != currentVersion || selector.assignments[key].assignment.ProviderID != providerB {
+		t.Fatal("late round replaced newer binding")
 	}
 }

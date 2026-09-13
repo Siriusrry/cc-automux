@@ -781,7 +781,7 @@ func TestProviderHealthReturnsCompleteDiagnosticsAndStatusAggregates(t *testing.
 		SessionID:   "raw-session-id",
 		Model:       "model-a",
 		RequestType: traffic.RequestTypeNormal,
-	}, nil)
+	}, scheduler.NewRequestSelection(snapshot.NormalAttemptPolicy()))
 	if err != nil {
 		t.Fatal(err)
 	}

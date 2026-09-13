@@ -72,9 +72,9 @@ func TestConcurrentRequestsKeepDistinctTracesAcrossFailover(t *testing.T) {
 
 type traceSelector struct{ fakeSelector }
 
-func (s *traceSelector) Acquire(snapshot scheduler.Snapshot, key scheduler.StickyKey, excluded map[string]struct{}) (scheduler.AttemptLease, error) {
-	for _, p := range snapshot.Candidates(key.Model) {
-		if _, done := excluded[p.ID]; !done {
+func (s *traceSelector) Acquire(snapshot scheduler.Snapshot, key scheduler.StickyKey, selection *scheduler.RequestSelection) (scheduler.AttemptLease, error) {
+	for i, p := range snapshot.Candidates(key.Model) {
+		if i == selection.AttemptsUsed() {
 			return leaseFor(p, key.Model), nil
 		}
 	}

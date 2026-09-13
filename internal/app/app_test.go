@@ -696,7 +696,7 @@ func TestAppLogsStructuredFailoverWithCompleteSourceAndNextProvider(t *testing.T
 			BaseURL:  first.URL,
 			APIKey:   "first-key",
 			Models:   []string{"model-a"},
-			Priority: 1,
+			Priority: 0,
 			Enabled:  true,
 		},
 		{

@@ -159,9 +159,10 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 		Model:       prepared.Plan.EffectiveModel,
 		RequestType: prepared.Plan.RequestType,
 	}
-	excluded := make(map[string]struct{})
+	selection := scheduler.NewRequestSelection(plan.AttemptPolicy)
 	var last *capturedFailure
-	for attempt := 1; attempt <= plan.AttemptPolicy.MaxAttempts; attempt++ {
+	for selection.HasBudget() {
+		attempt := selection.AttemptsUsed() + 1
 		if requestCanceled(incoming.Context()) {
 			// A retryable response may already have been reported to Health, but its
 			// event is intentionally delayed until the gateway knows whether a
@@ -173,7 +174,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			}
 			return
 		}
-		selected, err := acquireWithPlanPolicy(h.selector, snapshot, sticky, excluded, plan.AttemptPolicy)
+		selected, err := h.selector.Acquire(snapshot, sticky, selection)
 		if err != nil {
 			if requestCanceled(incoming.Context()) {
 				if last != nil {
@@ -207,11 +208,6 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
 			return
 		}
-		if _, duplicate := excluded[lease.Provider.ID]; duplicate {
-			h.selector.Report(lease.AttemptLease, scheduler.Outcome{Class: scheduler.FailureNeutral, SessionID: sticky.SessionID})
-			h.finishLocalSelectionFailure(w, prepared.BaseBody, last, "provider selection repeated an attempt")
-			return
-		}
 		if last != nil {
 			if requestCanceled(incoming.Context()) {
 				h.recordCapturedFailure(last)
@@ -221,43 +217,13 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			h.recordFailover(last, lease, attempt, incoming)
 			last = nil
 		}
-		failure, done := h.executeAttempt(w, incoming, prepared, lease, sticky.SessionID, attempt)
+		failure, done := h.executeAttempt(w, incoming, prepared, lease, sticky.SessionID, attempt, selection)
 		if done {
 			return
 		}
 		last = failure
-		excluded[lease.Provider.ID] = struct{}{}
 	}
 	h.finishCapturedFailure(w, incoming.Context(), prepared.BaseBody, last, nil)
-}
-
-// attemptPolicySnapshot adapts the immutable plan budget to the legacy
-// scheduler.Snapshot interface. The concrete Scheduler reads AttemptPolicy
-// from this wrapper, so classifier requests cannot accidentally consume the
-// ordinary three-attempt default.
-type attemptPolicySnapshot struct {
-	scheduler.Snapshot
-	policy scheduler.AttemptPolicy
-}
-
-func (s attemptPolicySnapshot) AttemptPolicy() scheduler.AttemptPolicy { return s.policy }
-
-func (s attemptPolicySnapshot) AttemptPolicyFor(traffic.RequestType) scheduler.AttemptPolicy {
-	return s.policy
-}
-
-func snapshotWithAttemptPolicy(snapshot scheduler.Snapshot, policy scheduler.AttemptPolicy) scheduler.Snapshot {
-	if snapshot == nil {
-		return nil
-	}
-	return attemptPolicySnapshot{Snapshot: snapshot, policy: policy}
-}
-
-func acquireWithPlanPolicy(selector scheduler.Selector, snapshot scheduler.Snapshot, key scheduler.StickyKey, excluded map[string]struct{}, policy scheduler.AttemptPolicy) (scheduler.AttemptLease, error) {
-	if requestSelector, ok := selector.(scheduler.RequestPolicySelector); ok {
-		return requestSelector.AcquireWithPolicy(snapshot, key, excluded, policy)
-	}
-	return selector.Acquire(snapshotWithAttemptPolicy(snapshot, policy), key, excluded)
 }
 
 func (h *Handler) finishCapturedFailure(w http.ResponseWriter, ctx context.Context, base bodyfile.Body, last *capturedFailure, unavailable error) {
@@ -295,7 +261,7 @@ func (h *Handler) finishLocalSelectionFailure(w http.ResponseWriter, base bodyfi
 	writeError(w, http.StatusBadGateway, "bad_gateway", message)
 }
 
-func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, prepared traffic.PreparedRequest, lease requestAttemptLease, sessionID string, attempt int) (*capturedFailure, bool) {
+func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, prepared traffic.PreparedRequest, lease requestAttemptLease, sessionID string, attempt int, selection *scheduler.RequestSelection) (*capturedFailure, bool) {
 	item := lease.Provider
 	if item == nil || incoming == nil || incoming.URL == nil {
 		return nil, true
@@ -417,6 +383,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		}
 	}()
 	request = request.WithContext(control.ctx)
+	selection.StartAttempt()
 	response, requestErr := clientLease.Client().Do(request)
 	response, requestErr = control.receiveHeaders(response, requestErr)
 	requestCloseErr := requestBody.Close()

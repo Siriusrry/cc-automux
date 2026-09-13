@@ -13,7 +13,7 @@
     success: "Success — the upstream answered and the provider's health channel was marked healthy.",
     failure: 'Failure — the request could not be completed. Expand the record for details.',
     canceled: 'Canceled — Claude Code canceled or disconnected before the upstream call finished. Not a provider failure.',
-    failover: 'Failover — after this failure the request moved on to the next provider.'
+    failover: 'Failover — after this failure the request continued with another upstream attempt.'
   };
   const EVENT_TIP = {
     listening: 'Service event — the listener bound and started serving.',

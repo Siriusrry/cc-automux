@@ -130,7 +130,7 @@ type fakeSelector struct {
 	err      error
 }
 
-func (s *fakeSelector) Acquire(_ scheduler.Snapshot, key scheduler.StickyKey, _ map[string]struct{}) (scheduler.AttemptLease, error) {
+func (s *fakeSelector) Acquire(_ scheduler.Snapshot, key scheduler.StickyKey, _ *scheduler.RequestSelection) (scheduler.AttemptLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.acquires++
