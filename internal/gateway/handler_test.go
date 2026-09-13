@@ -769,8 +769,21 @@ func TestGatewayCancellationAfterDoStopsBeforeResponseAndFailover(t *testing.T) 
 	if len(reports) != 1 || reports[0].Class != scheduler.FailureChannelTransient && reports[0].Class != scheduler.FailureClientCanceled {
 		t.Fatalf("reports = %#v", reports)
 	}
-	got := waitGatewayEvents(t, events, 2)
-	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventCanceled && got[1].Kind != EventFailure || got[1].NextProviderID != "" {
+	count := 2
+	if reports[0].Class == scheduler.FailureChannelTransient {
+		count = 3
+	}
+	got := waitGatewayEvents(t, events, count)
+	cancellations := 0
+	for _, event := range got {
+		if event.Kind == EventCanceled {
+			cancellations++
+		}
+		if event.NextProviderID != "" {
+			t.Fatalf("unexpected failover: %#v", got)
+		}
+	}
+	if len(got) != count || got[0].Kind != EventForward || cancellations != 1 {
 		t.Fatalf("events = %#v", got)
 	}
 }

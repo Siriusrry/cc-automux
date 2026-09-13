@@ -167,6 +167,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			// finish it as a normal terminal failure and never emit EventFailover.
 			if last != nil {
 				h.recordCapturedFailure(last)
+				h.recordBetweenAttemptCanceled(prepared.Plan, attempt)
 			}
 			return
 		}
@@ -175,6 +176,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			if requestCanceled(incoming.Context()) {
 				if last != nil {
 					h.recordCapturedFailure(last)
+					h.recordBetweenAttemptCanceled(prepared.Plan, attempt)
 				}
 				return
 			}
@@ -200,7 +202,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			if last != nil {
 				h.recordCapturedFailure(last)
 			}
-			if last != nil && last.response != nil {
+			if last == nil && attempt == 1 {
 				h.selector.Report(lease.AttemptLease, scheduler.Outcome{Class: scheduler.FailureClientCanceled})
 			} else {
 				h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
@@ -215,11 +217,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 		if last != nil {
 			if requestCanceled(incoming.Context()) {
 				h.recordCapturedFailure(last)
-				if last != nil && last.response != nil {
-					h.selector.Report(lease.AttemptLease, scheduler.Outcome{Class: scheduler.FailureClientCanceled})
-				} else {
-					h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
-				}
+				h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
 				return
 			}
 			h.recordFailover(last, lease, attempt, incoming)

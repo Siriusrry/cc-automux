@@ -1,6 +1,9 @@
 package gateway
 
-import "io"
+import (
+	"github.com/Siriusrry/cc-automux/internal/traffic"
+	"io"
+)
 
 func cancelPhase(started bool, status int) cancellationPhase {
 	if status != 0 {
@@ -29,4 +32,8 @@ func (w *downstreamWriter) Write(p []byte) (int, error) {
 		w.err = clientWriteError{err}
 	}
 	return n, err
+}
+
+func (h *Handler) recordBetweenAttemptCanceled(plan traffic.RequestPlan, attempt int) {
+	h.record(Event{Kind: EventCanceled, SessionID: plan.OriginalSessionID, Model: plan.EffectiveModel, RequestType: plan.RequestType, Stream: plan.Stream, Attempt: attempt, CancelReason: canceledByClient, CancelPhase: cancelBeforeUpstream})
 }
