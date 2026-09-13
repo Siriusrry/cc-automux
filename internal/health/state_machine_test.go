@@ -181,9 +181,9 @@ func TestFailureWindowThresholdAndLayerIsolation(t *testing.T) {
 	keyB := testHealthKey(p, "model-b")
 
 	report(t, store, keyA, false, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
-	clock.Advance(2 * time.Minute)
+	clock.Advance(time.Hour)
 	report(t, store, keyA, false, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
-	clock.Advance(2*time.Minute + time.Nanosecond)
+	clock.Advance(time.Hour + time.Nanosecond)
 	report(t, store, keyA, false, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
 	got := mustProviderSnapshot(t, store, p)
 	channelA := findChannel(t, got, "model-a", traffic.RequestTypeNormal)
@@ -916,4 +916,38 @@ func findChannel(t *testing.T, snapshot ProviderSnapshot, model string, requestT
 	}
 	t.Fatalf("missing channel %q/%q in %#v", model, requestType, snapshot.Channels)
 	return ChannelSnapshot{}
+}
+
+func TestFailureWindowAcrossInfrequentCalls(t *testing.T) {
+	for _, class := range []scheduler.FailureClass{scheduler.FailureGlobalTransient, scheduler.FailureChannelTransient, scheduler.FailureChannelStream} {
+		for _, gap := range []time.Duration{59 * time.Minute, time.Hour, 61 * time.Minute} {
+			t.Run(string(class)+"/"+gap.String(), func(t *testing.T) {
+				clock := newFakeClock()
+				store := newTestStore(t, clock)
+				p := testProvider("provider", "generation", false, "model")
+				store.Reconcile([]*provider.CompiledProvider{p})
+				key := testHealthKey(p, "model")
+				report(t, store, key, false, scheduler.Outcome{Class: class})
+				clock.Advance(gap)
+				report(t, store, key, false, scheduler.Outcome{Class: class})
+				got := mustProviderSnapshot(t, store, p)
+				count := got.Channels[0].ConsecutiveFailures
+				if class == scheduler.FailureGlobalTransient {
+					count = got.Global.ConsecutiveFailures
+				}
+				want := 2
+				if gap > time.Hour {
+					want = 1
+				}
+				if count != want {
+					t.Fatalf("count = %d, want %d", count, want)
+				}
+				report(t, store, key, false, scheduler.Outcome{Class: scheduler.FailureNone, HTTPStatus: 200})
+				got = mustProviderSnapshot(t, store, p)
+				if got.Global.ConsecutiveFailures != 0 || got.Channels[0].ConsecutiveFailures != 0 {
+					t.Fatalf("success did not reset counts: %#v", got)
+				}
+			})
+		}
+	}
 }

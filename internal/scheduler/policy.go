@@ -39,7 +39,7 @@ type Policy struct {
 
 func DefaultPolicy() Policy {
 	return Policy{
-		FailureWindow:       2 * time.Minute,
+		FailureWindow:       time.Hour,
 		FailureThreshold:    3,
 		Cooldowns:           [5]time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 15 * time.Minute},
 		HalfOpenConcurrency: 1,

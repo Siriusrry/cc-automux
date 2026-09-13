@@ -9,7 +9,7 @@ import (
 func TestDefaultPolicy(t *testing.T) {
 	got := DefaultPolicy()
 	wantCooldowns := [5]time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 15 * time.Minute}
-	if got.FailureWindow != 2*time.Minute || got.FailureThreshold != 3 ||
+	if got.FailureWindow != time.Hour || got.FailureThreshold != 3 ||
 		got.HalfOpenConcurrency != 1 ||
 		got.StickyTTL != time.Hour || got.StickyCapacity != 8192 ||
 		got.RetryAfterMin != time.Second || got.RetryAfterMax != 15*time.Minute ||
