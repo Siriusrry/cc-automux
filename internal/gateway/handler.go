@@ -329,8 +329,6 @@ type capturedFailure struct {
 	outcome      scheduler.Outcome
 	update       scheduler.HealthUpdate
 	attempt      int
-	headers      http.Header
-	body         []byte
 	transport    bool
 	errorCode    string
 	errorMessage string
@@ -381,9 +379,7 @@ func (h *Handler) writeCapturedFailure(w http.ResponseWriter, failure *capturedF
 		writeError(w, http.StatusBadGateway, "bad_gateway", "provider rejected the gateway request")
 		return
 	}
-	copyResponseHeaders(w.Header(), failure.headers)
-	w.WriteHeader(status)
-	_, _ = w.Write(failure.body)
+	writeError(w, http.StatusBadGateway, "bad_gateway", "provider request failed")
 }
 
 func (h *Handler) writeUnavailable(w http.ResponseWriter, err error) {

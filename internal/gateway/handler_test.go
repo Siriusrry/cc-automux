@@ -783,11 +783,14 @@ func TestStreamResponseCancellationBeforeWriteHeaderReportsOnce(t *testing.T) {
 	defer handler.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &cancelingResponseWriter{cancel: cancel, cancelOn: "header"}
-	handler.streamResponse(w, ctx, &http.Response{
+	control := handler.newUpstreamAttempt(ctx, false)
+	defer control.close()
+	response, _ := control.receiveHeaders(&http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"X-Test": []string{"value"}},
 		Body:       io.NopCloser(strings.NewReader("body")),
-	}, requestAttemptLease{AttemptLease: leaseFor(item, "m")}, scheduler.Outcome{Class: scheduler.FailureNone, UpstreamURL: "https://one.invalid/v1/messages", SessionID: "session"}, 1)
+	}, nil)
+	handler.streamResponse(w, ctx, response, requestAttemptLease{AttemptLease: leaseFor(item, "m"), control: control}, scheduler.Outcome{Class: scheduler.FailureNone, UpstreamURL: "https://one.invalid/v1/messages", SessionID: "session"}, 1)
 
 	_, reports := selector.snapshot()
 	if w.headerCalls != 0 || w.writeCalls != 0 {
@@ -1484,7 +1487,10 @@ func TestCanceledEventPhasesAndDownstreamFailure(t *testing.T) {
 	events := &eventCollector{}
 	h.recorder = events
 	w := &failedDownstreamWriter{header: make(http.Header)}
-	h.streamResponse(w, context.Background(), &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data"))}, requestAttemptLease{AttemptLease: leaseFor(item, "m"), stream: true, started: true}, scheduler.Outcome{HTTPStatus: 200}, 1)
+	control := h.newUpstreamAttempt(context.Background(), false)
+	defer control.close()
+	response, _ := control.receiveHeaders(&http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data"))}, nil)
+	h.streamResponse(w, context.Background(), response, requestAttemptLease{AttemptLease: leaseFor(item, "m"), stream: true, started: true, control: control}, scheduler.Outcome{HTTPStatus: 200}, 1)
 	event := events.snapshot()[0]
 	if event.Kind != EventCanceled || event.CancelReason != "client_disconnected" || event.CancelPhase != "receiving_response" || !event.ResponseStarted || event.RawError != "client write failed" {
 		t.Fatalf("event = %#v", event)

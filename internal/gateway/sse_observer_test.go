@@ -117,7 +117,10 @@ func TestSSEConfirmedResultSurvivesClientCancel(t *testing.T) {
 		h := NewWithOptions(nil, &fakeSelector{}, Options{})
 		response := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire))}
 		w := &fixedWriteRecorder{header: make(http.Header), onWrite: cancel}
-		result := h.copyUpstream(w, ctx, response, nil, true)
+		control := h.newUpstreamAttempt(ctx, false)
+		response, _ = control.receiveHeaders(response, nil)
+		result := h.copyUpstream(w, ctx, response, control, true)
+		control.close()
 		h.Close()
 		cancel()
 		want := "stream_error_event"

@@ -286,11 +286,6 @@ func consumeFixedResponse(response *http.Response) fixedResponseFacts {
 	return facts
 }
 
-func fixedRequestCanceled(ctx context.Context, _ *http.Response) bool { return requestCanceled(ctx) }
-func fixedCancellationCause(ctx context.Context, _ *http.Response, cause error) error {
-	return errors.Join(cause, ctx.Err())
-}
-
 func withFixedDiagnosticScope(ctx context.Context, scope automode.DiagnosticScope, scoped bool) context.Context {
 	if ctx == nil || !scoped {
 		return ctx
@@ -620,7 +615,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		// requestCloseErr is retained by the lifecycle cleanup and is therefore
 		// intentionally not joined here a second time.
 		requestErr = errors.Join(requestErr, facts.readErr, facts.closeErr)
-		if fixedRequestCanceled(ctx, response) && control.verdict().reason != "transport_error" {
+		if requestCanceled(ctx) && control.verdict().reason != "transport_error" {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, facts.status, facts.headers, string(facts.body), requestErr)
 			return
 		}
@@ -636,7 +631,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		// The lifecycle owns requestCloseErr; terminal cleanup appends it to the
 		// diagnostic exactly once along with any response read/close errors.
 		cause := errors.Join(facts.readErr, facts.closeErr)
-		if fixedRequestCanceled(ctx, response) {
+		if requestCanceled(ctx) {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, facts.status, facts.headers, string(facts.body), cause)
 			return
 		}
@@ -646,7 +641,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 	if response == nil {
-		if fixedRequestCanceled(ctx, response) {
+		if requestCanceled(ctx) {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, 0, nil, "", errors.New("nil upstream response"))
 			return
 		}
@@ -656,7 +651,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	}
 	lifecycle.observeResponse(response.StatusCode, response.Header, nil)
 	if response.Body == nil {
-		if fixedRequestCanceled(ctx, response) {
+		if requestCanceled(ctx) {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, response.StatusCode, response.Header, "", errors.New("nil upstream response body"))
 			return
 		}
@@ -667,7 +662,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	// A cancellation observed after Do has started is a terminal fixed-call
 	// failure.  Consume the response before returning so any status, headers,
 	// and raw body already delivered by the target remain diagnosable.
-	if fixedRequestCanceled(ctx, response) && control.verdict().reason != "http_error" {
+	if requestCanceled(ctx) && control.verdict().reason != "http_error" {
 		facts := consumeFixedResponse(response)
 		lifecycle.observeResponse(facts.status, facts.headers, nil)
 		lifecycle.observeBody(string(facts.body))
@@ -908,7 +903,7 @@ func (h *Handler) streamFixedBodyWithFacts(w http.ResponseWriter, ctx context.Co
 	if copyErr != nil || closeErr != nil || requestCanceled(ctx) {
 		cause := errors.Join(copyErr, closeErr)
 		if requestCanceled(ctx) {
-			cause = fixedCancellationCause(ctx, nil, cause)
+			cause = errors.Join(cause, ctx.Err())
 			cancelHeaders := headers
 			if fixedLifecycleFromContext(ctx) != nil {
 				cancelHeaders = nil
@@ -1031,13 +1026,6 @@ func fixedLifecycleFacts(lifecycle *fixedLifecycle, upstreamStatus int, upstream
 	return upstreamStatus, upstreamHeaders, upstreamBody, cause
 }
 
-func (h *Handler) fixedRawTerminal(ctx context.Context, w http.ResponseWriter, model string, target *provider.CompiledFixedTarget, sessionID, upstream string, status int, code, message string, upstreamStatus int, upstreamHeaders http.Header, upstreamBody string) {
-	// Keep the raw body as the diagnostic error when present, while allowing an
-	// empty upstream error body to remain an empty Error field.
-	h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, status, code, message,
-		fixedErrorText(upstreamBody), upstreamStatus, upstreamHeaders, "", upstreamBody)
-}
-
 func fixedTransportError(error) (string, int) {
 	return "bad_gateway", http.StatusBadGateway
 }
@@ -1116,13 +1104,7 @@ func (h *Handler) fixedTerminalForModelWithRaw(ctx context.Context, w http.Respo
 	h.recordFixedCall(ctx, target, call)
 	h.recordFixedEvent(ctx, EventFailure, target, sessionID, model, upstream, 1, upstreamStatus, errText)
 	if status > 0 && w != nil && (lifecycle == nil || !lifecycle.hasResponseStarted()) && !requestCanceled(ctx) {
-		if code == "upstream_error" && upstreamStatus == status {
-			copyResponseHeaders(w.Header(), upstreamHeaders)
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(upstreamBody))
-		} else {
-			writeError(w, status, code, message)
-		}
+		writeError(w, status, code, message)
 	}
 }
 

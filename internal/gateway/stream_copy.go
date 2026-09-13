@@ -15,11 +15,6 @@ type streamCopyResult struct {
 }
 
 func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, response *http.Response, control *upstreamAttempt, sse bool) (result streamCopyResult) {
-	if control == nil {
-		control = h.newUpstreamAttempt(ctx, false)
-		defer control.close()
-		response, _ = control.receiveHeaders(response, nil)
-	}
 	if response == nil || response.Body == nil {
 		result.verdict = control.claim(responseVerdict{reason: "local_error", class: scheduler.FailureNeutral, raw: "provider returned no response body"})
 		return
