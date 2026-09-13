@@ -183,3 +183,38 @@ func TestIdleTimeoutResetsOnEveryChunk(t *testing.T) {
 		t.Fatalf("response = %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestSlowDownstreamDoesNotConsumeUpstreamIdleBudget(t *testing.T) {
+	h := NewWithOptions(nil, &fakeSelector{}, Options{UpstreamLimits: UpstreamLimits{ResponseIdle: 10 * time.Millisecond}})
+	defer h.Close()
+	control := h.newUpstreamAttempt(context.Background(), false)
+	defer control.close()
+	response, err := control.receiveHeaders(&http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("available data"))}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	writer := &fixedWriteRecorder{header: make(http.Header), onWrite: func() { time.Sleep(30 * time.Millisecond) }}
+	result := h.copyUpstream(writer, context.Background(), response, control, false)
+	if result.verdict.reason != "completed" || control.reason() != "" {
+		t.Fatalf("slow downstream blamed upstream: %#v", result)
+	}
+}
+
+func TestAttemptReusesTimerAndIgnoresStoppedCallbacks(t *testing.T) {
+	h := NewWithOptions(nil, &fakeSelector{}, Options{})
+	defer h.Close()
+	control := h.newUpstreamAttempt(context.Background(), true)
+	defer control.close()
+	original := control.timer
+	for i := 0; i < 100; i++ {
+		control.mu.Lock()
+		control.stopTimerLocked()
+		control.armLocked(time.Hour, "response_idle_timeout")
+		control.mu.Unlock()
+		control.timerFired()
+		if control.timer != original || control.reason() != "" {
+			t.Fatal("timer replaced or stale callback claimed timeout")
+		}
+	}
+}

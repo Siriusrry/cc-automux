@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
@@ -48,25 +49,30 @@ type attemptStop struct{ reason, message string }
 func (e *attemptStop) Error() string { return e.message }
 
 type upstreamAttempt struct {
-	fixed        bool
-	background   bool
-	result       *responseVerdict
-	observer     *sseObserver
-	streaming    bool
-	status       int
-	mu           sync.Mutex
-	ctx          context.Context
-	cancel       context.CancelCauseFunc
-	stopClient   func() bool
-	stopShutdown func() bool
-	timer        *time.Timer
-	epoch        uint64
-	headersAt    time.Time
-	bytes        int64
-	stopped      *attemptStop
-	finished     bool
-	detached     bool
-	limits       UpstreamLimits
+	fixed         bool
+	background    bool
+	result        *responseVerdict
+	observer      *sseObserver
+	streaming     bool
+	status        int
+	mu            sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelCauseFunc
+	stopClient    func() bool
+	stopShutdown  func() bool
+	timer         *time.Timer
+	epoch         uint64
+	callbackEpoch atomic.Uint64
+	timerArmed    bool
+	timerDeadline time.Time
+	timerWait     time.Duration
+	timerReason   string
+	headersAt     time.Time
+	bytes         int64
+	stopped       *attemptStop
+	finished      bool
+	detached      bool
+	limits        UpstreamLimits
 }
 
 func (h *Handler) newUpstreamAttempt(client context.Context, stream bool) *upstreamAttempt {
@@ -84,23 +90,37 @@ func (h *Handler) newUpstreamAttempt(client context.Context, stream bool) *upstr
 
 func (a *upstreamAttempt) armLocked(wait time.Duration, reason string) {
 	a.stopTimerLocked()
-	epoch := a.epoch
-	a.timer = time.AfterFunc(wait, func() {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.epoch != epoch || a.finished || a.stopped != nil {
-			return
-		}
-		a.stopLocked(reason, fmt.Sprintf("upstream %s after %.3g seconds; received %d bytes", reason, wait.Seconds(), a.bytes))
-	})
-}
-func (a *upstreamAttempt) stopTimerLocked() {
-	a.epoch++
-	if a.timer != nil {
-		a.timer.Stop()
-		a.timer = nil
+	a.timerArmed = true
+	a.timerDeadline = time.Now().Add(wait)
+	a.timerWait, a.timerReason = wait, reason
+	if a.timer == nil {
+		a.timer = time.AfterFunc(wait, a.timerFired)
+	} else {
+		a.timer.Reset(wait)
 	}
 }
+
+func (a *upstreamAttempt) timerFired() {
+	epoch := a.callbackEpoch.Load()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// A stopped callback may enter after Reset. Only the current expired
+	// deadline can claim a timeout, including when callbacks overlap.
+	if a.epoch != epoch || !a.timerArmed || a.finished || a.stopped != nil || time.Now().Before(a.timerDeadline) {
+		return
+	}
+	a.stopLocked(a.timerReason, fmt.Sprintf("upstream %s after %.3g seconds; received %d bytes", a.timerReason, a.timerWait.Seconds(), a.bytes))
+}
+
+func (a *upstreamAttempt) stopTimerLocked() {
+	a.epoch++
+	a.callbackEpoch.Store(a.epoch)
+	a.timerArmed = false
+	if a.timer != nil {
+		a.timer.Stop()
+	}
+}
+
 func (a *upstreamAttempt) stopLocked(reason, message string) {
 	if a.stopped != nil || a.finished {
 		return
@@ -146,9 +166,6 @@ func (a *upstreamAttempt) receiveHeaders(response *http.Response, err error) (*h
 			}
 		}
 		if response.Body != nil {
-			if !a.detached {
-				a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
-			}
 			response.Body = &attemptBodyReader{ReadCloser: response.Body, attempt: a}
 		}
 	}
@@ -210,6 +227,9 @@ func (b *attemptBodyReader) Read(p []byte) (int, error) {
 	a := b.attempt
 	a.mu.Lock()
 	stopped := a.stopped
+	if stopped == nil && !a.background {
+		a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+	}
 	a.mu.Unlock()
 	if stopped != nil {
 		return 0, stopped
@@ -217,6 +237,9 @@ func (b *attemptBodyReader) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !a.background {
+		a.stopTimerLocked()
+	}
 	if a.stopped != nil {
 		return 0, a.stopped
 	}
@@ -228,9 +251,7 @@ func (b *attemptBodyReader) Read(p []byte) (int, error) {
 			}
 		}
 		a.bytes += int64(n)
-		if !a.background {
-			a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
-		}
+
 	}
 	if err != nil {
 		a.stopTimerLocked()
@@ -305,7 +326,7 @@ func (a *upstreamAttempt) readBackground() {
 func (a *upstreamAttempt) readFinal(client context.Context) {
 	a.mu.Lock()
 	a.detached = false
-	a.armLocked(time.Until(a.headersAt.Add(a.limits.ResponseIdle)), "response_idle_timeout")
+	a.background = false
 	a.mu.Unlock()
 	if client.Err() != nil {
 		a.stop("client_canceled", "", true)
