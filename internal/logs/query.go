@@ -16,20 +16,21 @@ const (
 )
 
 var stringFilterNames = map[string]struct{}{
-	"level":         {},
-	"msg":           {},
-	"kind":          {},
-	"event":         {},
-	"request_type":  {},
-	"provider_id":   {},
-	"provider_name": {},
-	"model":         {},
-	"session_id":    {},
-	"patch_id":      {},
-	"error_code":    {},
-	"cancel_reason": {},
-	"cancel_phase":  {},
-	"end_reason":    {},
+	"level":                {},
+	"msg":                  {},
+	"kind":                 {},
+	"event":                {},
+	"request_type":         {},
+	"provider_id":          {},
+	"provider_name":        {},
+	"model":                {},
+	"session_id":           {},
+	"patch_id":             {},
+	"error_code":           {},
+	"cancel_reason":        {},
+	"cancel_phase":         {},
+	"end_reason":           {},
+	"raw_error_incomplete": {},
 }
 
 var boolFilterNames = map[string]struct{}{

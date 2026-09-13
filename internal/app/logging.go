@@ -362,6 +362,12 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 	if event.EndReason != "" && (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover) {
 		attrs = append(attrs, slog.String("end_reason", event.EndReason))
 	}
+	if event.RawErrorIncomplete != "" {
+		attrs = append(attrs, slog.String("raw_error_incomplete", event.RawErrorIncomplete))
+	}
+	if event.PostCompletion != "" {
+		attrs = append(attrs, slog.String("post_completion", event.PostCompletion))
+	}
 	if event.Kind == gateway.EventCanceled {
 		attrs = append(attrs, slog.Bool("response_started", event.ResponseStarted), slog.String("cancel_reason", event.CancelReason), slog.String("cancel_phase", event.CancelPhase))
 		if event.CancelReason == "client_disconnected" {

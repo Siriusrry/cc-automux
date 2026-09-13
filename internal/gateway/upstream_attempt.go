@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/Siriusrry/cc-automux/internal/scheduler"
 )
 
 const (
@@ -46,6 +48,10 @@ type attemptStop struct{ reason, message string }
 func (e *attemptStop) Error() string { return e.message }
 
 type upstreamAttempt struct {
+	result       *responseVerdict
+	observer     *sseObserver
+	streaming    bool
+	status       int
 	mu           sync.Mutex
 	ctx          context.Context
 	cancel       context.CancelCauseFunc
@@ -97,6 +103,14 @@ func (a *upstreamAttempt) stopLocked(reason, message string) {
 	if a.stopped != nil || a.finished {
 		return
 	}
+	class := scheduler.FailureChannelImmediate
+	if reason == "client_canceled" {
+		class = scheduler.FailureClientCanceled
+	}
+	if reason == "shutdown" {
+		class = scheduler.FailureNeutral
+	}
+	a.claimLocked(responseVerdict{reason: reason, class: class, raw: message})
 	a.stopped = &attemptStop{reason: reason, message: message}
 	a.stopTimerLocked()
 	a.cancel(a.stopped)
@@ -189,11 +203,29 @@ func (b *attemptBodyReader) Read(p []byte) (int, error) {
 		return 0, a.stopped
 	}
 	if n > 0 {
+		if a.observer != nil {
+			a.observer.feed(p[:n])
+			if a.observer.result != nil {
+				a.claimLocked(*a.observer.result)
+			}
+		}
 		a.bytes += int64(n)
 		a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
 	}
 	if err != nil {
 		a.stopTimerLocked()
+		if a.streaming {
+			verdict := responseVerdict{reason: "stream_interrupted", class: scheduler.FailureChannelStream, raw: err.Error()}
+			if errors.Is(err, io.EOF) {
+				verdict = responseVerdict{reason: "completed", class: scheduler.FailureNone}
+				if a.observer != nil {
+					verdict = responseVerdict{reason: "stream_truncated", class: scheduler.FailureChannelStream, raw: "stream ended before message_stop"}
+				} else if a.status < 200 || a.status >= 300 {
+					verdict = responseVerdict{reason: "http_error", class: scheduler.ClassifyHTTPStatus(a.status)}
+				}
+			}
+			a.claimLocked(verdict)
+		}
 	}
 	return n, err
 }
@@ -205,4 +237,36 @@ func (b *attemptBodyReader) Close() error {
 		b.closeErr = b.ReadCloser.Close()
 	})
 	return b.closeErr
+}
+
+func (a *upstreamAttempt) claimLocked(v responseVerdict) {
+	if a.result == nil {
+		a.result = &v
+	}
+}
+func (a *upstreamAttempt) claim(v responseVerdict) responseVerdict {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.claimLocked(v)
+	return *a.result
+}
+func (a *upstreamAttempt) verdict() responseVerdict {
+	if a == nil {
+		return responseVerdict{}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.result == nil {
+		return responseVerdict{}
+	}
+	return *a.result
+}
+func (a *upstreamAttempt) observe(response *http.Response, sse bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.streaming = true
+	a.status = response.StatusCode
+	if sse && observeSSE(response) {
+		a.observer = &sseObserver{data: boundedText{limit: a.limits.ErrorTextBytes}}
+	}
 }

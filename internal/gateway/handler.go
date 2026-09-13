@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -336,141 +335,26 @@ type capturedFailure struct {
 }
 
 func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, response *http.Response, lease requestAttemptLease, outcome scheduler.Outcome, attempt int) {
-	// A response body is owned by this function from the moment it is passed in.
-	// Close it exactly once on every path, including cancellation, while keeping
-	// the health lease's terminal report exactly once.
-	if response == nil || response.Body == nil {
-		if requestCanceled(ctx) {
-			h.reportClientCanceledWithAttempt(lease, outcome.SessionID, outcome.UpstreamURL, responseStatus(response), attempt, nil)
-			return
-		}
-		outcome.Class = scheduler.FailureNeutral
-		outcome.RawError = "provider returned no response body"
-		if h != nil && h.selector != nil {
-			update := h.selector.Report(lease.AttemptLease, outcome)
-			h.recordOutcome(EventFailure, lease, outcome, attempt, update)
-		}
-		return
+	result := h.copyUpstream(w, ctx, response, lease.control, true)
+	outcome.Class = result.verdict.class
+	outcome.RawError = result.verdict.raw
+	outcome.ResponseStarted = result.started
+	outcome.ClientCanceled = outcome.Class == scheduler.FailureClientCanceled
+	update := h.selector.Report(lease.AttemptLease, outcome)
+	kind := EventFailure
+	if outcome.Class == scheduler.FailureNone {
+		kind = EventSuccess
 	}
-	closed := false
-	closeBody := func() error {
-		if closed {
-			return nil
-		}
-		closed = true
-		return response.Body.Close()
+	event := h.outcomeEvent(kind, lease, outcome, attempt, update)
+	event.EndReason = result.verdict.reason
+	if event.Kind == EventSuccess || event.Kind == EventCanceled {
+		event.EndReason = ""
 	}
-	defer func() { _ = closeBody() }()
-	report := func(kind EventKind, value scheduler.Outcome) {
-		if h == nil || h.selector == nil {
-			return
-		}
-		update := h.selector.Report(lease.AttemptLease, value)
-		h.recordOutcome(kind, lease, value, attempt, update)
-	}
-	cancel := func(cause error) {
-		value := outcome
-		value.Class = scheduler.FailureClientCanceled
-		value.ClientCanceled = true
-		value.RawError = contextError(ctx, cause).Error()
-		value.ResponseStarted = outcome.ResponseStarted
-		value.RawError = errors.Join(contextError(ctx, cause), closeBody()).Error()
-		report(EventFailure, value)
-	}
-	if requestCanceled(ctx) {
-		cancel(nil)
-		return
-	}
-	copyResponseHeaders(w.Header(), response.Header)
-	if requestCanceled(ctx) {
-		cancel(nil)
-		return
-	}
-	// The context check immediately before WriteHeader is the last point at
-	// which a canceled client can be guaranteed not to receive a status line.
-	w.WriteHeader(response.StatusCode)
-	outcome.ResponseStarted = true
-	if requestCanceled(ctx) {
-		cancel(nil)
-		return
-	}
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-	var raw strings.Builder
-	captureError := outcome.Class != scheduler.FailureNone
-	buffer := make([]byte, 32*1024)
-	for {
-		if requestCanceled(ctx) {
-			cancel(nil)
-			return
-		}
-		n, readErr := response.Body.Read(buffer)
-		if n > 0 {
-			if captureError {
-				_, _ = raw.Write(buffer[:n])
-			}
-			if requestCanceled(ctx) {
-				cancel(nil)
-				return
-			}
-			written, writeErr := w.Write(buffer[:n])
-			if writeErr == nil && written != n {
-				writeErr = io.ErrShortWrite
-			}
-			if writeErr != nil {
-				value := outcome
-				value.Class = scheduler.FailureDownstream
-				value.RawError = writeErr.Error()
-				_ = closeBody()
-				report(EventFailure, value)
-				return
-			}
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-		}
-		if _, message, timeout := timeoutResponse(readErr); timeout {
-			value := outcome
-			value.Class = scheduler.FailureChannelImmediate
-			value.RawError = message
-			_ = closeBody()
-			report(EventFailure, value)
-			panic(http.ErrAbortHandler)
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				closeErr := closeBody()
-				if requestCanceled(ctx) {
-					cancel(closeErr)
-					return
-				}
-				if closeErr != nil {
-					value := outcome
-					value.Class = scheduler.FailureNeutral
-					value.RawError = closeErr.Error()
-					report(EventFailure, value)
-					return
-				}
-				if captureError {
-					outcome.RawError = raw.String()
-					report(EventFailure, outcome)
-				} else {
-					report(EventSuccess, outcome)
-				}
-				return
-			}
-			if requestCanceled(ctx) {
-				cancel(readErr)
-				return
-			}
-			value := outcome
-			value.Class = scheduler.FailureChannelStream
-			value.RawError = errors.Join(readErr, closeBody()).Error()
-			report(EventFailure, value)
-			// Preserve an abnormal upstream ending on the downstream connection.
-			panic(http.ErrAbortHandler)
-		}
+	event.RawErrorIncomplete = result.verdict.incomplete
+	event.PostCompletion = result.post
+	h.record(event)
+	if result.abort {
+		panic(http.ErrAbortHandler)
 	}
 }
 

@@ -37,6 +37,8 @@ type Event struct {
 	CancelReason           string
 	CancelPhase            string
 	EndReason              string
+	RawErrorIncomplete     string
+	PostCompletion         string
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int
@@ -72,6 +74,9 @@ type discardRecorder struct{}
 func (discardRecorder) RecordGatewayEvent(Event) {}
 
 func outcomeEndReason(lease requestAttemptLease, outcome scheduler.Outcome) string {
+	if verdict := lease.control.verdict(); verdict.reason != "" && verdict.reason != "completed" && verdict.reason != "client_canceled" {
+		return verdict.reason
+	}
 	switch outcome.Class {
 	case scheduler.FailureNone, scheduler.FailureClientCanceled, scheduler.FailureDownstream:
 		return ""
