@@ -219,10 +219,10 @@ func TestGatewayPatchCloseFailureIsNotClassifiedAsBodyfileFailure(t *testing.T) 
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "patch_failed") || strings.Contains(response.Body.String(), "replay_unavailable") || acquires != 1 || secondCalls.Load() != 0 {
 		t.Fatalf("response=%d %s acquires=%d second_calls=%d", response.Code, response.Body.String(), acquires, secondCalls.Load())
 	}
-	if len(reports) != 1 || reports[0].Class != scheduler.FailureNeutral || !strings.Contains(reports[0].RawError, "patch instance close failed") {
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureChannelTransient || !reports[0].ErrorPending {
 		t.Fatalf("reports = %#v", reports)
 	}
-	got := events.snapshot()
+	got := waitGatewayEvents(t, events, 2)
 	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventFailure || got[1].PatchStage != string(patch.StageRequest) {
 		t.Fatalf("events = %#v", got)
 	}

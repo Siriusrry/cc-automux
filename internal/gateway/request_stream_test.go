@@ -50,7 +50,7 @@ func TestRequestStreamFactsAndEvents(t *testing.T) {
 			handler := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{Recorder: events})
 			defer handler.Close()
 			handler.ServeHTTP(httptest.NewRecorder(), gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", input))
-			got := events.snapshot()
+			got := waitGatewayEvents(t, events, 4)
 			if len(got) != 4 {
 				t.Fatalf("events = %#v", got)
 			}

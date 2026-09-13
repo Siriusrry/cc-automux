@@ -131,10 +131,10 @@
           replace(body, h('div', { class: 'hl-diag' }, pill(ok ? 'Succeeded' : 'Failed · ' + lc.gateway_status + (lc.gateway_error ? ' ' + lc.gateway_error : ''), ok ? 'ok' : 'bad'), h('span', { class: 'hl-sub' }, fmt.dateTime(lc.observed_at) + ' · ' + fmt.relative(lc.observed_at))),
             kv([['Upstream URL', h('span', { class: 'mono' }, lc.upstream_url)], ['Upstream status', lc.upstream_status ? String(lc.upstream_status) : null], ['Session', lc.session_id ? h('span', { class: 'sid' }, lc.session_id) : null]], { compact: true }),
             lc.error ? [h('p', { class: 'lab', style: { margin: '12px 0 6px', fontSize: '12.5px', fontWeight: '600' } }, 'Error'), h('pre', { class: 'code wrap clamp', onclick: (e) => e.currentTarget.classList.toggle('clamp') }, lc.error)] : null,
-            lc.upstream_body ? h('details', { class: 'disc', style: { marginTop: '10px' } }, h('summary', null, icon('chevron-right'), 'Upstream response headers and body'), h('div', { class: 'disc-body' }, h('pre', { class: 'code wrap' }, Object.keys(lc.upstream_headers || {}).map(k => k + ': ' + lc.upstream_headers[k].join(', ')).join('\n') + '\n\n' + lc.upstream_body))) : null);
+            lc.upstream_body ? h('details', { class: 'disc', style: { marginTop: '10px' } }, h('summary', null, icon('chevron-right'), 'Upstream response headers and body', lc.upstream_body_truncated ? ' · truncated · complete text is in the log' : ''), h('div', { class: 'disc-body' }, h('pre', { class: 'code wrap' }, Object.keys(lc.upstream_headers || {}).map(k => k + ': ' + lc.upstream_headers[k].join(', ')).join('\n') + '\n\n' + lc.upstream_body))) : null);
         }
         renderLastCall();
-        const healthNote = h('div', { class: 'note' }, h('b', null, 'Errors are never softened.'), ' A failed classifier call is returned as-is or as a gateway 502; CC AutoMux never fabricates an allow or block decision. Each classifier request calls exactly one upstream — there is no same-request failover.');
+        const healthNote = h('div', { class: 'note' }, h('b', null, 'Errors are never softened.'), ' A failed classifier call is returned as-is or as a gateway 502/504; CC AutoMux never fabricates an allow or block decision. Each classifier request calls exactly one upstream — there is no same-request failover.');
 
         replace(host, h('div', { class: 'grid-2' }, modeCard, h('div', { class: 'stack' }, detectCard, lastCallCard, healthNote)));
         const offStatus = store.on('status', renderLastCall);

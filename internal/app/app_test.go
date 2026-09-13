@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -509,7 +510,7 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 		Enabled: true,
 	}}
 	writeAppConfig(t, path, cfg)
-	var logOutput bytes.Buffer
+	var logOutput lockedLogBuffer
 	application, err := New(Options{
 		ConfigPath: path,
 		LogOpener:  appLogOpenerFor(&logOutput),
@@ -541,6 +542,10 @@ func TestAppWiresMessagesHealthDiagnosticsAndRawLogging(t *testing.T) {
 	application.server.Handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "bad_gateway") {
 		t.Fatalf("Messages response = %d %q", response.Code, response.Body.String())
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(logOutput.String(), "raw-app-upstream-error") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 	if !strings.Contains(logOutput.String(), `"request_type":"normal"`) ||
 		!strings.Contains(logOutput.String(), `"session_id":"app-session"`) ||
@@ -1318,3 +1323,15 @@ func TestRotatingWriterKeepsRegularTotalWithinLimit(t *testing.T) {
 		}
 	}
 }
+
+type lockedLogBuffer struct {
+	mu   sync.Mutex
+	body bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.body.Write(p)
+}
+func (b *lockedLogBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.body.String() }

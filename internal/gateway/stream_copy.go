@@ -33,6 +33,15 @@ func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, respo
 			result.verdict.raw = raw.text()
 			if raw.truncated {
 				result.verdict.incomplete = "truncated"
+			} else {
+				switch v.reason {
+				case "response_idle_timeout":
+					result.verdict.incomplete = "timeout"
+				case "stream_interrupted":
+					result.verdict.incomplete = "interrupted"
+				case "client_canceled":
+					result.verdict.incomplete = "canceled"
+				}
 			}
 		}
 	}

@@ -4,22 +4,25 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/Siriusrry/cc-automux/internal/textlimit"
 )
 
 // FixedTargetCall is the in-memory diagnostic record for the most recent
-// fixed classifier target call. It intentionally keeps the complete upstream
+// fixed classifier target call. It intentionally keeps a bounded upstream
 // failure response while never persisting it or logging request/success body
 // data.
 type FixedTargetCall struct {
-	ObservedAt      time.Time   `json:"observed_at"`
-	UpstreamURL     string      `json:"upstream_url"`
-	GatewayStatus   int         `json:"gateway_status"`
-	GatewayError    string      `json:"gateway_error,omitempty"`
-	UpstreamStatus  int         `json:"upstream_status,omitempty"`
-	SessionID       string      `json:"session_id"`
-	Error           string      `json:"error,omitempty"`
-	UpstreamHeaders http.Header `json:"upstream_headers,omitempty"`
-	UpstreamBody    string      `json:"upstream_body,omitempty"`
+	ObservedAt            time.Time   `json:"observed_at"`
+	UpstreamURL           string      `json:"upstream_url"`
+	GatewayStatus         int         `json:"gateway_status"`
+	GatewayError          string      `json:"gateway_error,omitempty"`
+	UpstreamStatus        int         `json:"upstream_status,omitempty"`
+	SessionID             string      `json:"session_id"`
+	Error                 string      `json:"error,omitempty"`
+	UpstreamHeaders       http.Header `json:"upstream_headers,omitempty"`
+	UpstreamBody          string      `json:"upstream_body,omitempty"`
+	UpstreamBodyTruncated bool        `json:"upstream_body_truncated,omitempty"`
 }
 
 // DiagnosticScope identifies the published fixed-target runtime identity that
@@ -63,6 +66,10 @@ func (d *Diagnostics) Record(call FixedTargetCall) {
 		return
 	}
 	call.ObservedAt = call.ObservedAt.UTC()
+	body, truncated := textlimit.Prefix(call.UpstreamBody, textlimit.DiagnosticBytes)
+	call.UpstreamBody = body
+	call.UpstreamBodyTruncated = call.UpstreamBodyTruncated || truncated
+	call.Error, _ = textlimit.Prefix(call.Error, textlimit.DiagnosticBytes)
 	call.UpstreamHeaders = cloneHeaders(call.UpstreamHeaders)
 	d.mu.Lock()
 	d.last = &call
@@ -78,6 +85,10 @@ func (d *Diagnostics) RecordScoped(scope DiagnosticScope, call FixedTargetCall) 
 		return
 	}
 	call.ObservedAt = call.ObservedAt.UTC()
+	body, truncated := textlimit.Prefix(call.UpstreamBody, textlimit.DiagnosticBytes)
+	call.UpstreamBody = body
+	call.UpstreamBodyTruncated = call.UpstreamBodyTruncated || truncated
+	call.Error, _ = textlimit.Prefix(call.Error, textlimit.DiagnosticBytes)
 	call.UpstreamHeaders = cloneHeaders(call.UpstreamHeaders)
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -156,6 +156,7 @@ Config GET 包含服务端只读 `active_profile_id`，构造 PUT 时须移除�
 - **控制台打不开**：运行安装器显示的 `status.sh`，检查实际端口和启动错误。macOS 早期错误位于 `~/Library/Logs/cc-automux/bootstrap.log`；Linux 使用 `journalctl --user -u cc-automux.service`。
 - **登录失败或 401**：控制台使用 management key，Claude Code 使用 gateway key。Management key 轮换会使其他会话失效。
 - **模型不可用**：检查准确模型名、Provider 是否启用及健康状态，在 Providers 查看上游原始错误。
+- **网关超时或 504**：Provider 未在网关时限内响应，网关已切换 Provider 或终止尝试；请查看 Provider 健康和请求日志。
 - **Auto mode 失败**：检查分类器模型、上游地址、密钥和协议，以及对应的兼容补丁；查看控制台中的原始错误。
 - **保存冲突或 412**：必要时先保留草稿，再重新加载当前配置并应用需要的改动。
 - **Profile 不同步**：检查目标路径并重新激活；写入失败会报错，不会假报 Active。

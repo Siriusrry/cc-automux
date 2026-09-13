@@ -875,6 +875,7 @@ func TestFixedExecutionNonSuccessResponsesBypassDecodeAndResponsePatch(t *testin
 			} else if response.Body.String() == rawBody || !strings.Contains(response.Body.String(), "bad_gateway") {
 				t.Fatalf("mapped response body = %q", response.Body.String())
 			}
+			_ = waitGatewayEvents(t, events, 2)
 			call := diagnostics.Snapshot()
 			wantURL := upstream.URL + "/v1/responses?failure=raw"
 			if call == nil || call.UpstreamURL != wantURL || call.UpstreamStatus != test.status || call.GatewayStatus != test.wantStatus || call.SessionID != "original-session" || call.UpstreamBody != rawBody || call.UpstreamHeaders.Get("X-Upstream-Error") != "raw" || call.Error != rawBody {

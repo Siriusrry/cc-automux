@@ -156,6 +156,7 @@ Config GET includes server-owned `active_profile_id`; remove it when constructin
 - **Console unreachable:** run the installed `status.sh` printed by the installer and check the configured port and startup errors. macOS writes early errors to `~/Library/Logs/cc-automux/bootstrap.log`; Linux uses `journalctl --user -u cc-automux.service`.
 - **Sign-in rejected / 401:** use the management key for the console and the gateway key for Claude Code. A rotated management key invalidates other sessions.
 - **Model unavailable:** check the exact requested model, enabled providers, and their health. Open Providers for the upstream's original error and diagnostics.
+- **Gateway timeout / 504:** the provider did not respond within the gateway’s time limit. The gateway has switched providers or stopped the attempt; check Provider health and the request log.
 - **Auto mode fails:** check the classifier model, upstream URL, key, protocol, and compatibility patches; inspect the original error in the console.
 - **Save conflict / 412:** keep a copy of the draft if needed, then load current values and reapply the intended change.
 - **Profile is out of sync:** inspect the selected path and reactivate the intended profile. On write failure the page reports an error instead of declaring it active.

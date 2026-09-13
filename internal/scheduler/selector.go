@@ -361,7 +361,7 @@ func (s *Scheduler) acquire(snapshot Snapshot, key StickyKey, excluded map[strin
 	return AttemptLease{}, &UnavailableError{}
 }
 
-func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) HealthUpdate {
+func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) (HealthUpdate, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireLocked(s.now())
@@ -377,9 +377,9 @@ func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) HealthUpdate {
 			return s.health.Report(lease.HealthLease, Outcome{Class: FailureClientCanceled})
 		}
 	}
-	update := s.health.Report(lease.HealthLease, outcome)
+	update, observation := s.health.Report(lease.HealthLease, outcome)
 	if lease.Provider == nil {
-		return update
+		return update, observation
 	}
 
 	if lease.advanceCursorOnSuccess && outcome.Class == FailureNone {
@@ -404,7 +404,7 @@ func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) HealthUpdate {
 		s.removeChannelAssignmentsLocked(lease.Provider.ID, lease.Generation, lease.Model, lease.RequestType)
 		s.clearChannelCursorLocked(lease.Provider.ID, lease.Model, lease.RequestType)
 	}
-	return update
+	return update, observation
 }
 
 // migrateAssignmentLocked replaces a session assignment only when it still
@@ -825,5 +825,19 @@ func (s *Scheduler) clearChannelCursorLocked(providerID, model string, requestTy
 		if cursor.ProviderID == providerID && key.Model == model && key.RequestType == requestType {
 			s.clearCursorLocked(key)
 		}
+	}
+}
+
+// UpdateError forwards a diagnostic-only update for the same published lease.
+func (s *Scheduler) UpdateError(lease AttemptLease, observation uint64, raw string, incomplete, truncated bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lease.SnapshotRevision != 0 && s.revision != lease.SnapshotRevision {
+		return
+	}
+	if updater, ok := s.health.(interface {
+		UpdateError(HealthLease, uint64, string, bool, bool)
+	}); ok {
+		updater.UpdateError(lease.HealthLease, observation, raw, incomplete, truncated)
 	}
 }

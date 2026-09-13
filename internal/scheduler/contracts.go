@@ -67,6 +67,7 @@ type Outcome struct {
 	HasRetryAfter   bool
 	UpstreamURL     string
 	RawError        string
+	ErrorPending    bool
 	SessionID       string
 	ResponseStarted bool
 	ClientCanceled  bool
@@ -205,14 +206,14 @@ type RequestAttemptPolicyView interface {
 type HealthController interface {
 	Reconcile(providers []*provider.CompiledProvider)
 	Acquire(key HealthKey, disableHealth bool) HealthDecision
-	Report(lease HealthLease, outcome Outcome) HealthUpdate
+	Report(lease HealthLease, outcome Outcome) (HealthUpdate, uint64)
 	EarliestRetry(keys []HealthKey) (time.Time, bool)
 }
 
 // Selector is the gateway-facing scheduling boundary.
 type Selector interface {
 	Acquire(snapshot Snapshot, key StickyKey, excluded map[string]struct{}) (AttemptLease, error)
-	Report(lease AttemptLease, outcome Outcome) HealthUpdate
+	Report(lease AttemptLease, outcome Outcome) (HealthUpdate, uint64)
 	Reconcile(snapshot Snapshot)
 	Assignments(providerID string) []Assignment
 	ActiveAssignmentCount() int

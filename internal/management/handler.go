@@ -483,6 +483,9 @@ type healthDiagnosticResponse struct {
 	ProbeInFlight       bool       `json:"probe_in_flight"`
 	LastUpstreamURL     string     `json:"last_upstream_url"`
 	LastError           string     `json:"last_error"`
+	LastErrorPending    bool       `json:"last_error_pending,omitempty"`
+	LastErrorIncomplete bool       `json:"last_error_incomplete,omitempty"`
+	LastErrorTruncated  bool       `json:"last_error_truncated,omitempty"`
 	LastSessionID       string     `json:"last_session_id"`
 }
 
@@ -499,6 +502,9 @@ type channelHealthResponse struct {
 	ProbeInFlight       bool       `json:"probe_in_flight"`
 	LastUpstreamURL     string     `json:"last_upstream_url"`
 	LastError           string     `json:"last_error"`
+	LastErrorPending    bool       `json:"last_error_pending,omitempty"`
+	LastErrorIncomplete bool       `json:"last_error_incomplete,omitempty"`
+	LastErrorTruncated  bool       `json:"last_error_truncated,omitempty"`
 	LastSessionID       string     `json:"last_session_id"`
 }
 
@@ -596,6 +602,9 @@ func (h *Handler) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
 					ProbeInFlight:       diagnostic.ProbeInFlight,
 					LastUpstreamURL:     diagnostic.LastUpstreamURL,
 					LastError:           diagnostic.LastError,
+					LastErrorPending:    diagnostic.LastErrorPending,
+					LastErrorIncomplete: diagnostic.LastErrorIncomplete,
+					LastErrorTruncated:  diagnostic.LastErrorTruncated,
 					LastSessionID:       diagnostic.LastSessionID,
 				})
 			}
@@ -642,6 +651,9 @@ func diagnosticResponse(item health.Diagnostic) healthDiagnosticResponse {
 		ProbeInFlight:       item.ProbeInFlight,
 		LastUpstreamURL:     item.LastUpstreamURL,
 		LastError:           item.LastError,
+		LastErrorPending:    item.LastErrorPending,
+		LastErrorIncomplete: item.LastErrorIncomplete,
+		LastErrorTruncated:  item.LastErrorTruncated,
 		LastSessionID:       item.LastSessionID,
 	}
 }

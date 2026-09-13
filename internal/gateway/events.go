@@ -87,7 +87,7 @@ func outcomeEndReason(lease requestAttemptLease, outcome scheduler.Outcome) stri
 	if outcome.Class == scheduler.FailureChannelStream {
 		return "stream_interrupted"
 	}
-	if outcome.HTTPStatus != 0 {
+	if outcome.HTTPStatus != 0 && (outcome.HTTPStatus < 200 || outcome.HTTPStatus >= 300) {
 		return "http_error"
 	}
 	if outcome.Class == scheduler.FailureGlobalTransient {

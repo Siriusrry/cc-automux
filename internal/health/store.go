@@ -6,6 +6,7 @@ import (
 
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/textlimit"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
@@ -31,6 +32,10 @@ const (
 )
 
 type stateEntry struct {
+	observation         uint64
+	lastErrorPending    bool
+	lastErrorIncomplete bool
+	lastErrorTruncated  bool
 	state               machineState
 	backoffLevel        int
 	consecutiveFailures int
@@ -82,13 +87,14 @@ type leaseRecord struct {
 
 // Store is a concurrency-safe in-memory health controller.
 type Store struct {
-	mu        sync.Mutex
-	policy    scheduler.Policy
-	clock     Clock
-	active    map[string]*providerScope
-	retired   map[retiredKey][]*providerScope
-	leases    map[uint64]leaseRecord
-	nextToken uint64
+	mu              sync.Mutex
+	policy          scheduler.Policy
+	clock           Clock
+	active          map[string]*providerScope
+	retired         map[retiredKey][]*providerScope
+	leases          map[uint64]leaseRecord
+	nextToken       uint64
+	nextObservation uint64
 }
 
 // New constructs a health store using an explicit policy and clock.
@@ -224,6 +230,9 @@ func copyDiagnostics(target, source *stateEntry) {
 	target.lastFailureAt = source.lastFailureAt
 	target.lastUpstreamURL = source.lastUpstreamURL
 	target.lastError = source.lastError
+	target.lastErrorPending = source.lastErrorPending
+	target.lastErrorIncomplete = source.lastErrorIncomplete
+	target.lastErrorTruncated = source.lastErrorTruncated
 	target.lastSessionID = source.lastSessionID
 }
 
@@ -386,13 +395,13 @@ func blockingRetryAt(now time.Time, entries ...*stateEntry) *time.Time {
 
 // Report consumes a lease exactly once and applies the outcome to its isolated
 // provider generation.
-func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) scheduler.HealthUpdate {
+func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) (scheduler.HealthUpdate, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record, ok := s.leases[lease.Token]
 	if !ok {
-		return scheduler.HealthUpdate{}
+		return scheduler.HealthUpdate{}, 0
 	}
 	delete(s.leases, lease.Token)
 	scope := record.scope
@@ -405,7 +414,7 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 		releaseProbe(&scope.global, lease.Token)
 		releaseProbe(channel, lease.Token)
 		s.releaseLeaseLocked(scope, entryKey, channel)
-		return scheduler.HealthUpdate{}
+		return scheduler.HealthUpdate{}, 0
 	}
 	if !scope.active {
 		update := scheduler.HealthUpdate{
@@ -420,9 +429,11 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 		releaseProbe(&scope.global, lease.Token)
 		releaseProbe(channel, lease.Token)
 		s.releaseLeaseLocked(scope, entryKey, channel)
-		return update
+		return update, 0
 	}
 
+	s.nextObservation++
+	observation := s.nextObservation
 	now := s.clock.Now()
 	if outcome.ClientCanceled {
 		outcome.Class = scheduler.FailureClientCanceled
@@ -430,31 +441,31 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 	update := scheduler.HealthUpdate{}
 	switch outcome.Class {
 	case scheduler.FailureNone:
-		observeLatest(&scope.global, outcome)
-		observeLatest(channel, outcome)
+		observeLatest(&scope.global, outcome, observation)
+		observeLatest(channel, outcome, observation)
 		applySuccess(&scope.global, now)
 		applySuccess(channel, now)
 	case scheduler.FailureGlobalImmediate:
-		observeLatest(&scope.global, outcome)
+		observeLatest(&scope.global, outcome, observation)
 		update.GlobalEnteredCooldown = s.applyFailureLocked(&scope.global, lease.Token, now, outcome, true)
 		releaseProbe(channel, lease.Token)
 	case scheduler.FailureGlobalTransient:
-		observeLatest(&scope.global, outcome)
+		observeLatest(&scope.global, outcome, observation)
 		update.GlobalEnteredCooldown = s.applyFailureLocked(&scope.global, lease.Token, now, outcome, false)
 		releaseProbe(channel, lease.Token)
 	case scheduler.FailureChannelImmediate:
-		observeLatest(channel, outcome)
+		observeLatest(channel, outcome, observation)
 		update.ChannelEnteredCooldown = s.applyFailureLocked(channel, lease.Token, now, outcome, true)
 		releaseProbe(&scope.global, lease.Token)
 	case scheduler.FailureChannelTransient, scheduler.FailureChannelStream:
-		observeLatest(channel, outcome)
+		observeLatest(channel, outcome, observation)
 		update.ChannelEnteredCooldown = s.applyFailureLocked(channel, lease.Token, now, outcome, false)
 		releaseProbe(&scope.global, lease.Token)
 	case scheduler.FailureNeutral:
 		// A neutral upstream HTTP response is a model/request observation only.
 		// It must not change any Provider-global diagnostic or breaker field.
 		if outcome.HTTPStatus > 0 {
-			observeNeutralFailure(channel, outcome, now)
+			observeNeutralFailure(channel, outcome, now, observation)
 		}
 		releaseProbe(&scope.global, lease.Token)
 		releaseProbe(channel, lease.Token)
@@ -473,10 +484,10 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) s
 		update.CooldownUntil = timePointer(channel.cooldownUntil)
 	}
 	s.releaseLeaseLocked(scope, entryKey, channel)
-	return update
+	return update, observation
 }
 
-func observeLatest(entry *stateEntry, outcome scheduler.Outcome) {
+func observeLatest(entry *stateEntry, outcome scheduler.Outcome, observation uint64) {
 	if entry == nil {
 		return
 	}
@@ -485,10 +496,13 @@ func observeLatest(entry *stateEntry, outcome scheduler.Outcome) {
 	// An empty upstream error body is still the latest complete observation.
 	// Overwrite an older diagnostic instead of leaving stale text attached to
 	// the new status/result.
-	entry.lastError = outcome.RawError
+	entry.lastError, entry.lastErrorTruncated = textlimit.Prefix(outcome.RawError, textlimit.DiagnosticBytes)
+	entry.lastErrorPending = outcome.ErrorPending
+	entry.lastErrorIncomplete = false
+	entry.observation = observation
 }
 
-func observeNeutralFailure(entry *stateEntry, outcome scheduler.Outcome, now time.Time) {
+func observeNeutralFailure(entry *stateEntry, outcome scheduler.Outcome, now time.Time, observation uint64) {
 	if entry == nil {
 		return
 	}
@@ -496,7 +510,10 @@ func observeNeutralFailure(entry *stateEntry, outcome scheduler.Outcome, now tim
 	entry.lastSessionID = outcome.SessionID
 	// An empty response body is still the latest observed error text and must
 	// replace an older diagnostic rather than leaving stale text behind.
-	entry.lastError = outcome.RawError
+	entry.lastError, entry.lastErrorTruncated = textlimit.Prefix(outcome.RawError, textlimit.DiagnosticBytes)
+	entry.lastErrorPending = outcome.ErrorPending
+	entry.lastErrorIncomplete = false
+	entry.observation = observation
 	recordNeutralFailure(entry, now)
 }
 
@@ -664,3 +681,24 @@ func (s *Store) scopesForKeyLocked(key scheduler.HealthKey) []*providerScope {
 }
 
 var _ scheduler.HealthController = (*Store)(nil)
+
+// UpdateError fills a still-current observation without changing health or counters.
+func (s *Store) UpdateError(lease scheduler.HealthLease, observation uint64, raw string, incomplete, truncated bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	scope := s.active[lease.Key.ProviderID]
+	if observation == 0 || scope == nil || scope.key.generation != lease.Key.Generation || scope.disableHealth != lease.Disabled {
+		return
+	}
+	for _, entry := range []*stateEntry{&scope.global, scope.channels[channelKey{model: lease.Key.Model, requestType: lease.Key.RequestType}]} {
+		if entry == nil || entry.observation != observation {
+			continue
+		}
+		if raw != "" || !incomplete && !truncated {
+			entry.lastError, entry.lastErrorTruncated = textlimit.Prefix(raw, textlimit.DiagnosticBytes)
+		}
+		entry.lastErrorPending = false
+		entry.lastErrorIncomplete = incomplete
+		entry.lastErrorTruncated = entry.lastErrorTruncated || truncated
+	}
+}

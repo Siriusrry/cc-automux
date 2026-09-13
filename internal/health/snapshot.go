@@ -20,6 +20,9 @@ type Diagnostic struct {
 	ProbeInFlight       bool
 	LastUpstreamURL     string
 	LastError           string
+	LastErrorPending    bool
+	LastErrorIncomplete bool
+	LastErrorTruncated  bool
 	LastSessionID       string
 }
 
@@ -153,6 +156,9 @@ func snapshotDiagnostic(entry *stateEntry) Diagnostic {
 		ProbeInFlight:       entry.probeToken != 0,
 		LastUpstreamURL:     entry.lastUpstreamURL,
 		LastError:           entry.lastError,
+		LastErrorPending:    entry.lastErrorPending,
+		LastErrorIncomplete: entry.lastErrorIncomplete,
+		LastErrorTruncated:  entry.lastErrorTruncated,
 		LastSessionID:       entry.lastSessionID,
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/protocol"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/textlimit"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
@@ -320,6 +321,10 @@ type requestAttemptLease struct {
 }
 
 type capturedFailure struct {
+	response     *http.Response
+	release      func()
+	observation  uint64
+	finishOnce   sync.Once
 	lease        requestAttemptLease
 	outcome      scheduler.Outcome
 	update       scheduler.HealthUpdate
@@ -340,7 +345,7 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 	outcome.RawError = result.verdict.raw
 	outcome.ResponseStarted = result.started
 	outcome.ClientCanceled = outcome.Class == scheduler.FailureClientCanceled
-	update := h.selector.Report(lease.AttemptLease, outcome)
+	update, _ := h.selector.Report(lease.AttemptLease, outcome)
 	kind := EventFailure
 	if outcome.Class == scheduler.FailureNone {
 		kind = EventSuccess
@@ -396,6 +401,10 @@ func (h *Handler) writeUnavailable(w http.ResponseWriter, err error) {
 
 func (h *Handler) record(event Event) {
 	if h != nil && h.recorder != nil {
+		if raw, truncated := textlimit.Prefix(event.RawError, h.limits.ErrorTextBytes); truncated {
+			event.RawError = raw
+			event.RawErrorIncomplete = "truncated"
+		}
 		h.recorder.RecordGatewayEvent(event)
 	}
 }
@@ -459,6 +468,10 @@ func (h *Handler) recordCapturedFailure(failure *capturedFailure) {
 	event := h.outcomeEvent(EventFailure, failure.lease, failure.outcome, failure.attempt, failure.update)
 	event.PatchID = failure.patchID
 	event.PatchStage = failure.patchStage
+	if failure.response != nil {
+		h.backgroundFailure(failure, event)
+		return
+	}
 	h.record(event)
 }
 
@@ -476,6 +489,10 @@ func (h *Handler) recordFailover(failure *capturedFailure, next requestAttemptLe
 		if nextURL, err := upstreamURL(next.Provider, incoming.URL); err == nil {
 			event.NextUpstreamURL = nextURL.String()
 		}
+	}
+	if failure.response != nil {
+		h.backgroundFailure(failure, event)
+		return
 	}
 	h.record(event)
 }
@@ -524,7 +541,7 @@ func (h *Handler) reportClientCanceledState(lease requestAttemptLease, sessionID
 		ResponseStarted: responseStarted,
 		ClientCanceled:  true,
 	}
-	update := h.selector.Report(lease.AttemptLease, outcome)
+	update, _ := h.selector.Report(lease.AttemptLease, outcome)
 	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
 }
 

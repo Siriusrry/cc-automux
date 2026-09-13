@@ -48,6 +48,8 @@ type attemptStop struct{ reason, message string }
 func (e *attemptStop) Error() string { return e.message }
 
 type upstreamAttempt struct {
+	fixed        bool
+	background   bool
 	result       *responseVerdict
 	observer     *sseObserver
 	streaming    bool
@@ -110,7 +112,11 @@ func (a *upstreamAttempt) stopLocked(reason, message string) {
 	if reason == "shutdown" {
 		class = scheduler.FailureNeutral
 	}
-	a.claimLocked(responseVerdict{reason: reason, class: class, raw: message})
+	verdictReason := reason
+	if reason == "shutdown" {
+		verdictReason = "local_error"
+	}
+	a.claimLocked(responseVerdict{reason: verdictReason, class: class, raw: message})
 	a.stopped = &attemptStop{reason: reason, message: message}
 	a.stopTimerLocked()
 	a.cancel(a.stopped)
@@ -127,10 +133,22 @@ func (a *upstreamAttempt) receiveHeaders(response *http.Response, err error) (*h
 	a.mu.Lock()
 	a.stopTimerLocked()
 	stopped := a.stopped
+	if stopped == nil && err != nil {
+		a.claimLocked(responseVerdict{reason: "transport_error", class: scheduler.FailureGlobalTransient, raw: err.Error()})
+	}
 	if stopped == nil && err == nil && response != nil {
 		a.headersAt = time.Now()
+		class := scheduler.ClassifyHTTPStatus(response.StatusCode)
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if a.fixed || (scheduler.Outcome{Class: class}).ShouldFailover() {
+				a.claimLocked(responseVerdict{reason: "http_error", class: class})
+				a.detached = true
+			}
+		}
 		if response.Body != nil {
-			a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+			if !a.detached {
+				a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+			}
 			response.Body = &attemptBodyReader{ReadCloser: response.Body, attempt: a}
 		}
 	}
@@ -210,10 +228,15 @@ func (b *attemptBodyReader) Read(p []byte) (int, error) {
 			}
 		}
 		a.bytes += int64(n)
-		a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+		if !a.background {
+			a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+		}
 	}
 	if err != nil {
 		a.stopTimerLocked()
+		if !a.streaming && !errors.Is(err, io.EOF) {
+			a.claimLocked(responseVerdict{reason: "stream_interrupted", class: scheduler.FailureChannelStream, raw: err.Error()})
+		}
 		if a.streaming {
 			verdict := responseVerdict{reason: "stream_interrupted", class: scheduler.FailureChannelStream, raw: err.Error()}
 			if errors.Is(err, io.EOF) {
@@ -268,5 +291,23 @@ func (a *upstreamAttempt) observe(response *http.Response, sse bool) {
 	a.status = response.StatusCode
 	if sse && observeSSE(response) {
 		a.observer = &sseObserver{data: boundedText{limit: a.limits.ErrorTextBytes}}
+	}
+}
+
+func (a *upstreamAttempt) readBackground() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.detached = true
+	a.background = true
+	remaining := time.Until(a.headersAt.Add(a.limits.ErrorBody))
+	a.armLocked(remaining, "error_body_timeout")
+}
+func (a *upstreamAttempt) readFinal(client context.Context) {
+	a.mu.Lock()
+	a.detached = false
+	a.armLocked(time.Until(a.headersAt.Add(a.limits.ResponseIdle)), "response_idle_timeout")
+	a.mu.Unlock()
+	if client.Err() != nil {
+		a.stop("client_canceled", "", true)
 	}
 }

@@ -126,11 +126,11 @@ func (h *fakeHealth) Acquire(key HealthKey, disabled bool) HealthDecision {
 	}
 }
 
-func (h *fakeHealth) Report(lease HealthLease, _ Outcome) HealthUpdate {
+func (h *fakeHealth) Report(lease HealthLease, _ Outcome) (HealthUpdate, uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.reports = append(h.reports, lease)
-	return h.updates[lease.Key]
+	return h.updates[lease.Key], 0
 }
 
 func (h *fakeHealth) EarliestRetry(keys []HealthKey) (time.Time, bool) {

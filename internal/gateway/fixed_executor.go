@@ -281,7 +281,7 @@ func consumeFixedResponse(response *http.Response) fixedResponseFacts {
 	if response.Body == nil {
 		return facts
 	}
-	facts.body, facts.readErr = io.ReadAll(response.Body)
+	facts.body, facts.readErr = io.ReadAll(io.LimitReader(response.Body, DefaultErrorTextLimit+1))
 	facts.closeErr = response.Body.Close()
 	return facts
 }
@@ -584,7 +584,12 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 			"gateway_unavailable", "fixed target client is unavailable", err, 0, nil, "", "")
 		return
 	}
-	defer clientLease.Release()
+	transferred := false
+	defer func() {
+		if !transferred {
+			clientLease.Release()
+		}
+	}()
 	// Record forwarding only once a client is available and immediately before
 	// the actual upstream call; a local client-pool failure is not a call.
 	if requestCanceled(ctx) {
@@ -594,7 +599,12 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	h.recordFixedEvent(ctx, EventForward, target, sessionID, model, upstream, 1, 0, "")
 	control := h.newUpstreamAttempt(ctx, prepared.Plan.Stream)
 	lifecycle.control = control
-	defer control.close()
+	control.fixed = true
+	defer func() {
+		if !transferred {
+			control.close()
+		}
+	}()
 	request = request.WithContext(control.ctx)
 	response, requestErr := clientLease.Client().Do(request)
 	response, requestErr = control.receiveHeaders(response, requestErr)
@@ -610,12 +620,12 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		// requestCloseErr is retained by the lifecycle cleanup and is therefore
 		// intentionally not joined here a second time.
 		requestErr = errors.Join(requestErr, facts.readErr, facts.closeErr)
-		if fixedRequestCanceled(ctx, response) {
+		if fixedRequestCanceled(ctx, response) && control.verdict().reason != "transport_error" {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, facts.status, facts.headers, string(facts.body), requestErr)
 			return
 		}
 		code, status := fixedTransportError(requestErr)
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, status, code,
+		h.fixedTerminalForModelWithRaw(ctx, w, model, target, sessionID, upstream, status, code,
 			"fixed target request failed", requestErr, facts.status, facts.headers, "", string(facts.body))
 		return
 	}
@@ -657,7 +667,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	// A cancellation observed after Do has started is a terminal fixed-call
 	// failure.  Consume the response before returning so any status, headers,
 	// and raw body already delivered by the target remain diagnosable.
-	if fixedRequestCanceled(ctx, response) {
+	if fixedRequestCanceled(ctx, response) && control.verdict().reason != "http_error" {
 		facts := consumeFixedResponse(response)
 		lifecycle.observeResponse(facts.status, facts.headers, nil)
 		lifecycle.observeBody(string(facts.body))
@@ -666,7 +676,8 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		h.handleFixedUpstreamFailure(ctx, w, response, target, sessionID, model, upstream)
+		transferred = true
+		h.finishFixedHTTPFailure(ctx, w, response, target, sessionID, model, upstream, clientLease.Release)
 		return
 	}
 
@@ -682,7 +693,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	}
 	if captureErr != nil || responseCloseErr != nil {
 		cause := errors.Join(captureErr, responseCloseErr)
-		if requestCanceled(ctx) {
+		if requestCanceled(ctx) && control.verdict().reason != "stream_interrupted" {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, response.StatusCode, response.Header, "", cause)
 			return
 		}
@@ -743,46 +754,6 @@ func requestURL(request *http.Request) *url.URL {
 		return nil
 	}
 	return request.URL
-}
-
-// handleFixedUpstreamFailure reads the complete non-2xx response, records raw
-// upstream facts, and either preserves or maps the client-facing status.
-// DecodeResponse and response patches are deliberately not called here.
-func (h *Handler) handleFixedUpstreamFailure(ctx context.Context, w http.ResponseWriter, response *http.Response, target *provider.CompiledFixedTarget, sessionID, model, upstream string) {
-	if response == nil {
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
-			"bad_gateway", "fixed target returned no response", errors.New("nil upstream response"), 0, nil, "", "")
-		return
-	}
-	facts := consumeFixedResponse(response)
-	data := facts.body
-	if fixedRequestCanceled(ctx, response) {
-		cause := fixedCancellationCause(ctx, response, errors.Join(facts.readErr, facts.closeErr))
-		h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, facts.status, facts.headers, string(data), cause)
-		return
-	}
-	if response.Body == nil {
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
-			"bad_gateway", "fixed target returned no response body", errors.New("nil upstream response body"), facts.status, facts.headers, "", string(data))
-		return
-	}
-	if facts.readErr != nil || facts.closeErr != nil {
-		cause := errors.Join(facts.readErr, facts.closeErr)
-		code, status := fixedResponseBodyError(cause)
-		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, status, code,
-			"fixed target response failed", cause, facts.status, facts.headers, "", string(data))
-		return
-	}
-	status := facts.status
-	code := "upstream_error"
-	message := "fixed target returned an error"
-	if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusMethodNotAllowed || (status >= 300 && status < 400) {
-		status = http.StatusBadGateway
-		code = "bad_gateway"
-		message = "fixed target rejected the gateway request"
-	}
-	h.fixedRawTerminal(ctx, w, model, target, sessionID, upstream, status, code, message,
-		facts.status, facts.headers, string(data))
 }
 
 func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status int, upstreamHeaders http.Header, decoded protocol.ProtocolMessage, rawUpstream bodyfile.Body, responseSpec *bodyfile.CompiledScanSpec, execution *patch.Execution, closeExecution func() error, own func(bodyfile.Body)) {
@@ -1076,8 +1047,12 @@ func fixedTransportError(error) (string, int) {
 // recorded as a failure, but no response status is written to the closed
 // client connection.
 func (h *Handler) fixedTerminalForContext(ctx context.Context, w http.ResponseWriter, model string, target *provider.CompiledFixedTarget, sessionID, upstream string, status int, code, message string, cause error, upstreamStatus int, upstreamHeaders http.Header, patchInfo, upstreamBody string) {
-	if requestCanceled(ctx) {
-		lifecycle := fixedLifecycleFromContext(ctx)
+	lifecycle := fixedLifecycleFromContext(ctx)
+	confirmed := ""
+	if lifecycle != nil {
+		confirmed = lifecycle.control.verdict().reason
+	}
+	if requestCanceled(ctx) && confirmed != "stream_interrupted" && confirmed != "transport_error" {
 		if lifecycle != nil && !lifecycle.isStarted() {
 			return
 		}
@@ -1163,7 +1138,7 @@ func fixedBodyText(body bodyfile.Body) (string, error) {
 		_ = closeFixedReader(reader)
 		return "", err
 	}
-	data, readErr := io.ReadAll(reader)
+	data, readErr := io.ReadAll(io.LimitReader(reader, DefaultErrorTextLimit+1))
 	closeErr := reader.Close()
 	return string(data), errors.Join(readErr, closeErr)
 }
@@ -1281,12 +1256,12 @@ func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *
 	event := Event{Kind: kind, Stream: stream, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
 	if kind == EventFailure {
 		event.EndReason = "local_error"
-		if status != 0 {
+		if status != 0 && (status < 200 || status >= 300) {
 			event.EndReason = "http_error"
 		}
 		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil && lifecycle.control != nil {
-			if reason := lifecycle.control.reason(); reason == "response_header_timeout" || reason == "response_idle_timeout" {
-				event.EndReason = reason
+			if verdict := lifecycle.control.verdict(); verdict.reason != "" && verdict.reason != "completed" && verdict.reason != "client_canceled" {
+				event.EndReason = verdict.reason
 			}
 		}
 	}

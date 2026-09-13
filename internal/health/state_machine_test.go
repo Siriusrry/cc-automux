@@ -263,7 +263,7 @@ func TestDisableHealthClassifierChannelNeverCoolsDown(t *testing.T) {
 	}
 	for i := 0; i < 4; i++ {
 		decision := mustAcquire(t, store, key, true)
-		update := store.Report(decision.Lease, scheduler.Outcome{
+		update, _ := store.Report(decision.Lease, scheduler.Outcome{
 			Class:      scheduler.FailureChannelTransient,
 			HTTPStatus: 429,
 			RawError:   "classifier rate limited",
@@ -366,7 +366,7 @@ func TestHalfOpenSingleLeaseNeutralCancelFailureAndSuccess(t *testing.T) {
 	if !probe.Lease.ChannelProbe {
 		t.Fatal("client cancellation did not release the probe")
 	}
-	second := store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
+	second, _ := store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
 	if !second.ChannelEnteredCooldown || second.CooldownUntil == nil || second.CooldownUntil.Sub(clock.Now()) != 2*time.Minute {
 		t.Fatalf("half-open failure = %#v", second)
 	}
@@ -402,7 +402,7 @@ func TestBackoffScheduleAndRetryAfterClamp(t *testing.T) {
 	}
 	clock.Advance(15 * time.Minute)
 	probe := mustAcquire(t, store, key, false)
-	update = store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
+	update, _ = store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
 	if update.CooldownUntil == nil || update.CooldownUntil.Sub(clock.Now()) != 2*time.Minute {
 		t.Fatalf("second cooldown = %#v", update)
 	}
@@ -412,7 +412,7 @@ func TestBackoffScheduleAndRetryAfterClamp(t *testing.T) {
 	for _, duration := range want {
 		clock.Advance(current)
 		probe = mustAcquire(t, store, key, false)
-		update = store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
+		update, _ = store.Report(probe.Lease, scheduler.Outcome{Class: scheduler.FailureChannelTransient})
 		if update.CooldownUntil == nil || update.CooldownUntil.Sub(clock.Now()) != duration {
 			t.Fatalf("cooldown after %v = %#v, want %v", current, update, duration)
 		}
@@ -484,7 +484,7 @@ func TestDisableHealthNeverSuppressesAndPreservesDiagnostics(t *testing.T) {
 		if !decision.Lease.Disabled || decision.Lease.GlobalProbe || decision.Lease.ChannelProbe {
 			t.Fatalf("disabled lease = %#v", decision.Lease)
 		}
-		update := store.Report(decision.Lease, outcome)
+		update, _ := store.Report(decision.Lease, outcome)
 		if update.GlobalEnteredCooldown || update.ChannelEnteredCooldown || update.GlobalState != scheduler.GlobalDisabled || update.ChannelState != scheduler.ChannelDisabled {
 			t.Fatalf("disabled update = %#v", update)
 		}
@@ -611,7 +611,7 @@ func TestReconcileGenerationModeAndModels(t *testing.T) {
 	if channelC.State != scheduler.ChannelDisabled || channelC.ObservedFailures != 0 {
 		t.Fatalf("new channel = %#v", channelC)
 	}
-	staleUpdate := store.Report(staleLease, scheduler.Outcome{Class: scheduler.FailureGlobalImmediate, RawError: "stale"})
+	staleUpdate, _ := store.Report(staleLease, scheduler.Outcome{Class: scheduler.FailureGlobalImmediate, RawError: "stale"})
 	if staleUpdate.GlobalEnteredCooldown || staleUpdate.ChannelEnteredCooldown {
 		t.Fatalf("stale mode update = %#v", staleUpdate)
 	}
@@ -627,7 +627,7 @@ func TestReconcileGenerationModeAndModels(t *testing.T) {
 		t.Fatalf("new generation did not reset = %#v", got)
 	}
 	oldDecision := mustAcquire(t, store, keyA, false)
-	oldUpdate := store.Report(oldDecision.Lease, scheduler.Outcome{Class: scheduler.FailureGlobalImmediate, RawError: "old generation"})
+	oldUpdate, _ := store.Report(oldDecision.Lease, scheduler.Outcome{Class: scheduler.FailureGlobalImmediate, RawError: "old generation"})
 	if oldUpdate.GlobalEnteredCooldown || oldUpdate.ChannelEnteredCooldown {
 		t.Fatalf("old generation update = %#v", oldUpdate)
 	}
@@ -779,7 +779,7 @@ func TestWrongLeaseKeyConsumesAndReleasesActualLease(t *testing.T) {
 	lease := mustAcquire(t, store, key, false).Lease
 	wrong := lease
 	wrong.Key.Model = "other-model"
-	if update := store.Report(wrong, scheduler.Outcome{Class: scheduler.FailureChannelImmediate}); update != (scheduler.HealthUpdate{}) {
+	if update, _ := store.Report(wrong, scheduler.Outcome{Class: scheduler.FailureChannelImmediate}); update != (scheduler.HealthUpdate{}) {
 		t.Fatalf("wrong lease update = %#v", update)
 	}
 	got := mustProviderSnapshot(t, store, p)
@@ -788,7 +788,7 @@ func TestWrongLeaseKeyConsumesAndReleasesActualLease(t *testing.T) {
 	}
 	// The actual lease was consumed, so a second report must be ignored and a
 	// future acquire must remain possible.
-	if update := store.Report(lease, scheduler.Outcome{Class: scheduler.FailureChannelImmediate}); update != (scheduler.HealthUpdate{}) {
+	if update, _ := store.Report(lease, scheduler.Outcome{Class: scheduler.FailureChannelImmediate}); update != (scheduler.HealthUpdate{}) {
 		t.Fatalf("replayed lease update = %#v", update)
 	}
 	next := mustAcquire(t, store, key, false)
@@ -797,7 +797,7 @@ func TestWrongLeaseKeyConsumesAndReleasesActualLease(t *testing.T) {
 	lease = mustAcquire(t, store, key, false).Lease
 	wrong = lease
 	wrong.ChannelProbe = !lease.ChannelProbe
-	if update := store.Report(wrong, scheduler.Outcome{Class: scheduler.FailureChannelImmediate}); update != (scheduler.HealthUpdate{}) {
+	if update, _ := store.Report(wrong, scheduler.Outcome{Class: scheduler.FailureChannelImmediate}); update != (scheduler.HealthUpdate{}) {
 		t.Fatalf("wrong lease flags update = %#v", update)
 	}
 	if next := mustAcquire(t, store, key, false); !next.Available {
@@ -895,7 +895,8 @@ func mustAcquire(t *testing.T, store *Store, key scheduler.HealthKey, disableHea
 
 func report(t *testing.T, store *Store, key scheduler.HealthKey, disableHealth bool, outcome scheduler.Outcome) scheduler.HealthUpdate {
 	t.Helper()
-	return store.Report(mustAcquire(t, store, key, disableHealth).Lease, outcome)
+	update, _ := store.Report(mustAcquire(t, store, key, disableHealth).Lease, outcome)
+	return update
 }
 
 func mustProviderSnapshot(t *testing.T, store *Store, p *provider.CompiledProvider) ProviderSnapshot {

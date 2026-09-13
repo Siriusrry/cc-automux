@@ -120,6 +120,11 @@ func (s *sseObserver) endLine() {
 		s.event = string(s.value)
 	} else if s.mode == 0 && string(s.prefix) == "event" {
 		s.event = ""
+	} else if s.mode == 0 && string(s.prefix) == "data" && s.event == "error" {
+		if s.dataLines > 0 {
+			s.data.add([]byte{'\n'})
+		}
+		s.dataLines++
 	}
 	s.prefix = s.prefix[:0]
 	s.value = s.value[:0]
