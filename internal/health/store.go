@@ -702,3 +702,5 @@ func (s *Store) UpdateError(lease scheduler.HealthLease, observation uint64, raw
 		entry.lastErrorTruncated = entry.lastErrorTruncated || truncated
 	}
 }
+
+var _ scheduler.HealthErrorUpdater = (*Store)(nil)

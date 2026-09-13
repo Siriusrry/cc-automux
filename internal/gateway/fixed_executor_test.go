@@ -1044,3 +1044,45 @@ func TestFixedExecutionPinsUncompressedUpstreamOnlyWhenRewritingResponse(t *test
 		})
 	}
 }
+
+func TestFixedErrorReadersHonorInjectedLimit(t *testing.T) {
+	const limit = 11
+	wire := strings.Repeat("界", 30)
+	facts := consumeFixedResponse(&http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(wire))}, limit)
+	if !facts.truncated || string(facts.body) != "界界界" {
+		t.Fatalf("facts=%#v", facts)
+	}
+	body, err := bodyfile.Capture(strings.NewReader(wire))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer body.Close()
+	text, truncated, err := fixedBodyText(body, limit)
+	if err != nil || !truncated || text != "界界界" {
+		t.Fatalf("fixed body=%q,%v,%v", text, truncated, err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, `{"long":"`+wire+`"}`) }))
+	defer upstream.Close()
+	adapter := &fixedTestAdapter{protocol: config.ProtocolOpenAIResponses,
+		encode: func(body bodyfile.Body, headers http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{Body: body, Headers: headers}, nil
+		},
+		decode: func(bodyfile.Body, http.Header) (protocol.ProtocolMessage, error) {
+			return protocol.ProtocolMessage{}, errors.New("decode failed")
+		},
+	}
+	registry, err := protocol.NewRegistry(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &eventCollector{}
+	h := NewWithOptions(nil, &fakeSelector{}, Options{Recorder: events, ProtocolAdapters: registry, UpstreamLimits: UpstreamLimits{ErrorTextBytes: limit}})
+	defer h.Close()
+	h.forwardFixedExecution(httptest.NewRecorder(), fixedTestIncoming(""), nil, fixedTestExecutionPlan(t, fixedTestTarget(t, upstream.URL, config.ProtocolOpenAIResponses, patch.Plan{})))
+	event := events.snapshot()[1]
+	call := h.FixedTargetDiagnostics()
+	if event.RawErrorIncomplete != incompleteTruncated || len(event.RawError) > limit || !call.UpstreamBodyTruncated || len(call.UpstreamBody) > limit {
+		t.Fatalf("event=%#v call=%#v", event, call)
+	}
+}

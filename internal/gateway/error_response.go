@@ -24,9 +24,7 @@ func (h *Handler) fillFailure(f *capturedFailure, event Event, raw string, incom
 	event.RawError = raw
 	event.RawErrorIncomplete = incomplete
 	event.EndReason = endHTTPError
-	if updater, ok := h.selector.(interface {
-		UpdateError(scheduler.AttemptLease, uint64, string, bool, bool)
-	}); ok {
+	if updater, ok := h.selector.(scheduler.ErrorUpdater); ok {
 		updater.UpdateError(f.lease.AttemptLease, f.observation, raw, incomplete == incompleteTimeout || incomplete == incompleteInterrupted || incomplete == incompleteCanceled, incomplete == incompleteTruncated)
 	}
 	h.record(event)

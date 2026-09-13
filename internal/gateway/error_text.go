@@ -1,6 +1,6 @@
 package gateway
 
-import "unicode/utf8"
+import "github.com/Siriusrry/cc-automux/internal/textlimit"
 
 type boundedText struct {
 	data      []byte
@@ -20,17 +20,11 @@ func (b *boundedText) add(p []byte) {
 	b.data = append(b.data, p...)
 }
 func (b *boundedText) text() string {
-	data := b.data
-	if b.truncated {
-		for i := len(data) - 1; i >= 0 && i >= len(data)-utf8.UTFMax; i-- {
-			if utf8.RuneStart(data[i]) {
-				if !utf8.FullRune(data[i:]) {
-					data = data[:i]
-				}
-				break
-			}
-		}
+	if !b.truncated {
+		return string(b.data)
 	}
-	return string(data)
+	value, _ := textlimit.Prefix(string(b.data), b.limit)
+	return value
 }
+
 func (b *boundedText) reset() { b.data = b.data[:0]; b.truncated = false }

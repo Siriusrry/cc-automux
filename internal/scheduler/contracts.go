@@ -227,3 +227,13 @@ type Selector interface {
 type RequestPolicySelector interface {
 	AcquireWithPolicy(snapshot Snapshot, key StickyKey, excluded map[string]struct{}, policy AttemptPolicy) (AttemptLease, error)
 }
+
+// ErrorUpdater fills a current attempt's diagnostic without reporting health twice.
+type ErrorUpdater interface {
+	UpdateError(lease AttemptLease, observation uint64, raw string, incomplete, truncated bool)
+}
+
+// HealthErrorUpdater is the health-store counterpart of ErrorUpdater.
+type HealthErrorUpdater interface {
+	UpdateError(lease HealthLease, observation uint64, raw string, incomplete, truncated bool)
+}

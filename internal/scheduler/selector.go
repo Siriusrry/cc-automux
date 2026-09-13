@@ -835,9 +835,9 @@ func (s *Scheduler) UpdateError(lease AttemptLease, observation uint64, raw stri
 	if lease.SnapshotRevision != 0 && s.revision != lease.SnapshotRevision {
 		return
 	}
-	if updater, ok := s.health.(interface {
-		UpdateError(HealthLease, uint64, string, bool, bool)
-	}); ok {
+	if updater, ok := s.health.(HealthErrorUpdater); ok {
 		updater.UpdateError(lease.HealthLease, observation, raw, incomplete, truncated)
 	}
 }
+
+var _ ErrorUpdater = (*Scheduler)(nil)

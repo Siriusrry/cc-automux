@@ -19,6 +19,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/protocol"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
+	"github.com/Siriusrry/cc-automux/internal/textlimit"
 	"github.com/Siriusrry/cc-automux/internal/traffic"
 )
 
@@ -29,9 +30,11 @@ type fixedDiagnosticContextKey struct{}
 // terminal outcome after EventForward; the lifecycle also lets that outcome
 // include cleanup errors before a response is made visible.
 type fixedLifecycle struct {
-	stream  bool
-	control *upstreamAttempt
-	mu      sync.Mutex
+	errorLimit    int
+	bodyTruncated bool
+	stream        bool
+	control       *upstreamAttempt
+	mu            sync.Mutex
 
 	started         bool
 	responseStarted bool
@@ -263,17 +266,18 @@ func closeFixedReader(reader io.ReadCloser) error {
 }
 
 type fixedResponseFacts struct {
-	status   int
-	headers  http.Header
-	body     []byte
-	readErr  error
-	closeErr error
+	truncated bool
+	status    int
+	headers   http.Header
+	body      []byte
+	readErr   error
+	closeErr  error
 }
 
 // consumeFixedResponse drains and closes a response exactly once from the
 // gateway's point of view.  It is used only on terminal/error paths, where the
 // raw upstream body is required for diagnostics.
-func consumeFixedResponse(response *http.Response) fixedResponseFacts {
+func consumeFixedResponse(response *http.Response, limit int) fixedResponseFacts {
 	if response == nil {
 		return fixedResponseFacts{}
 	}
@@ -281,8 +285,11 @@ func consumeFixedResponse(response *http.Response) fixedResponseFacts {
 	if response.Body == nil {
 		return facts
 	}
-	facts.body, facts.readErr = io.ReadAll(io.LimitReader(response.Body, DefaultErrorTextLimit+1))
+	facts.body, facts.readErr = io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 	facts.closeErr = response.Body.Close()
+	text, truncated := textlimit.Prefix(string(facts.body), limit)
+	facts.body = []byte(text)
+	facts.truncated = truncated
 	return facts
 }
 
@@ -344,7 +351,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		execution = nil
 		return current.Close()
 	}
-	lifecycle := &fixedLifecycle{stream: prepared.Plan.Stream}
+	lifecycle := &fixedLifecycle{stream: prepared.Plan.Stream, errorLimit: h.limits.ErrorTextBytes}
 	upstream := ""
 	lifecycle.cleanup = func() error {
 		patchErr := closeExecution()
@@ -609,9 +616,10 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 			h.fixedTerminalForModelWithRaw(ctx, w, model, target, sessionID, upstream, http.StatusGatewayTimeout, code, message, requestErr, 0, nil, "", "")
 			return
 		}
-		facts := consumeFixedResponse(response)
+		facts := consumeFixedResponse(response, h.limits.ErrorTextBytes)
 		lifecycle.observeResponse(facts.status, facts.headers, nil)
 		lifecycle.observeBody(string(facts.body))
+		lifecycle.markBodyTruncated(facts.truncated)
 		// requestCloseErr is retained by the lifecycle cleanup and is therefore
 		// intentionally not joined here a second time.
 		requestErr = errors.Join(requestErr, facts.readErr, facts.closeErr)
@@ -625,9 +633,10 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 	if requestCloseErr != nil {
-		facts := consumeFixedResponse(response)
+		facts := consumeFixedResponse(response, h.limits.ErrorTextBytes)
 		lifecycle.observeResponse(facts.status, facts.headers, nil)
 		lifecycle.observeBody(string(facts.body))
+		lifecycle.markBodyTruncated(facts.truncated)
 		// The lifecycle owns requestCloseErr; terminal cleanup appends it to the
 		// diagnostic exactly once along with any response read/close errors.
 		cause := errors.Join(facts.readErr, facts.closeErr)
@@ -663,9 +672,10 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	// failure.  Consume the response before returning so any status, headers,
 	// and raw body already delivered by the target remain diagnosable.
 	if requestCanceled(ctx) && control.verdict().reason != endHTTPError {
-		facts := consumeFixedResponse(response)
+		facts := consumeFixedResponse(response, h.limits.ErrorTextBytes)
 		lifecycle.observeResponse(facts.status, facts.headers, nil)
 		lifecycle.observeBody(string(facts.body))
+		lifecycle.markBodyTruncated(facts.truncated)
 		cause := errors.Join(facts.readErr, facts.closeErr, contextError(ctx, nil))
 		h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, facts.status, facts.headers, string(facts.body), cause)
 		return
@@ -704,7 +714,8 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		var decodeErr error
 		decoded, decodeErr = decodeFixedResponse(adapter, rawBody, response.Header.Clone())
 		if decodeErr != nil {
-			rawText, rawErr := fixedBodyText(rawBody)
+			rawText, truncated, rawErr := fixedBodyText(rawBody, h.limits.ErrorTextBytes)
+			lifecycle.markBodyTruncated(truncated)
 			decodeErr = errors.Join(decodeErr, rawErr)
 			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 				"protocol_conversion_failed", "fixed target response conversion failed", decodeErr, response.StatusCode, response.Header, "", rawText)
@@ -713,7 +724,8 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	}
 	own(decoded.Body)
 	if decoded.Body == nil {
-		rawText, rawErr := fixedBodyText(rawBody)
+		rawText, truncated, rawErr := fixedBodyText(rawBody, h.limits.ErrorTextBytes)
+		lifecycle.markBodyTruncated(truncated)
 		if adapter == nil {
 			h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 				"bad_gateway", "fixed target response body is unavailable", errors.Join(errors.New("fixed target response body is nil"), rawErr), response.StatusCode, response.Header, "", rawText)
@@ -731,7 +743,8 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		return
 	}
 	if err := closeExecution(); err != nil {
-		rawText, rawErr := fixedBodyText(rawBody)
+		rawText, truncated, rawErr := fixedBodyText(rawBody, h.limits.ErrorTextBytes)
+		lifecycle.markBodyTruncated(truncated)
 		err = errors.Join(err, rawErr)
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch failed", err, response.StatusCode, response.Header, "", rawText)
@@ -753,7 +766,10 @@ func requestURL(request *http.Request) *url.URL {
 
 func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status int, upstreamHeaders http.Header, decoded protocol.ProtocolMessage, rawUpstream bodyfile.Body, responseSpec *bodyfile.CompiledScanSpec, execution *patch.Execution, closeExecution func() error, own func(bodyfile.Body)) {
 	if decoded.Body == nil {
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"protocol_conversion_failed", "fixed target response conversion returned no body", errors.Join(errors.New("nil decoded response body"), rawErr), status, upstreamHeaders, "", rawText)
 		return
@@ -763,7 +779,10 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 		return
 	}
 	if responseSpec == nil {
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch could not be prepared", errors.Join(errors.New("compiled response scan is unavailable"), rawErr), status, upstreamHeaders, "", rawText)
 		return
@@ -772,7 +791,10 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 	if err != nil {
 		_ = closeFixedReader(reader)
 		code, localStatus := fixedLocalBodyError(err)
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, localStatus, code,
 			"fixed target response could not be replayed", errors.Join(err, rawErr), status, upstreamHeaders, "", rawText)
 		return
@@ -785,7 +807,10 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 	if captureErr != nil || readerCloseErr != nil {
 		cause := errors.Join(captureErr, readerCloseErr)
 		code, localStatus := fixedResponseBodyError(cause)
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, localStatus, code,
 			"fixed target response patch could not be read", errors.Join(cause, rawErr), status, upstreamHeaders, "", rawText)
 		return
@@ -803,13 +828,19 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 	}
 	if responsePatchErr != nil {
 		patchID, stage := patchErrorDetails(responsePatchErr, patch.StageResponse)
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch failed", errors.Join(responsePatchErr, rawErr), status, upstreamHeaders, patchID+":"+string(stage), rawText)
 		return
 	}
 	if mutable.Body == nil {
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch failed", errors.Join(errors.New("patch returned nil response body"), rawErr), status, upstreamHeaders, "", rawText)
 		return
@@ -819,13 +850,19 @@ func (h *Handler) finishFixedPatchedResponse(w http.ResponseWriter, ctx context.
 	}
 	headers, err := mutableHTTPHeaders(mutable.Headers)
 	if err != nil {
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch failed", errors.Join(err, rawErr), status, upstreamHeaders, "", rawText)
 		return
 	}
 	if err := closeExecution(); err != nil {
-		rawText, rawErr := fixedBodyText(rawUpstream)
+		rawText, truncated, rawErr := fixedBodyText(rawUpstream, h.limits.ErrorTextBytes)
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			lifecycle.markBodyTruncated(truncated)
+		}
 		h.fixedTerminalForContext(ctx, w, model, target, sessionID, upstream, http.StatusBadGateway,
 			"patch_failed", "fixed target response patch failed", errors.Join(err, rawErr), status, upstreamHeaders, "", rawText)
 		return
@@ -1018,7 +1055,8 @@ func fixedLifecycleFacts(lifecycle *fixedLifecycle, upstreamStatus int, upstream
 		if bodySet {
 			upstreamBody = observedBody
 		} else if source != nil {
-			text, readErr := fixedBodyText(source)
+			text, truncated, readErr := fixedBodyText(source, lifecycle.errorLimit)
+			lifecycle.markBodyTruncated(truncated)
 			upstreamBody = text
 			cause = errors.Join(cause, readErr)
 		}
@@ -1111,18 +1149,19 @@ func (h *Handler) fixedTerminalForModelWithRaw(ctx context.Context, w http.Respo
 // fixedBodyText reads a request-scoped body only for a failure diagnostic. It
 // is deliberately absent from successful fixed responses so normal traffic is
 // never duplicated into an in-memory string.
-func fixedBodyText(body bodyfile.Body) (string, error) {
+func fixedBodyText(body bodyfile.Body, limit int) (string, bool, error) {
 	if body == nil {
-		return "", nil
+		return "", false, nil
 	}
 	reader, err := body.OpenReader()
 	if err != nil {
 		_ = closeFixedReader(reader)
-		return "", err
+		return "", false, err
 	}
-	data, readErr := io.ReadAll(io.LimitReader(reader, DefaultErrorTextLimit+1))
+	data, readErr := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
 	closeErr := reader.Close()
-	return string(data), errors.Join(readErr, closeErr)
+	text, truncated := textlimit.Prefix(string(data), limit)
+	return text, truncated, errors.Join(readErr, closeErr)
 }
 
 func (h *Handler) fixedTerminalAfterWriteWithFacts(ctx context.Context, target *provider.CompiledFixedTarget, sessionID, model, upstream string, status, upstreamStatus int, upstreamHeaders http.Header, upstreamBody string, cause error) {
@@ -1217,6 +1256,9 @@ func (h *Handler) recordFixedCall(ctx context.Context, target *provider.Compiled
 	if h == nil || h.fixedDiagnostics == nil {
 		return
 	}
+	if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+		call.UpstreamBodyTruncated = call.UpstreamBodyTruncated || lifecycle.isBodyTruncated()
+	}
 	if call.ObservedAt.IsZero() {
 		call.ObservedAt = h.now().UTC()
 	}
@@ -1237,6 +1279,14 @@ func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *
 	}
 	event := Event{Kind: kind, Stream: stream, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
 	if kind == EventFailure {
+		raw, truncated := textlimit.Prefix(event.RawError, h.limits.ErrorTextBytes)
+		event.RawError = raw
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
+			truncated = truncated || lifecycle.isBodyTruncated()
+		}
+		if truncated {
+			event.RawErrorIncomplete = incompleteTruncated
+		}
 		event.EndReason = endLocalError
 		if status != 0 && (status < 200 || status >= 300) {
 			event.EndReason = endHTTPError
@@ -1266,4 +1316,21 @@ func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *
 		event.ProviderID = target.ID
 	}
 	h.record(event)
+}
+
+func (l *fixedLifecycle) markBodyTruncated(truncated bool) {
+	if l == nil || !truncated {
+		return
+	}
+	l.mu.Lock()
+	l.bodyTruncated = true
+	l.mu.Unlock()
+}
+func (l *fixedLifecycle) isBodyTruncated() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.bodyTruncated
 }

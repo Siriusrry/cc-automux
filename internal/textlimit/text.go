@@ -9,7 +9,7 @@ import (
 const DiagnosticBytes = 8 * 1024
 
 func Prefix(value string, limit int) (string, bool) {
-	if len(value) <= limit {
+	if len(value) < limit {
 		return value, false
 	}
 	end := limit
@@ -21,5 +21,5 @@ func Prefix(value string, limit int) (string, bool) {
 			break
 		}
 	}
-	return strings.Clone(value[:end]), true
+	return strings.Clone(value[:end]), len(value) > end
 }
