@@ -1029,13 +1029,6 @@ func fixedCleanupBodyError(err error) (code string, status int, message string) 
 	return "bad_gateway", http.StatusBadGateway, "fixed target response cleanup failed"
 }
 
-func fixedErrorText(text string) error {
-	if text == "" {
-		return nil
-	}
-	return errors.New(text)
-}
-
 // fixedLifecycleFacts merges the best upstream facts accumulated so far into
 // a terminal diagnostic.  A successful response is deliberately not read into
 // memory during normal operation; if the request later fails or is canceled,
