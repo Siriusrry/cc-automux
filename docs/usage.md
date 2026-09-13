@@ -87,7 +87,7 @@ Forms with a save bar require **Save changes**; **Revert** discards the draft. I
 
 Provider requests use the Anthropic Messages API. Enter the base URL; CC AutoMux appends `/v1/messages`. Do not append that endpoint yourself. Model names are case-sensitive and matched exactly.
 
-Higher numeric priorities are tried first. New sessions round-robin within the highest available priority; sessions with a valid `X-Claude-Code-Session-Id` stay on a provider for the same model and request type. Lower tiers are used when higher ones are unavailable. Normal requests may try up to three different providers on eligible failures. Disabling health cooldown prevents failure-based scheduling suppression; diagnostics remain available.
+Higher numeric priorities are tried first. New sessions round-robin within the highest available priority; sessions with a valid `X-Claude-Code-Session-Id` stay on a provider for the same model and request type. Only when every higher-tier candidate is cooling down can a lower tier serve the request. Eligible failures can trigger further attempts within the current tier, including repeated calls to the same provider. Disabling health cooldown keeps a statically eligible provider available, so a higher-tier provider with this setting continues to block lower tiers. An occupied half-open probe does not permit bypassing the tier. Existing session bindings move to a replacement only after it succeeds; diagnostics remain available.
 
 TLS uses system roots by default. A custom CA file and skipping certificate verification are mutually exclusive. Compatibility patches are selected explicitly and run in the chosen order; provider names and URLs do not enable them automatically.
 
@@ -103,7 +103,11 @@ Fixed classifier targets can use Anthropic Messages, OpenAI Responses, or OpenAI
 
 The default target is the current user's `.claude/settings.json`; you can select an absolute custom path. Activation updates only the managed gateway, model, and telemetry fields and preserves other values. Before the first modification of an existing file, CC AutoMux creates a sibling `.cc-automux.bak`; an existing backup is never overwritten. Creating a new settings file does not create a backup.
 
-Saving a profile does not activate it. **Active** means the managed file contents were verified; changing them outside CC AutoMux clears that state on the next check. Open or return to the Claude Code page to refresh it. Changing the gateway address/key or the active profile can require reactivation.
+Each profile saves **Max attempts per request**, the total upstream calls allowed for a normal request. The default is 3; 1 allows a single call. The active profile applies globally to all new normal requests. Saving its attempt limit applies immediately without rewriting Claude Code settings; requests already in progress keep their captured limit. Classifier requests remain limited to one call.
+
+Saving an inactive profile does not activate it. **Active** means the managed file contents were verified; changing them outside CC AutoMux clears that state on the next check. Open or return to Overview or Claude Code to refresh it. No active profile, or a failed verification, uses the default limit of 3 and shows a warning on Overview. Changing the gateway address/key or the active profile's model mappings can require reactivation.
+
+The profile API field is `max_attempts`, an integer from 1 to 9007199254740991. Omission defaults to 3, including on profile replacement; explicit zero and null are rejected. Harness status returns the effective `normal_max_attempts` and `attempt_policy_source` (`profile` or `default`).
 
 **Disable Claude Code telemetry** controls the four fields shown beside the switch. Its value is written when a profile is activated.
 

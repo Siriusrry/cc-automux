@@ -439,15 +439,43 @@ func checkProfileKeys(object map[string]json.RawMessage) error {
 	if err := rejectUnknownKeys(object, map[string]struct{}{
 		"id": {}, "name": {}, "haiku_model": {}, "sonnet_model": {},
 		"opus_model": {}, "fable_model": {}, "subagent_model": {},
-		"teammate_default_model": {},
+		"teammate_default_model": {}, "max_attempts": {},
 	}); err != nil {
 		return err
 	}
 	for key, value := range object {
+		if key == "max_attempts" {
+			if _, err := DecodeMaxAttempts(value); err != nil {
+				return err
+			}
+			continue
+		}
 		var decoded string
 		if err := json.Unmarshal(value, &decoded); err != nil {
 			return fmt.Errorf("profile.%s must be a string: %w", key, err)
 		}
+	}
+	return nil
+}
+
+// DecodeMaxAttempts shares strict numeric validation across profile and config APIs.
+func DecodeMaxAttempts(raw json.RawMessage) (int, error) {
+	var value int
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0, errors.New("max_attempts must not be null")
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, errors.New("max_attempts must be an integer")
+	}
+	if err := ValidateMaxAttempts(value); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
+func ValidateMaxAttempts(value int) error {
+	if value < 1 || int64(value) > MaxSafeAttempts {
+		return errors.New("max_attempts must be an integer from 1 to 9007199254740991")
 	}
 	return nil
 }

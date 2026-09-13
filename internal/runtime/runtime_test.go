@@ -102,9 +102,9 @@ func TestHotApplyPublishesOnlyAfterPersist(t *testing.T) {
 }
 
 func TestSnapshotCarriesAttemptPolicyAcrossRevisions(t *testing.T) {
-	attempts := scheduler.AttemptPolicy{MaxAttempts: 2}
+	attempts := scheduler.DefaultAttemptPolicy()
 	classifierAttempts := scheduler.AttemptPolicy{MaxAttempts: 1}
-	manager, _, cfg := newRuntimeManager(t, Options{AttemptPolicy: attempts, ClassifierAttemptPolicy: classifierAttempts})
+	manager, _, cfg := newRuntimeManager(t, Options{ClassifierAttemptPolicy: classifierAttempts})
 	if got := manager.Snapshot().AttemptPolicy(); got != attempts {
 		t.Fatalf("initial attempt policy = %#v", got)
 	}
@@ -284,12 +284,6 @@ func TestNewManagerRejectsInvalidAttemptPolicy(t *testing.T) {
 	store, err := config.NewStore(path)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := NewManager(store, runtimeConfig(), Options{
-		AttemptPolicy:  scheduler.AttemptPolicy{MaxAttempts: -1},
-		RuntimeContext: testRuntimeContext(t),
-	}); err == nil || !strings.Contains(err.Error(), "attempt policy") {
-		t.Fatalf("invalid attempt policy error = %v", err)
 	}
 	if _, err := NewManager(store, runtimeConfig(), Options{
 		ClassifierAttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: -1},

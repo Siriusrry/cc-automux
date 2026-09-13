@@ -480,6 +480,7 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 		t.Fatal(err)
 	}
 	profile := managerProfile(testProfileOneID, "one")
+	profile.MaxAttempts = 8
 	if _, err := harness.CreateProfile(ClaudeCodeAdapterID, profile); err != nil {
 		t.Fatal(err)
 	}
@@ -499,6 +500,19 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	if err != nil || !result.Active {
 		t.Fatalf("retry activation = %#v, err %v", result, err)
 	}
+	if result.Harness.NormalMaxAttempts != 8 || result.Harness.AttemptPolicySource != "profile" {
+		t.Fatalf("active policy = %#v", result)
+	}
+	oldSnapshot := runtimeManager.Snapshot()
+	changed := profile
+	changed.MaxAttempts = 2
+	store.setFailNext(errors.New("injected budget save failure"))
+	if _, err := harness.UpdateProfile(ClaudeCodeAdapterID, profile.ID, changed); err == nil {
+		t.Fatal("save should fail")
+	}
+	if runtimeManager.Snapshot() != oldSnapshot {
+		t.Fatal("failed save published candidate")
+	}
 	// A failed reconciliation clear must leave the persisted active ID intact
 	// but report a fail-closed state; the next read retries the clear.
 	target = filepath.Join(home, ".claude", "settings.json")
@@ -515,6 +529,22 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	}
 	if got := runtimeManager.Config().Harnesses.ClaudeCode.ActiveProfileID; got != profile.ID {
 		t.Fatalf("failed reconciliation clear changed runtime active ID to %q", got)
+	}
+	if state.NormalMaxAttempts != 3 || state.AttemptPolicySource != "default" || runtimeManager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 {
+		t.Fatalf("failed clear retained invalid budget: %#v", state)
+	}
+	if oldSnapshot.NormalAttemptPolicy().MaxAttempts != 8 {
+		t.Fatal("old snapshot mutated")
+	}
+	if _, err := runtimeManager.Update(func(cfg *config.Config) error {
+		cfg.Providers = nil
+		cfg.AutoMode = config.AutoModeConfig{Mode: config.AutoModeProviderPool, Model: "classifier"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeManager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 {
+		t.Fatal("unrelated update lifted invalidation guard")
 	}
 	store.setFailNext(nil)
 	state, err = harness.Status(ClaudeCodeAdapterID)

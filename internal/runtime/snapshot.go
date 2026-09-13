@@ -48,15 +48,16 @@ func CompileAutoMode(auto config.AutoModeConfig, context provider.RuntimeContext
 
 // Snapshot is one immutable, fully compiled runtime state.
 type Snapshot struct {
-	revision           uint64
-	config             config.Config
-	catalog            *provider.Catalog
-	autoMode           CompiledAutoMode
-	runtimeContext     provider.RuntimeContext
-	attempts           scheduler.AttemptPolicy
-	classifierAttempts scheduler.AttemptPolicy
-	requestScan        *bodyfile.CompiledScanSpec
-	created            time.Time
+	revision            uint64
+	config              config.Config
+	catalog             *provider.Catalog
+	autoMode            CompiledAutoMode
+	runtimeContext      provider.RuntimeContext
+	attempts            scheduler.AttemptPolicy
+	attemptPolicySource string
+	classifierAttempts  scheduler.AttemptPolicy
+	requestScan         *bodyfile.CompiledScanSpec
+	created             time.Time
 }
 
 // CompiledAutoMode is the immutable runtime representation of Auto Mode.  It
@@ -243,4 +244,9 @@ func (s *Snapshot) CreatedAt() time.Time {
 		return time.Time{}
 	}
 	return s.created
+}
+
+// NormalAttemptStatus describes the strategy in this immutable snapshot.
+func (s *Snapshot) NormalAttemptStatus() (int, string) {
+	return s.attempts.MaxAttempts, s.attemptPolicySource
 }

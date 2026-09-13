@@ -450,6 +450,9 @@ details.disc .disc-body { margin-top: 12px; }
   .main-in > .status-chips { display: none; }
 }
 @media (max-width: 560px) {
+  .banner { display: grid; grid-template-columns: 18px minmax(0, 1fr); }
+  .banner .b-actions { grid-column: 2; flex-wrap: wrap; }
+  .banner .b-body { overflow-wrap: anywhere; }
   .card { padding: 18px; border-radius: 18px; }
   .card.stats { grid-template-columns: 1fr; }
   .row-card .rc-tags { display: none; }

@@ -52,7 +52,6 @@ type Options struct {
 	// snapshot; it never constructs replacement runtime state.
 	RuntimeContext          provider.RuntimeContext
 	ScanRequirements        ScanRequirements
-	AttemptPolicy           scheduler.AttemptPolicy
 	ClassifierAttemptPolicy scheduler.AttemptPolicy
 	// Preflight runs after full schema/provider compilation but before the
 	// pending file is written. Nil uses a loopback listener probe when the
@@ -112,7 +111,8 @@ func (m *Manager) WithHarnessMutation(fn func(config.HarnessMutation) error) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.restartStatus.InProgress {
-		return ErrRestartInProgress
+		m.invalidatePolicyLocked()
+		return &HarnessStateError{snapshot: m.current.Load()}
 	}
 	return fn(&HarnessMutation{manager: m})
 }
@@ -160,7 +160,55 @@ func (t *HarnessMutation) ClearActiveProfileID() error {
 // SetActiveProfileID persists a server-owned active profile ID inside the
 // enclosing harness mutation.
 func (t *HarnessMutation) SetActiveProfileID(id string) error {
-	return t.setActiveProfileID(id)
+	if t == nil || t.manager == nil {
+		return errors.New("runtime harness mutation is not initialized")
+	}
+	previous := t.manager.activeProfileInvalid
+	if !previous && t.manager.current.Load().config.Harnesses.ClaudeCode.ActiveProfileID == id {
+		return nil
+	}
+	t.manager.activeProfileInvalid = false
+	if err := t.setActiveProfileID(id); err != nil {
+		t.manager.activeProfileInvalid = previous
+		return err
+	}
+	return nil
+}
+
+// InvalidateActiveProfile revokes an untrusted policy before attempting to
+// persist the inactive ID. A failed write must not restore the revoked policy.
+func (t *HarnessMutation) InvalidateActiveProfile() error {
+	t.manager.invalidatePolicyLocked()
+	return t.ClearActiveProfileID()
+}
+
+func (m *Manager) invalidatePolicyLocked() {
+	m.activeProfileInvalid = true
+	current := m.current.Load()
+	if current.attempts != scheduler.DefaultAttemptPolicy() || current.attemptPolicySource != "default" {
+		next := *current
+		m.revision++
+		next.revision = m.revision
+		next.created = m.now()
+		next.attempts = scheduler.DefaultAttemptPolicy()
+		next.attemptPolicySource = "default"
+		m.current.Store(&next)
+	}
+}
+
+func (t *HarnessMutation) NormalAttemptStatus() (int, string) {
+	return t.manager.current.Load().NormalAttemptStatus()
+}
+
+func (m *Manager) normalAttempts(cfg config.Config) (scheduler.AttemptPolicy, string) {
+	if !m.activeProfileInvalid && cfg.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		for _, p := range cfg.Harnesses.ClaudeCode.Profiles {
+			if p.ID == cfg.Harnesses.ClaudeCode.ActiveProfileID {
+				return scheduler.AttemptPolicy{MaxAttempts: p.Normalize().MaxAttempts}, "profile"
+			}
+		}
+	}
+	return scheduler.DefaultAttemptPolicy(), "default"
 }
 
 func (t *HarnessMutation) setActiveProfileID(id string) error {
@@ -180,14 +228,15 @@ func (t *HarnessMutation) setActiveProfileID(id string) error {
 }
 
 type Manager struct {
-	mu                 sync.Mutex
-	store              ConfigStore
-	runtimeContext     provider.RuntimeContext
-	scanRequirements   ScanRequirements
-	current            atomic.Pointer[Snapshot]
-	revision           uint64
-	attempts           scheduler.AttemptPolicy
-	classifierAttempts scheduler.AttemptPolicy
+	mu                   sync.Mutex
+	store                ConfigStore
+	runtimeContext       provider.RuntimeContext
+	scanRequirements     ScanRequirements
+	current              atomic.Pointer[Snapshot]
+	revision             uint64
+	harnessReconciler    func(config.HarnessMutation) error
+	activeProfileInvalid bool
+	classifierAttempts   scheduler.AttemptPolicy
 
 	preflight    func(current, next config.Config) error
 	restart      func() error
@@ -219,13 +268,6 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	if err != nil {
 		return nil, err
 	}
-	attempts := options.AttemptPolicy
-	if attempts == (scheduler.AttemptPolicy{}) {
-		attempts = scheduler.DefaultAttemptPolicy()
-	}
-	if err := attempts.Validate(); err != nil {
-		return nil, fmt.Errorf("attempt policy: %w", err)
-	}
 	classifierAttempts := options.ClassifierAttemptPolicy
 	if classifierAttempts == (scheduler.AttemptPolicy{}) {
 		classifierAttempts = scheduler.DefaultClassifierAttemptPolicy()
@@ -246,18 +288,18 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	}
 	startedAt := now()
 	m := &Manager{
-		store:              store,
-		runtimeContext:     context,
-		scanRequirements:   options.ScanRequirements,
-		revision:           1,
-		attempts:           attempts,
-		classifierAttempts: classifierAttempts,
-		preflight:          preflight,
-		restart:            options.Restart,
-		restartDelay:       options.RestartDelay,
-		now:                now,
-		startedAt:          startedAt,
-		restartStatus:      RestartStatus{State: "idle"},
+		store:                store,
+		runtimeContext:       context,
+		scanRequirements:     options.ScanRequirements,
+		revision:             1,
+		activeProfileInvalid: initial.Harnesses.ClaudeCode.ActiveProfileID != "",
+		classifierAttempts:   classifierAttempts,
+		preflight:            preflight,
+		restart:              options.Restart,
+		restartDelay:         options.RestartDelay,
+		now:                  now,
+		startedAt:            startedAt,
+		restartStatus:        RestartStatus{State: "idle"},
 	}
 	if options.InitialRestartError != nil {
 		m.restartStatus.State = "failed"
@@ -275,10 +317,11 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	initialSnapshot, err := newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.scanRequirements, m.attempts, m.classifierAttempts, startedAt)
+	initialSnapshot, err := newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.scanRequirements, scheduler.DefaultAttemptPolicy(), m.classifierAttempts, startedAt)
 	if err != nil {
 		return nil, err
 	}
+	initialSnapshot.attemptPolicySource = "default"
 	m.current.Store(initialSnapshot)
 	return m, nil
 }
@@ -478,6 +521,17 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 	if err := next.Validate(); err != nil {
 		return ApplyResult{}, err
 	}
+	current := m.current.Load().Config()
+	if m.harnessReconciler != nil && current.Harnesses.ClaudeCode.ActiveProfileID != "" &&
+		next.Harnesses.ClaudeCode.ActiveProfileID == current.Harnesses.ClaudeCode.ActiveProfileID &&
+		!reflect.DeepEqual(current.Harnesses, next.Normalize().Harnesses) {
+		if err := m.harnessReconciler(&HarnessMutation{manager: m}); err != nil {
+			return ApplyResult{}, err
+		}
+		if m.activeProfileInvalid || m.current.Load().config.Harnesses.ClaudeCode.ActiveProfileID == "" {
+			next.Harnesses.ClaudeCode.ActiveProfileID = ""
+		}
+	}
 	catalog, err := provider.CompileCatalog(next.Providers, m.runtimeContext)
 	if err != nil {
 		return ApplyResult{}, err
@@ -488,7 +542,8 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 	}
 	currentSnapshot := m.current.Load()
 	currentConfig := currentSnapshot.Config()
-	if reflect.DeepEqual(currentConfig, next) {
+	attempts, source := m.normalAttempts(next)
+	if reflect.DeepEqual(currentConfig, next) && currentSnapshot.attempts == attempts && currentSnapshot.attemptPolicySource == source {
 		return ApplyResult{
 			Revision:   currentSnapshot.Revision(),
 			Applied:    false,
@@ -498,12 +553,15 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 
 	restartRequired := serviceRestartRequired(currentConfig.Service, next.Service)
 	if !restartRequired {
-		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, m.attempts, m.classifierAttempts, m.now())
+		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, attempts, m.classifierAttempts, m.now())
 		if err != nil {
 			return ApplyResult{}, err
 		}
-		if err := m.store.Save(next); err != nil {
-			return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
+		nextSnapshot.attemptPolicySource = source
+		if !reflect.DeepEqual(currentConfig, next) {
+			if err := m.store.Save(next); err != nil {
+				return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
+			}
 		}
 		m.revision++
 		m.current.Store(nextSnapshot)
@@ -622,11 +680,13 @@ func (m *Manager) RestartSucceeded() error {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
-	nextSnapshot, err := newSnapshotWithAuto(m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, m.attempts, m.classifierAttempts, m.now())
+	attempts, source := m.normalAttempts(pending)
+	nextSnapshot, err := newSnapshotWithAuto(m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, attempts, m.classifierAttempts, m.now())
 	if err != nil {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
+	nextSnapshot.attemptPolicySource = source
 	if err := m.store.PromotePending(); err != nil {
 		_ = m.restartFailedLocked(err)
 		return err
@@ -678,4 +738,23 @@ func defaultPreflight(current, next config.Config) error {
 		return fmt.Errorf("listen_addr %s is unavailable: %w", next.Service.ListenAddr, err)
 	}
 	return listener.Close()
+}
+
+// SetHarnessReconciler installs the existing harness verification at the config
+// transaction boundary. The callback receives the already-held mutation lock.
+func (m *Manager) SetHarnessReconciler(check func(config.HarnessMutation) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.harnessReconciler = check
+}
+
+// HarnessStateError preserves the same snapshot that made a harness check
+// unavailable, so a later activation cannot be mixed into the error response.
+type HarnessStateError struct{ snapshot *Snapshot }
+
+func (e *HarnessStateError) Error() string { return ErrRestartInProgress.Error() }
+func (e *HarnessStateError) Unwrap() error { return ErrRestartInProgress }
+func (e *HarnessStateError) State() (config.Config, int, string) {
+	attempts, source := e.snapshot.NormalAttemptStatus()
+	return e.snapshot.Config(), attempts, source
 }

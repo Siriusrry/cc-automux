@@ -146,7 +146,6 @@ func New(options Options) (*App, error) {
 	managerOptions := runtime.Options{
 		RuntimeContext:          runtimeContext,
 		ScanRequirements:        scanRequirements,
-		AttemptPolicy:           scheduler.DefaultAttemptPolicy(),
 		ClassifierAttemptPolicy: scheduler.DefaultClassifierAttemptPolicy(),
 		RestartDelay:            options.RestartDelay,
 		Now:                     options.Now,

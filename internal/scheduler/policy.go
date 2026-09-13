@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Siriusrry/cc-automux/internal/config"
 )
 
 // AttemptPolicy contains request-scoped retry limits. Runtime snapshots own a
@@ -11,8 +13,6 @@ import (
 type AttemptPolicy struct {
 	MaxAttempts int
 }
-
-const defaultMaxAttempts = 3
 
 func (p AttemptPolicy) Validate() error {
 	if p.MaxAttempts <= 0 {
@@ -50,7 +50,9 @@ func DefaultPolicy() Policy {
 
 // DefaultAttemptPolicy is the canonical default for the request retry budget.
 // It is intentionally independent from the health and affinity policy.
-func DefaultAttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: defaultMaxAttempts} }
+func DefaultAttemptPolicy() AttemptPolicy {
+	return AttemptPolicy{MaxAttempts: config.DefaultNormalMaxAttempts}
+}
 
 // DefaultClassifierAttemptPolicy is the immutable one-attempt classifier
 // budget carried by runtime snapshots. Classifier traffic uses it independently

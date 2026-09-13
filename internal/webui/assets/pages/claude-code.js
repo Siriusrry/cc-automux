@@ -34,7 +34,7 @@
   ];
 
   function profileDialog(profile, models) {
-    const draft = Object.assign({ name: '', haiku_model: '', sonnet_model: '', opus_model: '', fable_model: '', subagent_model: '', teammate_default_model: '' }, profile || {});
+    const draft = Object.assign({ name: '', haiku_model: '', sonnet_model: '', opus_model: '', fable_model: '', subagent_model: '', teammate_default_model: '', max_attempts: 3 }, profile || {});
     const isNew = !profile;
     const fields = {};
     const list = h('datalist', { id: 'cc-models' }, models.map(m => h('option', { value: m })));
@@ -43,9 +43,10 @@
       const f = field({ label: label, optional: !required, for: 'pf-' + key, control: input({ id: 'pf-' + key, value: draft[key], list: 'cc-models', placeholder: required ? 'model name' : 'leave unset', oninput: (e) => { draft[key] = e.target.value; } }), help: h('code', null, env) });
       fields[key] = f; return f;
     });
+    fields.max_attempts = field({ label: 'Max attempts per request', for: 'pf-max-attempts', control: input({ id: 'pf-max-attempts', type: 'number', min: 1, max: Number.MAX_SAFE_INTEGER, step: 1, value: draft.max_attempts, oninput: e => { draft.max_attempts = e.target.value; } }), help: 'Total upstream calls allowed for each normal request. Default: 3. A value of 1 returns after one call.' });
     const form = h('div', { class: 'profile-form' }, list, fields.name, h('div', { class: 'row-2' }, mf[0], mf[1]), h('div', { class: 'row-2' }, mf[2], mf[3]),
       h('p', { class: 'help', style: { margin: '4px 0 14px' } }, 'Subagent model, when set, forces every subagent, agent-team and workflow agent to one model; the teammate default only applies to teammates without an explicit model and is overridden by the subagent model.'),
-      h('div', { class: 'row-2' }, mf[4], mf[5]));
+      h('div', { class: 'row-2' }, mf[4], mf[5]), fields.max_attempts);
     return dialog({ title: isNew ? 'New profile' : 'Edit ' + profile.name, body: form, wide: true, focus: '#pf-name', actions: [
       { label: 'Cancel', value: null },
       { label: isNew ? 'Create profile' : 'Save profile', primary: true, onClick: async () => {
@@ -53,9 +54,11 @@
         let bad = false;
         if (!draft.name.trim()) { fields.name.setError('Give the profile a name.'); bad = true; }
         MODEL_FIELDS.filter(m => m[3]).forEach(([key, label]) => { if (!draft[key].trim()) { fields[key].setError(label + ' mapping is required.'); bad = true; } });
+        const attempts = String(draft.max_attempts).trim() === '' ? 3 : Number(draft.max_attempts);
+        if (!Number.isSafeInteger(attempts) || attempts < 1) { fields.max_attempts.setError('Enter an integer from 1 to 9007199254740991.'); bad = true; }
         if (bad) return false;
         try {
-          const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model };
+          const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts };
           if (isNew) return await api.post('/api/v1/harnesses/claude-code/profiles', body);
           return await api.put('/api/v1/harnesses/claude-code/profiles/' + profile.id, Object.assign({ id: profile.id }, body));
         } catch (e) {
@@ -168,11 +171,11 @@
             }
           } }, isActive ? [icon('check'), 'Active'] : [icon('play'), 'Activate']);
           return h('div', { class: 'profile' + (isActive ? ' active' : '') },
-            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, (p.subagent_model || p.teammate_default_model) ? 'with optional overrides' : 'four required mappings')),
+            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, (p.subagent_model || p.teammate_default_model) ? 'with optional overrides' : 'four required mappings', ' · Max attempts per request: ' + p.max_attempts)),
             map,
             h('div', { class: 'p-acts' },
               wrapTip(activate, !gatewayOk ? 'Set a gateway key before activating a profile.' : isActive ? 'Active — settings.json matches this profile.' : 'Writes this mapping, the gateway address and key into settings.json.'),
-              h('button', { class: 'ib bordered', type: 'button', 'aria-label': 'Edit ' + p.name, 'data-tip': 'Edit profile', onclick: async () => { const r = await profileDialog(p, models); if (r) { toast('Saved ' + r.name); store.invalidate(); load(); } } }, icon('edit')),
+              h('button', { class: 'ib bordered', type: 'button', 'aria-label': 'Edit ' + p.name, 'data-tip': 'Edit profile', onclick: async () => { const r = await profileDialog(p, models); if (r) { toast(r.active ? 'Saved and applied ' + r.name : 'Saved ' + r.name + ' — activate to apply'); store.invalidate(); load(); } } }, icon('edit')),
               wrapTip(h('button', { class: 'ib bordered danger', type: 'button', 'aria-label': 'Delete ' + p.name, disabled: isActive, onclick: async () => {
                 const ok = await confirm({ title: 'Delete ' + p.name + '?', text: 'The mapping is removed from CC AutoMux. settings.json is not touched.', confirmLabel: 'Delete', danger: true });
                 if (!ok) return;

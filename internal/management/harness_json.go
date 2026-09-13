@@ -173,7 +173,7 @@ func decodeHarnessUpdate(data []byte) (harnessconfig.HarnessUpdatePatch, error) 
 var profileAllowed = map[string]struct{}{
 	"id": {}, "name": {}, "haiku_model": {}, "sonnet_model": {},
 	"opus_model": {}, "fable_model": {}, "subagent_model": {},
-	"teammate_default_model": {}, "active": {},
+	"teammate_default_model": {}, "active": {}, "max_attempts": {},
 }
 
 func decodeProfile(data []byte) (config.Profile, error) {
@@ -203,7 +203,14 @@ func decodeProfile(data []byte) (config.Profile, error) {
 			}
 		}
 	}
-	return profile, nil
+	if raw, present := object["max_attempts"]; present {
+		value, err := config.DecodeMaxAttempts(raw)
+		if err != nil {
+			return config.Profile{}, fmt.Errorf("%w: %v", harnessconfig.ErrInvalidJSON, err)
+		}
+		profile.MaxAttempts = value
+	}
+	return profile.Normalize(), nil
 }
 
 func validateActivationBody(data []byte) error {

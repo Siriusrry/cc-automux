@@ -461,3 +461,48 @@ func TestHarnessHTTPStatusDoesNotExposeTargetContents(t *testing.T) {
 		t.Fatalf("invalid target status still reports active: %s", response.Body.String())
 	}
 }
+
+func TestProfileAttemptBudgetHTTP(t *testing.T) {
+	f := newHarnessHandlerFixture(t, "gateway-key")
+	const base = `"name":"Budget","haiku_model":"h","sonnet_model":"s","opus_model":"o","fable_model":"f"`
+	for _, value := range []string{"0", "-2", "2.5", `"3"`, "true", "null", "9007199254740992"} {
+		for _, method := range []string{http.MethodPost, http.MethodPut} {
+			path := "/api/v1/harnesses/claude-code/profiles"
+			if method == http.MethodPut {
+				path += "/11111111-1111-4111-8111-111111111111"
+			}
+			response := harnessRequest(f.handler, method, path, "{"+base+`,"max_attempts":`+value+"}")
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("%s %s accepted: %d %s", method, value, response.Code, response.Body)
+			}
+		}
+	}
+	response := harnessRequest(f.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles", "{"+base+`,"max_attempts":9007199254740991}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", response.Code, response.Body)
+	}
+	var profile harnessconfig.ProfileView
+	json.Unmarshal(response.Body.Bytes(), &profile)
+	if profile.MaxAttempts != 9007199254740991 {
+		t.Fatalf("unsafe round trip: %#v", profile)
+	}
+	path := "/api/v1/harnesses/claude-code/profiles/" + profile.ID
+	response = harnessRequest(f.handler, http.MethodPost, path+"/activate", "{}")
+	if response.Code != http.StatusOK {
+		t.Fatalf("activate: %d %s", response.Code, response.Body)
+	}
+	response = harnessRequest(f.handler, http.MethodPut, path, "{"+base+"}")
+	if response.Code != http.StatusOK {
+		t.Fatalf("replace: %d %s", response.Code, response.Body)
+	}
+	json.Unmarshal(response.Body.Bytes(), &profile)
+	if profile.MaxAttempts != 3 || !profile.Active {
+		t.Fatalf("replacement default: %#v", profile)
+	}
+	response = harnessRequest(f.handler, http.MethodGet, "/api/v1/harnesses/claude-code", "")
+	var status harnessconfig.HarnessStatus
+	json.Unmarshal(response.Body.Bytes(), &status)
+	if status.NormalMaxAttempts != 3 || status.AttemptPolicySource != "profile" || status.State != harnessconfig.StateInSync {
+		t.Fatalf("status: %#v", status)
+	}
+}

@@ -87,7 +87,7 @@ claude
 
 Provider 请求采用 Anthropic Messages API。填写基础 URL，CC AutoMux 会追加 `/v1/messages`，不要重复填写该 endpoint。模型按大小写敏感的完整名称匹配。
 
-优先级数值越大越优先；新会话在最高可用同级 Provider 中轮询。有合法 `X-Claude-Code-Session-Id` 的会话，对相同模型和请求类型保持粘性。高层不可用时才使用低层。普通请求在允许重试的错误下最多尝试三个不同 Provider。关闭健康冷却只取消失败导致的调度抑制，诊断仍保留。
+优先级数值越大越优先；新会话在最高可用同级 Provider 中轮询。有合法 `X-Claude-Code-Session-Id` 的会话，对相同模型和请求类型保持粘性。只有高层所有相关候选都处于冷却时才使用低层。允许继续尝试的错误会在当前层内轮转，同一 Provider 可以重复调用。关闭健康冷却的 Provider 只要静态资格有效，就继续参与并阻挡低层；高层半开探测被占用也不允许绕到低层。已有会话绑定仅在替代目标成功后迁移，健康诊断仍保留。
 
 TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼容补丁必须显式选择并按配置顺序执行，不会因 Provider 名称或 URL 自动启用。
 
@@ -103,7 +103,11 @@ TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼
 
 默认目标是当前用户的 `.claude/settings.json`，也可选择自定义绝对路径。激活只更新受管的网关、模型和遥测字段，保留其他值。首次修改已有文件前建立同目录 `.cc-automux.bak`，已有备份不覆盖；首次创建配置文件不生成备份。
 
-保存 Profile 不等于激活。**Active** 表示已核对受管字段；外部修改导致不一致时，下次检查会清空激活状态。打开或返回 Claude Code 页面会重新检查。修改网关地址、密钥或当前 Profile 后可能需要重新激活。
+每个 Profile 保存“单请求尝试上限”（**Max attempts per request**），表示普通请求最多发起的上游调用总次数。默认 3，设置 1 即只调用一次。全局激活 Profile 决定所有新普通请求的上限；保存其上限后立即生效，不重写 Claude Code 设置。正在处理的请求保持开始时的预算，分类器请求仍只调用一次。
+
+保存非激活 Profile 不等于激活。**Active** 表示已核对受管字段；外部修改导致不一致时，下次检查会清空激活状态。打开或返回 Overview、Claude Code 页面会重新检查。无激活 Profile 或核验失效时采用默认 3，Overview 显示明确警告。修改网关地址、密钥或当前 Profile 的模型映射后可能需要重新激活。
+
+Profile API 字段为 `max_attempts`，接受 1 到 9007199254740991 的整数。省略时默认 3，完整替换 Profile 时同样如此；显式 0 和 null 会被拒绝。Harness 状态返回实际 `normal_max_attempts` 和 `attempt_policy_source`（`profile` 或 `default`）。
 
 **Disable Claude Code telemetry** 控制开关旁展示的四个字段，激活 Profile 时写入。
 

@@ -10,18 +10,25 @@
   const PROTOCOL_LABEL = { anthropic_messages: 'Anthropic Messages', openai_responses: 'OpenAI Responses', openai_compatible: 'OpenAI-compatible' };
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
-  function statusBanners(status, harness) {
+  function statusBanners(status, harness, harnessError, retry) {
     const out = [];
-    if (!status) return out;
-    if (status.logging && !status.logging.healthy) {
-      out.push(banner('bad', 'Log writes are failing', ['CC AutoMux keeps serving, but nothing has been written to its log since ', h('b', null, fmt.dateTime(status.logging.last_failure_at)), ' (', fmt.plural(status.logging.failures, 'failure'), '). ', h('span', { class: 'mono' }, status.logging.last_error || '')],
-        [h('a', { class: 'btn sm', href: '#/logs' }, 'Open logs')]));
+    if (status) {
+      if (status.logging && !status.logging.healthy) {
+        out.push(banner('bad', 'Log writes are failing', ['CC AutoMux keeps serving, but nothing has been written to its log since ', h('b', null, fmt.dateTime(status.logging.last_failure_at)), ' (', fmt.plural(status.logging.failures, 'failure'), '). ', h('span', { class: 'mono' }, status.logging.last_error || '')],
+          [h('a', { class: 'btn sm', href: '#/logs' }, 'Open logs')]));
+      }
+      if (status.restart && status.restart.in_progress) out.push(banner('warn', 'Restart in progress', 'A configuration change is being applied. In-flight requests were interrupted; the new process promotes the pending configuration once it binds.'));
+      else if (status.restart && status.restart.state === 'failed' && status.restart.last_error) out.push(banner('warn', 'Last restart failed', ['The previous configuration and listener were restored. ', h('span', { class: 'mono' }, status.restart.last_error)], [h('a', { class: 'btn sm', href: '#/service' }, 'Service')]));
+      if (!status.gateway_configured) out.push(banner('warn', 'Gateway key is not set', 'The Messages data plane returns 503 until a gateway key exists. Claude Code cannot route through CC AutoMux yet.', [h('a', { class: 'btn sm', href: '#/service' }, 'Set gateway key')]));
     }
-    if (status.restart && status.restart.in_progress) out.push(banner('warn', 'Restart in progress', 'A configuration change is being applied. In-flight requests were interrupted; the new process promotes the pending configuration once it binds.'));
-    else if (status.restart && status.restart.state === 'failed' && status.restart.last_error) out.push(banner('warn', 'Last restart failed', ['The previous configuration and listener were restored. ', h('span', { class: 'mono' }, status.restart.last_error)], [h('a', { class: 'btn sm', href: '#/service' }, 'Service')]));
-    if (!status.gateway_configured) out.push(banner('warn', 'Gateway key is not set', 'The Messages data plane returns 503 until a gateway key exists. Claude Code cannot route through CC AutoMux yet.', [h('a', { class: 'btn sm', href: '#/service' }, 'Set gateway key')]));
-    if (harness && harness.state === 'out_of_sync') out.push(banner('warn', 'Claude Code settings drifted', ['A managed field in ', h('span', { class: 'mono' }, harness.resolved_settings_path), ' no longer matches the profile that was active. ', harness.last_invalidation_reason], [h('a', { class: 'btn sm', href: '#/claude-code' }, 'Review')]));
-    if (harness && harness.state === 'state_error') out.push(banner('bad', 'Claude Code settings could not be checked', harness.last_invalidation_reason || 'The settings file could not be read.', [h('a', { class: 'btn sm', href: '#/claude-code' }, 'Review')]));
+    const actions = [h('a', { class: 'btn sm', href: '#/claude-code' }, 'Manage profiles')];
+    if (harnessError) out.push(banner('bad', 'Profile status could not be read', [harnessError.detail || harnessError.message, ' The current attempt limit could not be confirmed.'], [h('button', { class: 'btn sm', type: 'button', onclick: retry }, 'Retry'), ...actions]));
+    else if (harness && harness.state !== 'in_sync') {
+      const detail = 'Normal requests are using the default attempt limit of ' + harness.normal_max_attempts + '. ';
+      if (harness.state === 'state_error') out.push(banner('bad', 'Claude Code settings could not be checked', detail + (harness.last_invalidation_reason || ''), actions));
+      else if (harness.last_invalidation_reason || harness.state !== 'inactive') out.push(banner('warn', 'Profile is no longer active', detail + (harness.last_invalidation_reason || ''), actions));
+      else out.push(banner('warn', 'No active profile', detail + 'Activate a profile to apply its settings.', actions));
+    }
     return out;
   }
 
@@ -154,7 +161,7 @@
       ctx.title('Overview');
       ctx.subtitle(['Gateway at a glance · ', h('b', null, 'multi-provider routing'), ' and ', h('b', null, 'auto mode'), ' for Claude Code']);
       const banners = h('div', { class: 'banners' });
-      let disposed = false, mapGeneration = 0;
+      let disposed = false, mapGeneration = 0, harnessGeneration = 0, harnessError = null;
       const statsHost = h('div', null, skeleton(1, 96));
       const mapCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('div', null, h('p', { class: 'eyebrow' }, 'Live routing'), h('p', { class: 'lede', style: { margin: 0 } }, 'Messages traffic goes to the highest healthy tier; equal priorities round-robin; a session stays on its provider.')), h('a', { class: 'btn sm', href: '#/providers' }, 'Manage providers', icon('chevron-right'))), skeleton(3, 60));
       const autoCard = h('div', { class: 'card' }, h('p', { class: 'eyebrow' }, 'Auto mode'), skeleton(3, 20));
@@ -162,7 +169,7 @@
       ctx.root.appendChild(h('div', { class: 'stack' }, banners, statsHost, mapCard, h('div', { class: 'ov-summary' }, autoCard, ccCard)));
 
       let map = null, harness = null, config = null;
-      const renderBanners = () => replace(banners, statusBanners(store.state.status, harness));
+      const renderBanners = () => replace(banners, statusBanners(store.state.status, harness, harnessError, loadHarness));
       const renderStats = () => { if (store.state.status) replace(statsHost, statsCard(store.state.status)); };
       const renderAuto = () => {
         const st = store.state.status; if (!st || !config) return;
@@ -185,12 +192,14 @@
       };
       const renderCC = () => {
         const body = [h('p', { class: 'eyebrow' }, 'Claude Code')];
+        if (harnessError) { body.push(errorCard(harnessError.detail || harnessError.message, loadHarness)); replace(ccCard, body); return; }
         if (!harness) { body.push(skeleton(3, 20)); replace(ccCard, body); return; }
         const stateKind = { in_sync: 'ok', out_of_sync: 'warn', inactive: 'mist', state_error: 'bad' }[harness.state] || 'mist';
         const stateText = { in_sync: 'In sync', out_of_sync: 'Out of sync', inactive: 'No active profile', state_error: 'Check failed' }[harness.state] || harness.state;
         const active = config && harness.active_profile_id ? config.harnesses.claude_code.profiles.find(p => p.id === harness.active_profile_id) : null;
         body.push(h('div', { class: 'ov-big' }, active ? active.name : 'No profile active', pill(stateText, stateKind)));
         body.push(h('p', { class: 'ov-line' }, h('span', { class: 'mono trunc', style: { display: 'block', maxWidth: '100%' }, 'data-tip': harness.resolved_settings_path }, harness.resolved_settings_path)));
+        body.push(h('p', { class: 'ov-line' }, 'Max attempts per request: ' + harness.normal_max_attempts));
         if (active) {
           const mapTag = (slot, env, model) => tip(tag(slot + ' → ' + model), env + ' = ' + model + '\nWritten into settings.json while this profile is active.');
           body.push(h('div', { class: 'ov-cands' }, mapTag('haiku', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', active.haiku_model), mapTag('sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL', active.sonnet_model), mapTag('opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL', active.opus_model), mapTag('fable', 'ANTHROPIC_DEFAULT_FABLE_MODEL', active.fable_model)));
@@ -212,7 +221,12 @@
           renderCC();
         } catch (e) { if (disposed || gen !== mapGeneration) return; replace(mapCard, mapCard.firstChild, errorCard(e.detail || e.message, loadMap)); }
       };
-      const loadHarness = async () => { try { harness = await store.harness(); } catch (e) { harness = null; } if (!disposed) { renderBanners(); renderCC(); } };
+      const loadHarness = async () => {
+        const gen = ++harnessGeneration;
+        try { const next = await store.harness(); if (disposed || gen !== harnessGeneration) return; harness = next; harnessError = null; }
+        catch (e) { if (disposed || gen !== harnessGeneration) return; harnessError = e; }
+        renderBanners(); renderCC();
+      };
 
       renderBanners(); renderStats();
       const offStatus = store.on('status', () => { renderBanners(); renderStats(); renderAuto(); });
@@ -221,7 +235,7 @@
       loadMap(); loadHarness();
       // Cooldown countdowns on the map are re-rendered from fresh diagnostics.
       const tick = setInterval(loadMap, 30000);
-      return () => { disposed = true; mapGeneration++; offStatus(); offInvalidate(); offFg(); clearInterval(tick); if (map) map.dispose(); };
+      return () => { disposed = true; mapGeneration++; harnessGeneration++; offStatus(); offInvalidate(); offFg(); clearInterval(tick); if (map) map.dispose(); };
     }
   };
 })();

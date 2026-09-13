@@ -344,3 +344,45 @@ func TestClientConfigUpdateHasNoServerOwnedFields(t *testing.T) {
 	}
 
 }
+
+func TestMaxAttemptsDecodeAtEveryConfigEntry(t *testing.T) {
+	raw, err := Marshal(configWithProfileForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{
+		{"", 3}, {"1", 1}, {"8", 8}, {"9007199254740991", 9007199254740991},
+		{"0", 0}, {"-1", 0}, {"1.5", 0}, {`"3"`, 0}, {"true", 0}, {"null", 0}, {"9007199254740992", 0}, {"1e100", 0},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			var root map[string]any
+			json.Unmarshal(raw, &root)
+			profile := root["harnesses"].(map[string]any)["claude_code"].(map[string]any)["profiles"].([]any)[0].(map[string]any)
+			delete(profile, "max_attempts")
+			base, _ := json.Marshal(root)
+			if tc.value != "" {
+				base = bytes.Replace(base, []byte(`"name":"Daily"`), []byte(`"name":"Daily","max_attempts":`+tc.value), 1)
+			}
+			got, e := Decode(base)
+			if tc.want == 0 {
+				if e == nil {
+					t.Fatal("invalid value accepted")
+				}
+			} else if e != nil || got.Harnesses.ClaudeCode.Profiles[0].MaxAttempts != tc.want {
+				t.Fatalf("decoded=%#v err=%v", got, e)
+			}
+			base = bytes.Replace(base, []byte(`"active_profile_id":"",`), nil, 1)
+			update, e := DecodeClientUpdate(base)
+			if tc.want == 0 {
+				if e == nil {
+					t.Fatal("invalid client value accepted")
+				}
+			} else if e != nil || update.Harnesses.ClaudeCode.Profiles[0].MaxAttempts != tc.want {
+				t.Fatalf("client decoded=%#v err=%v", update, e)
+			}
+		})
+	}
+}

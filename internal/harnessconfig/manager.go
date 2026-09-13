@@ -18,6 +18,7 @@ import (
 // Runtime implementations must keep the mutation lock held for the complete
 // callback, including the external target-file operation performed by Manager.
 type RuntimeBoundary interface {
+	SetHarnessReconciler(func(config.HarnessMutation) error)
 	Config() config.Config
 	WithHarnessMutation(func(config.HarnessMutation) error) error
 }
@@ -82,6 +83,8 @@ type HarnessStatus struct {
 	State                  HarnessState `json:"state"`
 	ProfileCount           int          `json:"profile_count"`
 	LastInvalidationReason string       `json:"last_invalidation_reason"`
+	NormalMaxAttempts      int          `json:"normal_max_attempts"`
+	AttemptPolicySource    string       `json:"attempt_policy_source"`
 }
 
 // ProfileView adds the derived active bit to a persisted profile. The bit is
@@ -97,9 +100,11 @@ type ProfileView struct {
 	SubagentModel        string `json:"subagent_model"`
 	TeammateDefaultModel string `json:"teammate_default_model"`
 	Active               bool   `json:"active"`
+	MaxAttempts          int    `json:"max_attempts"`
 }
 
 func profileView(profile config.Profile, activeID string) ProfileView {
+	profile = profile.Normalize()
 	return ProfileView{
 		ID:                   profile.ID,
 		Name:                 profile.Name,
@@ -110,6 +115,7 @@ func profileView(profile config.Profile, activeID string) ProfileView {
 		SubagentModel:        profile.SubagentModel,
 		TeammateDefaultModel: profile.TeammateDefaultModel,
 		Active:               activeID != "" && profile.ID == activeID,
+		MaxAttempts:          profile.MaxAttempts,
 	}
 }
 
@@ -174,13 +180,22 @@ func NewManager(runtimeBoundary RuntimeBoundary, registry AdapterRegistry, optio
 		protected = append(protected, provider.ProtectedConfigPaths()...)
 	}
 	protected = normalizeProtectedPaths(protected)
-	return &Manager{
+	manager := &Manager{
 		runtime:    runtimeBoundary,
 		registry:   registry,
 		files:      files,
 		protected:  protected,
 		lastReason: make(map[string]string),
-	}, nil
+	}
+	runtimeBoundary.SetHarnessReconciler(func(tx config.HarnessMutation) error {
+		adapter, _ := manager.lookup(ClaudeCodeAdapterID)
+		status := manager.reconcileInMutation(tx, ClaudeCodeAdapterID, adapter, tx.Config())
+		if status.State == StateError {
+			return ErrActiveProfileStateFailed
+		}
+		return nil
+	})
+	return manager, nil
 }
 
 // New is a short constructor alias.
@@ -345,6 +360,8 @@ func (m *Manager) recordReason(id, reason string) {
 	if m == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if reason == "" {
 		delete(m.lastReason, id)
 		return
@@ -356,6 +373,8 @@ func (m *Manager) rememberedReason(id string) string {
 	if m == nil {
 		return ""
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.lastReason[id]
 }
 
@@ -371,8 +390,6 @@ func (m *Manager) Status(id string) (HarnessStatus, error) {
 	if m == nil {
 		return HarnessStatus{}, ErrManagerNotInitialized
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	var status HarnessStatus
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
@@ -383,12 +400,14 @@ func (m *Manager) Status(id string) (HarnessStatus, error) {
 		// A restart blocks writes, but a status read remains useful. It must not
 		// claim a verified active profile because the reconciliation could not
 		// complete under the mutation boundary.
-		if errors.Is(err, runtime.ErrRestartInProgress) {
-			cfg := m.runtime.Config()
+		var blocked *runtime.HarnessStateError
+		if errors.As(err, &blocked) {
+			cfg, attempts, source := blocked.State()
 			status = m.statusWithoutReconcile(id, adapter, cfg)
 			status.State = StateError
 			status.ActiveProfileID = ""
 			status.LastInvalidationReason = runtime.ErrRestartInProgress.Error()
+			status.NormalMaxAttempts, status.AttemptPolicySource = attempts, source
 			return status, nil
 		}
 		return HarnessStatus{}, err
@@ -429,10 +448,11 @@ func (m *Manager) statusWithoutReconcile(id string, adapter Adapter, cfg config.
 	return baseStatus(id, cfg, resolved)
 }
 
-func (m *Manager) reconcileInMutation(tx config.HarnessMutation, id string, adapter Adapter, cfg config.Config) HarnessStatus {
+func (m *Manager) reconcileInMutation(tx config.HarnessMutation, id string, adapter Adapter, cfg config.Config) (status HarnessStatus) {
+	defer func() { status.NormalMaxAttempts, status.AttemptPolicySource = tx.NormalAttemptStatus() }()
 	cfg = cfg.Normalize()
 	resolved, pathErr := m.pathFor(cfg, adapter)
-	status := baseStatus(id, cfg, resolved)
+	status = baseStatus(id, cfg, resolved)
 	activeID := cfg.Harnesses.ClaudeCode.ActiveProfileID
 	status.ActiveProfileID = activeID
 	if pathErr != nil {
@@ -472,6 +492,10 @@ func (m *Manager) reconcileInMutation(tx config.HarnessMutation, id string, adap
 		return m.invalidateInMutation(tx, status, reason)
 	}
 
+	if err := tx.SetActiveProfileID(activeID); err != nil {
+		status.State = StateError
+		return m.invalidateInMutation(tx, status, reasonStatePersistence)
+	}
 	status.State = StateInSync
 	status.LastInvalidationReason = ""
 	m.recordReason(id, "")
@@ -490,7 +514,7 @@ func (m *Manager) invalidateInMutation(tx config.HarnessMutation, status Harness
 		status.LastInvalidationReason = reasonStatePersistence
 		return status
 	}
-	if err := tx.ClearActiveProfileID(); err != nil {
+	if err := tx.InvalidateActiveProfile(); err != nil {
 		status.State = StateError
 		status.LastInvalidationReason = reasonStatePersistence
 		return status
@@ -572,8 +596,6 @@ func (m *Manager) Activate(id, profileID string) (ActivationResult, error) {
 	if m == nil {
 		return ActivationResult{}, ErrManagerNotInitialized
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	var result ActivationResult
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
@@ -645,6 +667,7 @@ func (m *Manager) Activate(id, profileID string) (ActivationResult, error) {
 		finalStatus := baseStatus(id, finalCfg, path)
 		finalStatus.ActiveProfileID = profileID
 		finalStatus.State = StateInSync
+		finalStatus.NormalMaxAttempts, finalStatus.AttemptPolicySource = tx.NormalAttemptStatus()
 		result = ActivationResult{
 			Harness:    finalStatus,
 			Profile:    profileView(selected, profileID),
@@ -713,8 +736,6 @@ func (m *Manager) Profiles(id string) ([]ProfileView, error) {
 	if m == nil {
 		return nil, ErrManagerNotInitialized
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var result []ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
 		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
@@ -747,8 +768,6 @@ func (m *Manager) GetProfile(id, profileID string) (ProfileView, error) {
 	if m == nil {
 		return ProfileView{}, ErrManagerNotInitialized
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
 		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
@@ -788,8 +807,6 @@ func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView,
 			return ProfileView{}, err
 		}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
 		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
@@ -848,8 +865,6 @@ func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (P
 		return ProfileView{}, ErrProfileIDImmutable
 	}
 	profile.ID = profileID
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
 		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
@@ -915,8 +930,6 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 	if m == nil {
 		return ErrManagerNotInitialized
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	return m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
 		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
 		if stateErr != nil {
@@ -957,8 +970,6 @@ func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStat
 	if m == nil {
 		return HarnessStatus{}, ErrManagerNotInitialized
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var result HarnessStatus
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
 		_, _, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())

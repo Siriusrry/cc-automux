@@ -120,6 +120,8 @@ type HarnessMutation interface {
 	UpdateHarness(func(*HarnessesConfig) error) error
 	ClearActiveProfileID() error
 	SetActiveProfileID(string) error
+	InvalidateActiveProfile() error
+	NormalAttemptStatus() (int, string)
 }
 
 // ClaudeCodeConfig is the persistent, file-independent portion of the Claude
@@ -144,6 +146,7 @@ type Profile struct {
 	FableModel           string `json:"fable_model"`
 	SubagentModel        string `json:"subagent_model"`
 	TeammateDefaultModel string `json:"teammate_default_model"`
+	MaxAttempts          int    `json:"max_attempts"`
 }
 
 func DefaultClaudeCodeConfig() ClaudeCodeConfig {
@@ -162,9 +165,15 @@ func DefaultHarnesses() HarnessesConfig {
 
 func (p Profile) Clone() Profile { return p }
 
-// Normalize is intentionally a no-op for Profile. It is present so callers
-// can normalize a complete schema recursively without special cases.
-func (p Profile) Normalize() Profile { return p.Clone() }
+const DefaultNormalMaxAttempts = 3
+const MaxSafeAttempts int64 = 9007199254740991
+
+func (p Profile) Normalize() Profile {
+	if p.MaxAttempts == 0 {
+		p.MaxAttempts = DefaultNormalMaxAttempts
+	}
+	return p
+}
 
 func (p Profile) Validate() error { return validateProfile("profile", p.Normalize()) }
 
@@ -492,10 +501,10 @@ func (current Config) ActiveProfileInputsEqual(next Config) bool {
 	}
 	leftProfile, leftOK := findProfile(left.Profiles, activeID)
 	rightProfile, rightOK := findProfile(right.Profiles, activeID)
-	// The display name does not contribute to the managed settings.
-	leftProfile.Name = ""
-	rightProfile.Name = ""
-	return leftOK && rightOK && leftProfile == rightProfile
+	return leftOK && rightOK &&
+		leftProfile.HaikuModel == rightProfile.HaikuModel && leftProfile.SonnetModel == rightProfile.SonnetModel &&
+		leftProfile.OpusModel == rightProfile.OpusModel && leftProfile.FableModel == rightProfile.FableModel &&
+		leftProfile.SubagentModel == rightProfile.SubagentModel && leftProfile.TeammateDefaultModel == rightProfile.TeammateDefaultModel
 }
 
 func (current Config) prepareServerUpdate(next Config) Config {
@@ -672,6 +681,9 @@ func validateClaudeCode(prefix string, value ClaudeCodeConfig) error {
 }
 
 func validateProfile(prefix string, profile Profile) error {
+	if err := ValidateMaxAttempts(profile.MaxAttempts); err != nil {
+		return &ValidationError{Field: prefix + ".max_attempts", Message: err.Error()}
+	}
 	if !isUUID(profile.ID) {
 		return validation(prefix+".id", "must be a canonical UUID")
 	}
