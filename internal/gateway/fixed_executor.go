@@ -615,7 +615,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		// requestCloseErr is retained by the lifecycle cleanup and is therefore
 		// intentionally not joined here a second time.
 		requestErr = errors.Join(requestErr, facts.readErr, facts.closeErr)
-		if requestCanceled(ctx) && control.verdict().reason != "transport_error" {
+		if requestCanceled(ctx) && control.verdict().reason != endTransportError {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, facts.status, facts.headers, string(facts.body), requestErr)
 			return
 		}
@@ -662,7 +662,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	// A cancellation observed after Do has started is a terminal fixed-call
 	// failure.  Consume the response before returning so any status, headers,
 	// and raw body already delivered by the target remain diagnosable.
-	if requestCanceled(ctx) && control.verdict().reason != "http_error" {
+	if requestCanceled(ctx) && control.verdict().reason != endHTTPError {
 		facts := consumeFixedResponse(response)
 		lifecycle.observeResponse(facts.status, facts.headers, nil)
 		lifecycle.observeBody(string(facts.body))
@@ -688,7 +688,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	}
 	if captureErr != nil || responseCloseErr != nil {
 		cause := errors.Join(captureErr, responseCloseErr)
-		if requestCanceled(ctx) && control.verdict().reason != "stream_interrupted" {
+		if requestCanceled(ctx) && control.verdict().reason != endStreamInterrupted {
 			h.fixedCanceledWithFacts(ctx, target, model, sessionID, upstream, response.StatusCode, response.Header, "", cause)
 			return
 		}
@@ -1036,11 +1036,11 @@ func fixedTransportError(error) (string, int) {
 // client connection.
 func (h *Handler) fixedTerminalForContext(ctx context.Context, w http.ResponseWriter, model string, target *provider.CompiledFixedTarget, sessionID, upstream string, status int, code, message string, cause error, upstreamStatus int, upstreamHeaders http.Header, patchInfo, upstreamBody string) {
 	lifecycle := fixedLifecycleFromContext(ctx)
-	confirmed := ""
+	var confirmed endReason
 	if lifecycle != nil {
 		confirmed = lifecycle.control.verdict().reason
 	}
-	if requestCanceled(ctx) && confirmed != "stream_interrupted" && confirmed != "transport_error" {
+	if requestCanceled(ctx) && confirmed != endStreamInterrupted && confirmed != endTransportError {
 		if lifecycle != nil && !lifecycle.isStarted() {
 			return
 		}
@@ -1148,7 +1148,7 @@ func (h *Handler) fixedTerminalAfterWriteWithFacts(ctx context.Context, target *
 		gatewayStatus = writtenStatus
 	}
 	if requestCanceled(ctx) {
-		code = "client_canceled"
+		code = string(endClientCanceled)
 	} else if cleanupErr != nil {
 		code, _, _ = fixedCleanupBodyError(cleanupErr)
 	}
@@ -1209,7 +1209,7 @@ func (h *Handler) fixedCanceledWithFacts(ctx context.Context, target *provider.C
 		upstreamStatus, upstreamHeaders, upstreamBody, _ = fixedLifecycleFacts(lifecycle, upstreamStatus, upstreamHeaders, upstreamBody, nil)
 		_ = lifecycle.closeResources()
 	}
-	h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: 0, GatewayError: "client_canceled", UpstreamStatus: upstreamStatus, UpstreamHeaders: cloneOrEmptyHeaders(upstreamHeaders), UpstreamBody: upstreamBody, SessionID: sessionID, Error: raw})
+	h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: 0, GatewayError: string(endClientCanceled), UpstreamStatus: upstreamStatus, UpstreamHeaders: cloneOrEmptyHeaders(upstreamHeaders), UpstreamBody: upstreamBody, SessionID: sessionID, Error: raw})
 	h.recordFixedEvent(ctx, EventCanceled, target, sessionID, model, upstream, 1, upstreamStatus, raw)
 }
 
@@ -1237,12 +1237,12 @@ func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *
 	}
 	event := Event{Kind: kind, Stream: stream, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
 	if kind == EventFailure {
-		event.EndReason = "local_error"
+		event.EndReason = endLocalError
 		if status != 0 && (status < 200 || status >= 300) {
-			event.EndReason = "http_error"
+			event.EndReason = endHTTPError
 		}
 		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil && lifecycle.control != nil {
-			if verdict := lifecycle.control.verdict(); verdict.reason != "" && verdict.reason != "completed" && verdict.reason != "client_canceled" {
+			if verdict := lifecycle.control.verdict(); verdict.reason != "" && verdict.reason != endCompleted && verdict.reason != endClientCanceled {
 				event.EndReason = verdict.reason
 			}
 		}
@@ -1253,9 +1253,9 @@ func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *
 			started = lifecycle.isStarted()
 			event.ResponseStarted = lifecycle.hasResponseStarted()
 		}
-		event.CancelReason = "client_canceled"
+		event.CancelReason = canceledByClient
 		if raw != "" {
-			event.CancelReason = "client_disconnected"
+			event.CancelReason = canceledByDisconnect
 		}
 		event.CancelPhase = cancelPhase(started, status)
 		if !started {

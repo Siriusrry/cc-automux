@@ -34,11 +34,11 @@ type Event struct {
 	RequestType            traffic.RequestType
 	Stream                 bool
 	ResponseStarted        bool
-	CancelReason           string
-	CancelPhase            string
-	EndReason              string
-	RawErrorIncomplete     string
-	PostCompletion         string
+	CancelReason           cancellationReason
+	CancelPhase            cancellationPhase
+	EndReason              endReason
+	RawErrorIncomplete     incompleteMark
+	PostCompletion         postCompletion
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int
@@ -73,25 +73,25 @@ type discardRecorder struct{}
 
 func (discardRecorder) RecordGatewayEvent(Event) {}
 
-func outcomeEndReason(lease requestAttemptLease, outcome scheduler.Outcome) string {
-	if verdict := lease.control.verdict(); verdict.reason != "" && verdict.reason != "completed" && verdict.reason != "client_canceled" {
+func outcomeEndReason(lease requestAttemptLease, outcome scheduler.Outcome) endReason {
+	if verdict := lease.control.verdict(); verdict.reason != "" && verdict.reason != endCompleted && verdict.reason != endClientCanceled {
 		return verdict.reason
 	}
 	switch outcome.Class {
 	case scheduler.FailureNone, scheduler.FailureClientCanceled, scheduler.FailureDownstream:
 		return ""
 	}
-	if reason := lease.control.reason(); reason == "response_header_timeout" || reason == "response_idle_timeout" {
-		return reason
+	if reason := lease.control.reason(); reason == stopResponseHeaderTimeout || reason == stopResponseIdleTimeout {
+		return endReason(reason)
 	}
 	if outcome.Class == scheduler.FailureChannelStream {
-		return "stream_interrupted"
+		return endStreamInterrupted
 	}
 	if outcome.HTTPStatus != 0 && (outcome.HTTPStatus < 200 || outcome.HTTPStatus >= 300) {
-		return "http_error"
+		return endHTTPError
 	}
 	if outcome.Class == scheduler.FailureGlobalTransient {
-		return "transport_error"
+		return endTransportError
 	}
-	return "local_error"
+	return endLocalError
 }

@@ -555,8 +555,11 @@ func TestCanceledLogFieldsAndLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer logs.Close()
-	for _, reason := range []string{"client_canceled", "client_disconnected"} {
-		(&App{logs: logs}).recordGatewayEvent(gateway.Event{Kind: gateway.EventCanceled, CancelReason: reason, CancelPhase: "receiving_response", ResponseStarted: true, Stream: false, RawError: "write error"})
+	for _, event := range []gateway.Event{
+		{Kind: gateway.EventCanceled, CancelReason: "client_canceled", CancelPhase: "receiving_response", ResponseStarted: true, Stream: false, RawError: "write error"},
+		{Kind: gateway.EventCanceled, CancelReason: "client_disconnected", CancelPhase: "receiving_response", ResponseStarted: true, Stream: false, RawError: "write error"},
+	} {
+		(&App{logs: logs}).recordGatewayEvent(event)
 	}
 	for i, record := range decodeLogLines(t, output.Bytes()) {
 		if record["level"] != "INFO" || record["kind"] != "canceled" || record["response_started"] != true || record["stream"] != false || record["cancel_phase"] != "receiving_response" {

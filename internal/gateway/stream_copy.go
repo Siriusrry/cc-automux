@@ -11,12 +11,12 @@ import (
 type streamCopyResult struct {
 	verdict        responseVerdict
 	started, abort bool
-	post           string
+	post           postCompletion
 }
 
 func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, response *http.Response, control *upstreamAttempt, sse bool) (result streamCopyResult) {
 	if response == nil || response.Body == nil {
-		result.verdict = control.claim(responseVerdict{reason: "local_error", class: scheduler.FailureNeutral, raw: "provider returned no response body"})
+		result.verdict = control.claim(responseVerdict{reason: endLocalError, class: scheduler.FailureNeutral, raw: "provider returned no response body"})
 		return
 	}
 	defer response.Body.Close()
@@ -24,23 +24,23 @@ func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, respo
 	raw := boundedText{limit: h.limits.ErrorTextBytes}
 	finish := func(v responseVerdict) {
 		result.verdict = control.claim(v)
-		if result.verdict.reason == "http_error" {
+		if result.verdict.reason == endHTTPError {
 			result.verdict.raw = raw.text()
 			if raw.truncated {
-				result.verdict.incomplete = "truncated"
+				result.verdict.incomplete = incompleteTruncated
 			} else {
 				switch v.reason {
-				case "response_idle_timeout":
-					result.verdict.incomplete = "timeout"
-				case "stream_interrupted":
-					result.verdict.incomplete = "interrupted"
-				case "client_canceled":
-					result.verdict.incomplete = "canceled"
+				case endResponseIdleTimeout:
+					result.verdict.incomplete = incompleteTimeout
+				case endStreamInterrupted:
+					result.verdict.incomplete = incompleteInterrupted
+				case endClientCanceled:
+					result.verdict.incomplete = incompleteCanceled
 				}
 			}
 		}
 	}
-	canceled := func() { finish(responseVerdict{reason: "client_canceled", class: scheduler.FailureClientCanceled}) }
+	canceled := func() { finish(responseVerdict{reason: endClientCanceled, class: scheduler.FailureClientCanceled}) }
 	if requestCanceled(ctx) {
 		canceled()
 		return
@@ -79,7 +79,7 @@ func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, respo
 				writeErr = io.ErrShortWrite
 			}
 			if writeErr != nil {
-				finish(responseVerdict{reason: "client_canceled", class: scheduler.FailureDownstream, raw: writeErr.Error()})
+				finish(responseVerdict{reason: endClientCanceled, class: scheduler.FailureDownstream, raw: writeErr.Error()})
 				return
 			}
 			if flusher, ok := w.(http.Flusher); ok {
@@ -90,23 +90,23 @@ func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, respo
 			continue
 		}
 		if errors.Is(err, io.EOF) {
-			finish(responseVerdict{reason: "completed", class: scheduler.FailureNone})
+			finish(responseVerdict{reason: endCompleted, class: scheduler.FailureNone})
 			return
 		}
 		reason := control.reason()
-		if reason == "client_canceled" || (reason == "" && requestCanceled(ctx)) {
+		if reason == stopClientCanceled || (reason == "" && requestCanceled(ctx)) {
 			canceled()
 			return
 		}
 		if _, message, timeout := timeoutResponse(err); timeout {
-			finish(responseVerdict{reason: "response_idle_timeout", class: scheduler.FailureChannelImmediate, raw: message})
-			if result.verdict.reason == "completed" {
-				result.post = "idle_timeout"
+			finish(responseVerdict{reason: endResponseIdleTimeout, class: scheduler.FailureChannelImmediate, raw: message})
+			if result.verdict.reason == endCompleted {
+				result.post = postIdleTimeout
 			}
 		} else {
-			finish(responseVerdict{reason: "stream_interrupted", class: scheduler.FailureChannelStream, raw: err.Error()})
-			if result.verdict.reason == "completed" {
-				result.post = "connection_error"
+			finish(responseVerdict{reason: endStreamInterrupted, class: scheduler.FailureChannelStream, raw: err.Error()})
+			if result.verdict.reason == endCompleted {
+				result.post = postConnectionError
 			}
 		}
 		result.abort = !requestCanceled(ctx)

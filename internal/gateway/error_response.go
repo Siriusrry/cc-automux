@@ -20,14 +20,14 @@ func mappedHTTPError(status int) bool {
 	return status == 401 || status == 403 || status == 405 || status >= 300 && status < 400
 }
 
-func (h *Handler) fillFailure(f *capturedFailure, event Event, raw, incomplete string) {
+func (h *Handler) fillFailure(f *capturedFailure, event Event, raw string, incomplete incompleteMark) {
 	event.RawError = raw
 	event.RawErrorIncomplete = incomplete
-	event.EndReason = "http_error"
+	event.EndReason = endHTTPError
 	if updater, ok := h.selector.(interface {
 		UpdateError(scheduler.AttemptLease, uint64, string, bool, bool)
 	}); ok {
-		updater.UpdateError(f.lease.AttemptLease, f.observation, raw, incomplete == "timeout" || incomplete == "interrupted" || incomplete == "canceled", incomplete == "truncated")
+		updater.UpdateError(f.lease.AttemptLease, f.observation, raw, incomplete == incompleteTimeout || incomplete == incompleteInterrupted || incomplete == incompleteCanceled, incomplete == incompleteTruncated)
 	}
 	h.record(event)
 }
@@ -42,7 +42,7 @@ func (h *Handler) backgroundFailure(f *capturedFailure, event Event) {
 		}()
 	})
 }
-func (h *Handler) readErrorBody(body io.ReadCloser, control *upstreamAttempt) (string, string) {
+func (h *Handler) readErrorBody(body io.ReadCloser, control *upstreamAttempt) (string, incompleteMark) {
 	defer body.Close()
 	raw := boundedText{limit: h.limits.ErrorTextBytes}
 	buffer := make([]byte, min(32*1024, raw.limit))
@@ -50,7 +50,7 @@ func (h *Handler) readErrorBody(body io.ReadCloser, control *upstreamAttempt) (s
 		remaining := raw.limit - len(raw.data)
 		if remaining == 0 {
 			raw.truncated = true
-			return raw.text(), "truncated"
+			return raw.text(), incompleteTruncated
 		}
 		n, err := body.Read(buffer[:min(len(buffer), remaining)])
 		if n > 0 {
@@ -60,10 +60,10 @@ func (h *Handler) readErrorBody(body io.ReadCloser, control *upstreamAttempt) (s
 			if errors.Is(err, io.EOF) {
 				return raw.text(), ""
 			}
-			if control.reason() == "error_body_timeout" {
-				return raw.text(), "timeout"
+			if control.reason() == stopErrorBodyTimeout {
+				return raw.text(), incompleteTimeout
 			}
-			return raw.text(), "interrupted"
+			return raw.text(), incompleteInterrupted
 		}
 	}
 }
@@ -109,9 +109,9 @@ func (h *Handler) finishFixedHTTPFailure(ctx context.Context, w http.ResponseWri
 		gatewayStatus = 502
 		code = "bad_gateway"
 	}
-	record := func(raw, incomplete string) {
-		h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: gatewayStatus, GatewayError: code, UpstreamStatus: status, UpstreamHeaders: response.Header.Clone(), UpstreamBody: raw, SessionID: session, Error: raw, UpstreamBodyTruncated: incomplete == "truncated"})
-		event := Event{Kind: EventFailure, ProviderID: target.ID, SessionID: session, Model: model, RequestType: traffic.RequestTypeClassifier, Stream: lifecycle.stream, Attempt: 1, UpstreamURL: upstream, HTTPStatus: status, EndReason: "http_error", RawError: raw, RawErrorIncomplete: incomplete}
+	record := func(raw string, incomplete incompleteMark) {
+		h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: gatewayStatus, GatewayError: code, UpstreamStatus: status, UpstreamHeaders: response.Header.Clone(), UpstreamBody: raw, SessionID: session, Error: raw, UpstreamBodyTruncated: incomplete == incompleteTruncated})
+		event := Event{Kind: EventFailure, ProviderID: target.ID, SessionID: session, Model: model, RequestType: traffic.RequestTypeClassifier, Stream: lifecycle.stream, Attempt: 1, UpstreamURL: upstream, HTTPStatus: status, EndReason: endHTTPError, RawError: raw, RawErrorIncomplete: incomplete}
 		h.record(event)
 	}
 	if mappedHTTPError(status) || requestCanceled(ctx) {

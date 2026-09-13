@@ -435,7 +435,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		}
 		return h.handlePlanTransportError(w, incoming.Context(), base, lease, sessionID, attempt, url.String(), combined)
 	}
-	if requestCanceled(ctx) && control.verdict().reason != "http_error" {
+	if requestCanceled(ctx) && control.verdict().reason != endHTTPError {
 		var responseCloseErr error
 		if response != nil && response.Body != nil {
 			responseCloseErr = response.Body.Close()
@@ -539,7 +539,7 @@ func (h *Handler) handlePlanTransportError(w http.ResponseWriter, ctx context.Co
 		return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, errorCode: code, errorMessage: message}, false
 	}
 	outcome := scheduler.Outcome{Class: scheduler.FailureGlobalTransient, UpstreamURL: upstream, RawError: err.Error(), SessionID: sessionID}
-	if requestCanceled(ctx) && lease.control.verdict().reason != "transport_error" {
+	if requestCanceled(ctx) && lease.control.verdict().reason != endTransportError {
 		outcome.Class = scheduler.FailureClientCanceled
 		outcome.ClientCanceled = true
 		update, _ := h.selector.Report(lease.AttemptLease, outcome)

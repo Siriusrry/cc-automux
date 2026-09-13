@@ -10,10 +10,10 @@ import (
 )
 
 type responseVerdict struct {
-	reason     string
+	reason     endReason
 	class      scheduler.FailureClass
 	raw        string
-	incomplete string
+	incomplete incompleteMark
 }
 
 // sseObserver retains only event names and bounded error data. Ordinary data
@@ -101,16 +101,16 @@ func (s *sseObserver) endLine() {
 	if s.lineBytes == 0 {
 		switch s.event {
 		case "message_stop":
-			s.result = &responseVerdict{reason: "completed", class: scheduler.FailureNone}
+			s.result = &responseVerdict{reason: endCompleted, class: scheduler.FailureNone}
 		case "error":
 			raw := s.data.text()
 			class := scheduler.FailureChannelTransient
 			if !s.data.truncated {
 				class = sseErrorClass(raw)
 			}
-			s.result = &responseVerdict{reason: "stream_error_event", class: class, raw: raw}
+			s.result = &responseVerdict{reason: endStreamErrorEvent, class: class, raw: raw}
 			if s.data.truncated {
-				s.result.incomplete = "truncated"
+				s.result.incomplete = incompleteTruncated
 			}
 		}
 		s.event = ""

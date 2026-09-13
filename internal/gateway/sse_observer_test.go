@@ -30,7 +30,7 @@ func TestSSEObserverChunksAndFirstResult(t *testing.T) {
 			for i := 0; i < len(test.wire); i += chunk {
 				observer.feed([]byte(test.wire[i:min(i+chunk, len(test.wire))]))
 			}
-			if observer.result == nil || observer.result.reason != test.reason || observer.result.class != test.class {
+			if observer.result == nil || string(observer.result.reason) != test.reason || observer.result.class != test.class {
 				t.Fatalf("chunk=%d result=%#v", chunk, observer.result)
 			}
 		}
@@ -104,7 +104,7 @@ func TestSSEWireEndingsAndHealth(t *testing.T) {
 			}
 			got := events.snapshot()
 			_, reports := selector.snapshot()
-			if len(got) != 2 || got[1].EndReason != test.reason || got[1].PostCompletion != test.post || len(reports) != 1 || reports[0].Class != test.class {
+			if len(got) != 2 || string(got[1].EndReason) != test.reason || string(got[1].PostCompletion) != test.post || len(reports) != 1 || reports[0].Class != test.class {
 				t.Fatalf("events=%#v reports=%#v", got, reports)
 			}
 		})
@@ -127,7 +127,7 @@ func TestSSEConfirmedResultSurvivesClientCancel(t *testing.T) {
 		if strings.Contains(wire, "message_stop") {
 			want = "completed"
 		}
-		if result.verdict.reason != want {
+		if string(result.verdict.reason) != want {
 			t.Fatalf("result=%#v", result)
 		}
 	}

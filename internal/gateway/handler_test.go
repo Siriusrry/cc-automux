@@ -1477,7 +1477,7 @@ func TestCanceledEventPhasesAndDownstreamFailure(t *testing.T) {
 		{false, 0, "before_upstream"}, {true, 0, "awaiting_response"}, {true, 200, "receiving_response"},
 	} {
 		event := h.outcomeEvent(EventCanceled, requestAttemptLease{AttemptLease: leaseFor(item, "m"), stream: true, started: test.started}, scheduler.Outcome{Class: scheduler.FailureClientCanceled, HTTPStatus: test.status, UpstreamURL: "https://provider.invalid/v1/messages", RawError: "context canceled"}, 1, scheduler.HealthUpdate{})
-		if event.Kind != EventCanceled || event.CancelPhase != test.phase || event.CancelReason != "client_canceled" || event.RawError != "" || !event.Stream || event.ResponseStarted {
+		if event.Kind != EventCanceled || string(event.CancelPhase) != test.phase || event.CancelReason != "client_canceled" || event.RawError != "" || !event.Stream || event.ResponseStarted {
 			t.Fatalf("event = %#v", event)
 		}
 		if !test.started && event.UpstreamURL != "" {

@@ -70,7 +70,7 @@ func TestBackgroundErrorBodyDoesNotDelayFailover(t *testing.T) {
 			if ending == "complete" {
 				want = ""
 			}
-			if event.Kind != EventFailover || event.RawErrorIncomplete != want || event.EndReason != "http_error" || len(event.RawError) > 32 || !utf8.ValidString(event.RawError) {
+			if event.Kind != EventFailover || string(event.RawErrorIncomplete) != want || event.EndReason != "http_error" || len(event.RawError) > 32 || !utf8.ValidString(event.RawError) {
 				t.Fatalf("event=%#v", event)
 			}
 			_, reports := selector.snapshot()
@@ -152,7 +152,7 @@ func TestFinalErrorStreamsAndKeepsOneHealthResult(t *testing.T) {
 				want = "truncated"
 			}
 			_, reports := selector.snapshot()
-			if event.EndReason != "http_error" || event.RawErrorIncomplete != want || len(event.RawError) > DefaultErrorTextLimit || !utf8.ValidString(event.RawError) || len(reports) != 1 || reports[0].Class != scheduler.FailureChannelTransient {
+			if event.EndReason != "http_error" || string(event.RawErrorIncomplete) != want || len(event.RawError) > DefaultErrorTextLimit || !utf8.ValidString(event.RawError) || len(reports) != 1 || reports[0].Class != scheduler.FailureChannelTransient {
 				t.Fatalf("event=%#v reports=%#v", event, reports)
 			}
 		})

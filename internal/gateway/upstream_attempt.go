@@ -44,7 +44,10 @@ func (v UpstreamLimits) defaults() UpstreamLimits {
 	return v
 }
 
-type attemptStop struct{ reason, message string }
+type attemptStop struct {
+	reason  stopReason
+	message string
+}
 
 func (e *attemptStop) Error() string { return e.message }
 
@@ -66,7 +69,7 @@ type upstreamAttempt struct {
 	timerArmed    bool
 	timerDeadline time.Time
 	timerWait     time.Duration
-	timerReason   string
+	timerReason   stopReason
 	headersAt     time.Time
 	bytes         int64
 	stopped       *attemptStop
@@ -78,17 +81,17 @@ type upstreamAttempt struct {
 func (h *Handler) newUpstreamAttempt(client context.Context, stream bool) *upstreamAttempt {
 	ctx, cancel := context.WithCancelCause(context.WithoutCancel(client))
 	a := &upstreamAttempt{ctx: ctx, cancel: cancel, limits: h.limits}
-	a.stopClient = context.AfterFunc(client, func() { a.stop("client_canceled", "", true) })
-	a.stopShutdown = context.AfterFunc(h.shutdown, func() { a.stop("shutdown", "gateway is shutting down", false) })
+	a.stopClient = context.AfterFunc(client, func() { a.stop(stopClientCanceled, "", true) })
+	a.stopShutdown = context.AfterFunc(h.shutdown, func() { a.stop(stopShutdown, "gateway is shutting down", false) })
 	if stream {
 		a.mu.Lock()
-		a.armLocked(a.limits.ResponseHeader, "response_header_timeout")
+		a.armLocked(a.limits.ResponseHeader, stopResponseHeaderTimeout)
 		a.mu.Unlock()
 	}
 	return a
 }
 
-func (a *upstreamAttempt) armLocked(wait time.Duration, reason string) {
+func (a *upstreamAttempt) armLocked(wait time.Duration, reason stopReason) {
 	a.stopTimerLocked()
 	a.timerArmed = true
 	a.timerDeadline = time.Now().Add(wait)
@@ -121,27 +124,27 @@ func (a *upstreamAttempt) stopTimerLocked() {
 	}
 }
 
-func (a *upstreamAttempt) stopLocked(reason, message string) {
+func (a *upstreamAttempt) stopLocked(reason stopReason, message string) {
 	if a.stopped != nil || a.finished {
 		return
 	}
 	class := scheduler.FailureChannelImmediate
-	if reason == "client_canceled" {
+	if reason == stopClientCanceled {
 		class = scheduler.FailureClientCanceled
 	}
-	if reason == "shutdown" {
+	if reason == stopShutdown {
 		class = scheduler.FailureNeutral
 	}
-	verdictReason := reason
-	if reason == "shutdown" {
-		verdictReason = "local_error"
+	verdictReason := endReason(reason)
+	if reason == stopShutdown {
+		verdictReason = endLocalError
 	}
 	a.claimLocked(responseVerdict{reason: verdictReason, class: class, raw: message})
 	a.stopped = &attemptStop{reason: reason, message: message}
 	a.stopTimerLocked()
 	a.cancel(a.stopped)
 }
-func (a *upstreamAttempt) stop(reason, message string, client bool) {
+func (a *upstreamAttempt) stop(reason stopReason, message string, client bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if client && a.detached {
@@ -154,14 +157,14 @@ func (a *upstreamAttempt) receiveHeaders(response *http.Response, err error) (*h
 	a.stopTimerLocked()
 	stopped := a.stopped
 	if stopped == nil && err != nil {
-		a.claimLocked(responseVerdict{reason: "transport_error", class: scheduler.FailureGlobalTransient, raw: err.Error()})
+		a.claimLocked(responseVerdict{reason: endTransportError, class: scheduler.FailureGlobalTransient, raw: err.Error()})
 	}
 	if stopped == nil && err == nil && response != nil {
 		a.headersAt = time.Now()
 		class := scheduler.ClassifyHTTPStatus(response.StatusCode)
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			if a.fixed || (scheduler.Outcome{Class: class}).ShouldFailover() {
-				a.claimLocked(responseVerdict{reason: "http_error", class: class})
+				a.claimLocked(responseVerdict{reason: endHTTPError, class: class})
 				a.detached = true
 			}
 		}
@@ -178,7 +181,7 @@ func (a *upstreamAttempt) receiveHeaders(response *http.Response, err error) (*h
 	}
 	return response, err
 }
-func (a *upstreamAttempt) reason() string {
+func (a *upstreamAttempt) reason() stopReason {
 	if a == nil {
 		return ""
 	}
@@ -207,9 +210,9 @@ func timeoutResponse(err error) (string, string, bool) {
 		return "", "", false
 	}
 	switch stop.reason {
-	case "response_header_timeout":
+	case stopResponseHeaderTimeout:
 		return "upstream_response_timeout", stop.message, true
-	case "response_idle_timeout":
+	case stopResponseIdleTimeout:
 		return "upstream_idle_timeout", stop.message, true
 	}
 	return "", "", false
@@ -228,7 +231,7 @@ func (b *attemptBodyReader) Read(p []byte) (int, error) {
 	a.mu.Lock()
 	stopped := a.stopped
 	if stopped == nil && !a.background {
-		a.armLocked(a.limits.ResponseIdle, "response_idle_timeout")
+		a.armLocked(a.limits.ResponseIdle, stopResponseIdleTimeout)
 	}
 	a.mu.Unlock()
 	if stopped != nil {
@@ -256,16 +259,16 @@ func (b *attemptBodyReader) Read(p []byte) (int, error) {
 	if err != nil {
 		a.stopTimerLocked()
 		if !a.streaming && !errors.Is(err, io.EOF) {
-			a.claimLocked(responseVerdict{reason: "stream_interrupted", class: scheduler.FailureChannelStream, raw: err.Error()})
+			a.claimLocked(responseVerdict{reason: endStreamInterrupted, class: scheduler.FailureChannelStream, raw: err.Error()})
 		}
 		if a.streaming {
-			verdict := responseVerdict{reason: "stream_interrupted", class: scheduler.FailureChannelStream, raw: err.Error()}
+			verdict := responseVerdict{reason: endStreamInterrupted, class: scheduler.FailureChannelStream, raw: err.Error()}
 			if errors.Is(err, io.EOF) {
-				verdict = responseVerdict{reason: "completed", class: scheduler.FailureNone}
+				verdict = responseVerdict{reason: endCompleted, class: scheduler.FailureNone}
 				if a.observer != nil {
-					verdict = responseVerdict{reason: "stream_truncated", class: scheduler.FailureChannelStream, raw: "stream ended before message_stop"}
+					verdict = responseVerdict{reason: endStreamTruncated, class: scheduler.FailureChannelStream, raw: "stream ended before message_stop"}
 				} else if a.status < 200 || a.status >= 300 {
-					verdict = responseVerdict{reason: "http_error", class: scheduler.ClassifyHTTPStatus(a.status)}
+					verdict = responseVerdict{reason: endHTTPError, class: scheduler.ClassifyHTTPStatus(a.status)}
 				}
 			}
 			a.claimLocked(verdict)
@@ -321,7 +324,7 @@ func (a *upstreamAttempt) readBackground() {
 	a.detached = true
 	a.background = true
 	remaining := time.Until(a.headersAt.Add(a.limits.ErrorBody))
-	a.armLocked(remaining, "error_body_timeout")
+	a.armLocked(remaining, stopErrorBodyTimeout)
 }
 func (a *upstreamAttempt) readFinal(client context.Context) {
 	a.mu.Lock()
@@ -329,6 +332,6 @@ func (a *upstreamAttempt) readFinal(client context.Context) {
 	a.background = false
 	a.mu.Unlock()
 	if client.Err() != nil {
-		a.stop("client_canceled", "", true)
+		a.stop(stopClientCanceled, "", true)
 	}
 }

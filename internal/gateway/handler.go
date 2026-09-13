@@ -401,7 +401,7 @@ func (h *Handler) record(event Event) {
 	if h != nil && h.recorder != nil {
 		if raw, truncated := textlimit.Prefix(event.RawError, h.limits.ErrorTextBytes); truncated {
 			event.RawError = raw
-			event.RawErrorIncomplete = "truncated"
+			event.RawErrorIncomplete = incompleteTruncated
 		}
 		h.recorder.RecordGatewayEvent(event)
 	}
@@ -442,10 +442,10 @@ func (h *Handler) outcomeEvent(kind EventKind, lease requestAttemptLease, outcom
 	}
 	if kind == EventCanceled {
 		event.ResponseStarted = outcome.ResponseStarted
-		event.CancelReason = "client_canceled"
+		event.CancelReason = canceledByClient
 		event.RawError = ""
 		if outcome.Class == scheduler.FailureDownstream {
-			event.CancelReason = "client_disconnected"
+			event.CancelReason = canceledByDisconnect
 			event.RawError = outcome.RawError
 		}
 		event.CancelPhase = cancelPhase(lease.started, outcome.HTTPStatus)

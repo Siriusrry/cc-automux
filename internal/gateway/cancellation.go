@@ -2,14 +2,14 @@ package gateway
 
 import "io"
 
-func cancelPhase(started bool, status int) string {
+func cancelPhase(started bool, status int) cancellationPhase {
 	if status != 0 {
-		return "receiving_response"
+		return cancelReceivingResponse
 	}
 	if started {
-		return "awaiting_response"
+		return cancelAwaitingResponse
 	}
-	return "before_upstream"
+	return cancelBeforeUpstream
 }
 
 // clientWriteError distinguishes a failed downstream write from a read or cleanup error.
