@@ -9,6 +9,7 @@ import (
 )
 
 type streamCopyResult struct {
+	cancel         *copyCancellation
 	verdict        responseVerdict
 	started, abort bool
 	post           postCompletion
@@ -20,6 +21,11 @@ func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, respo
 		return
 	}
 	defer response.Body.Close()
+	defer func() {
+		if result.cancel == nil && requestCanceled(ctx) {
+			result.cancel = &copyCancellation{reason: canceledByClient}
+		}
+	}()
 	control.observe(response, sse)
 	raw := boundedText{limit: h.limits.ErrorTextBytes}
 	finish := func(v responseVerdict) {
@@ -40,7 +46,10 @@ func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, respo
 			}
 		}
 	}
-	canceled := func() { finish(responseVerdict{reason: endClientCanceled, class: scheduler.FailureClientCanceled}) }
+	canceled := func() {
+		result.cancel = &copyCancellation{reason: canceledByClient}
+		finish(responseVerdict{reason: endClientCanceled, class: scheduler.FailureClientCanceled})
+	}
 	if requestCanceled(ctx) {
 		canceled()
 		return
@@ -79,6 +88,7 @@ func (h *Handler) copyUpstream(w http.ResponseWriter, ctx context.Context, respo
 				writeErr = io.ErrShortWrite
 			}
 			if writeErr != nil {
+				result.cancel = &copyCancellation{reason: canceledByDisconnect, raw: writeErr.Error()}
 				finish(responseVerdict{reason: endClientCanceled, class: scheduler.FailureDownstream, raw: writeErr.Error()})
 				return
 			}

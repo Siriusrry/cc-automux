@@ -69,6 +69,7 @@ func (h *Handler) finishHTTPFailure(w http.ResponseWriter, ctx context.Context, 
 	event := h.outcomeEvent(EventFailure, f.lease, f.outcome, f.attempt, f.update)
 	if requestCanceled(ctx) {
 		h.backgroundFailure(f, event)
+		h.recordCopyCancellation(event, streamCopyResult{cancel: &copyCancellation{reason: canceledByClient}})
 		return
 	}
 	if mappedHTTPError(f.response.StatusCode) {
@@ -84,6 +85,7 @@ func (h *Handler) finishHTTPFailure(w http.ResponseWriter, ctx context.Context, 
 		f.lease.control.readFinal(ctx)
 		result := h.copyUpstream(w, ctx, f.response, f.lease.control, false)
 		h.fillFailure(f, event, result.verdict.raw, result.verdict.incomplete)
+		h.recordCopyCancellation(event, result)
 		if result.abort {
 			panic(http.ErrAbortHandler)
 		}
@@ -107,10 +109,11 @@ func (h *Handler) finishFixedHTTPFailure(ctx context.Context, w http.ResponseWri
 		gatewayStatus = 502
 		code = "bad_gateway"
 	}
-	record := func(raw string, incomplete incompleteMark) {
+	record := func(raw string, incomplete incompleteMark) Event {
 		h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: gatewayStatus, GatewayError: code, UpstreamStatus: status, UpstreamHeaders: response.Header.Clone(), UpstreamBody: raw, SessionID: session, Error: raw, UpstreamBodyTruncated: incomplete == incompleteTruncated})
 		event := Event{Kind: EventFailure, ProviderID: target.ID, SessionID: session, Model: model, RequestType: traffic.RequestTypeClassifier, Stream: lifecycle.stream, Attempt: 1, UpstreamURL: upstream, HTTPStatus: status, EndReason: endHTTPError, RawError: raw, RawErrorIncomplete: incomplete}
 		h.record(event)
+		return event
 	}
 	if mappedHTTPError(status) || requestCanceled(ctx) {
 		control.readBackground()
@@ -122,6 +125,8 @@ func (h *Handler) finishFixedHTTPFailure(ctx context.Context, w http.ResponseWri
 		}()
 		if !requestCanceled(ctx) {
 			writeError(w, 502, "bad_gateway", "fixed target rejected the gateway request")
+		} else {
+			h.recordFixedEvent(ctx, EventCanceled, target, session, model, upstream, 1, status, "")
 		}
 		return
 	}
@@ -129,7 +134,8 @@ func (h *Handler) finishFixedHTTPFailure(ctx context.Context, w http.ResponseWri
 	defer control.close()
 	control.readFinal(ctx)
 	result := h.copyUpstream(w, ctx, response, control, false)
-	record(result.verdict.raw, result.verdict.incomplete)
+	event := record(result.verdict.raw, result.verdict.incomplete)
+	h.recordCopyCancellation(event, result)
 	if result.abort {
 		panic(http.ErrAbortHandler)
 	}

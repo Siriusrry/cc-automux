@@ -239,7 +239,11 @@ func TestFinalErrorCancellationIsIncompleteFailure(t *testing.T) {
 	defer cancel()
 	writer := &fixedWriteRecorder{header: make(http.Header), onWrite: cancel}
 	h.ServeHTTP(writer, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`).WithContext(ctx))
-	event := waitGatewayEvents(t, events, 2)[1]
+	got := waitGatewayEvents(t, events, 3)
+	event := got[1]
+	if got[2].Kind != EventCanceled {
+		t.Fatalf("missing separate cancellation: %#v", got)
+	}
 	_, reports := selector.snapshot()
 	if event.Kind != EventFailure || event.EndReason != "http_error" || event.RawErrorIncomplete != "canceled" || event.RawError != "error prefix" || len(reports) != 1 {
 		t.Fatalf("event=%#v reports=%#v", event, reports)

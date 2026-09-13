@@ -803,7 +803,7 @@ func TestStreamResponseCancellationBeforeWriteHeaderReportsOnce(t *testing.T) {
 		Header:     http.Header{"X-Test": []string{"value"}},
 		Body:       io.NopCloser(strings.NewReader("body")),
 	}, nil)
-	handler.streamResponse(w, ctx, response, requestAttemptLease{AttemptLease: leaseFor(item, "m"), control: control}, scheduler.Outcome{Class: scheduler.FailureNone, UpstreamURL: "https://one.invalid/v1/messages", SessionID: "session"}, 1)
+	handler.streamResponse(w, ctx, response, requestAttemptLease{AttemptLease: leaseFor(item, "m"), control: control, started: true}, scheduler.Outcome{Class: scheduler.FailureNone, UpstreamURL: "https://one.invalid/v1/messages", SessionID: "session"}, 1)
 
 	_, reports := selector.snapshot()
 	if w.headerCalls != 0 || w.writeCalls != 0 {

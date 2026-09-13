@@ -163,10 +163,8 @@ func (a *upstreamAttempt) receiveHeaders(response *http.Response, err error) (*h
 		a.headersAt = time.Now()
 		class := scheduler.ClassifyHTTPStatus(response.StatusCode)
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			if a.fixed || (scheduler.Outcome{Class: class}).ShouldFailover() {
-				a.claimLocked(responseVerdict{reason: endHTTPError, class: class})
-				a.detached = true
-			}
+			a.claimLocked(responseVerdict{reason: endHTTPError, class: class})
+			a.detached = a.fixed || (scheduler.Outcome{Class: class}).ShouldFailover()
 		}
 		if response.Body != nil {
 			response.Body = &attemptBodyReader{ReadCloser: response.Body, attempt: a}

@@ -1316,6 +1316,19 @@ func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *
 		event.ProviderID = target.ID
 	}
 	h.record(event)
+	if (kind == EventFailure || kind == EventSuccess) && requestCanceled(ctx) {
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil && lifecycle.isStarted() {
+			canceled := event
+			canceled.Kind = EventCanceled
+			canceled.EndReason = ""
+			canceled.RawErrorIncomplete = ""
+			canceled.RawError = ""
+			canceled.CancelReason = canceledByClient
+			canceled.CancelPhase = cancelPhase(true, status)
+			canceled.ResponseStarted = lifecycle.hasResponseStarted()
+			h.record(canceled)
+		}
+	}
 }
 
 func (l *fixedLifecycle) markBodyTruncated(truncated bool) {

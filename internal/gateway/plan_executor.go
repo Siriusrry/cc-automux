@@ -574,7 +574,11 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 			return
 		}
 		update, _ := h.selector.Report(lease.AttemptLease, value)
-		h.recordOutcome(kind, lease, value, attempt, update)
+		event := h.outcomeEvent(kind, lease, value, attempt, update)
+		h.record(event)
+		if kind != EventCanceled && requestCanceled(ctx) {
+			h.recordCopyCancellation(event, streamCopyResult{started: value.ResponseStarted, cancel: &copyCancellation{reason: canceledByClient}})
+		}
 	}
 	cancel := func(cause error, responseStarted bool) {
 		cleanupErr := errors.Join(closeResponse(), execution.Close())
@@ -606,7 +610,7 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 		}
 		return nil, true
 	}
-	if requestCanceled(ctx) {
+	if requestCanceled(ctx) && lease.control.verdict().reason != endStreamInterrupted {
 		bodyErr := error(nil)
 		if body != nil {
 			bodyErr = body.Close()

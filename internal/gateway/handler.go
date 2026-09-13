@@ -355,9 +355,14 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 	if event.Kind == EventSuccess || event.Kind == EventCanceled {
 		event.EndReason = ""
 	}
+	if event.Kind == EventCanceled && result.cancel != nil {
+		event.CancelReason = result.cancel.reason
+		event.RawError = result.cancel.raw
+	}
 	event.RawErrorIncomplete = result.verdict.incomplete
 	event.PostCompletion = result.post
 	h.record(event)
+	h.recordCopyCancellation(event, result)
 	if result.abort {
 		panic(http.ErrAbortHandler)
 	}
@@ -441,6 +446,7 @@ func (h *Handler) outcomeEvent(kind EventKind, lease requestAttemptLease, outcom
 		panic("gateway: cancellation requires an explicit canceled event")
 	}
 	if kind == EventCanceled {
+		event.EndReason = ""
 		event.ResponseStarted = outcome.ResponseStarted
 		event.CancelReason = canceledByClient
 		event.RawError = ""
@@ -542,7 +548,9 @@ func (h *Handler) reportClientCanceledState(lease requestAttemptLease, sessionID
 		ClientCanceled:  true,
 	}
 	update, _ := h.selector.Report(lease.AttemptLease, outcome)
-	h.recordOutcome(EventCanceled, lease, outcome, attempt, update)
+	if lease.started || attempt > 1 {
+		h.recordOutcome(EventCanceled, lease, outcome, attempt, update)
+	}
 }
 
 func contextError(ctx context.Context, fallback error) error {
