@@ -347,6 +347,8 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 	kind := EventFailure
 	if outcome.Class == scheduler.FailureNone {
 		kind = EventSuccess
+	} else if outcome.Class == scheduler.FailureClientCanceled || outcome.Class == scheduler.FailureDownstream {
+		kind = EventCanceled
 	}
 	event := h.outcomeEvent(kind, lease, outcome, attempt, update)
 	event.EndReason = result.verdict.reason
@@ -435,8 +437,10 @@ func (h *Handler) outcomeEvent(kind EventKind, lease requestAttemptLease, outcom
 		ChannelEnteredCooldown: update.ChannelEnteredCooldown,
 		CooldownUntil:          update.CooldownUntil,
 	}
-	if outcome.Class == scheduler.FailureClientCanceled || outcome.Class == scheduler.FailureDownstream {
-		event.Kind = EventCanceled
+	if kind != EventCanceled && (outcome.Class == scheduler.FailureClientCanceled || outcome.Class == scheduler.FailureDownstream) {
+		panic("gateway: cancellation requires an explicit canceled event")
+	}
+	if kind == EventCanceled {
 		event.ResponseStarted = outcome.ResponseStarted
 		event.CancelReason = "client_canceled"
 		event.RawError = ""
@@ -538,7 +542,7 @@ func (h *Handler) reportClientCanceledState(lease requestAttemptLease, sessionID
 		ClientCanceled:  true,
 	}
 	update, _ := h.selector.Report(lease.AttemptLease, outcome)
-	h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+	h.recordOutcome(EventCanceled, lease, outcome, attempt, update)
 }
 
 func contextError(ctx context.Context, fallback error) error {

@@ -543,7 +543,7 @@ func (h *Handler) handlePlanTransportError(w http.ResponseWriter, ctx context.Co
 		outcome.Class = scheduler.FailureClientCanceled
 		outcome.ClientCanceled = true
 		update, _ := h.selector.Report(lease.AttemptLease, outcome)
-		h.recordOutcome(EventFailure, lease, outcome, attempt, update)
+		h.recordOutcome(EventCanceled, lease, outcome, attempt, update)
 		_ = base.Close()
 		return nil, true
 	}
@@ -589,7 +589,7 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 			ClientCanceled:  true,
 			RawError:        errors.Join(contextError(ctx, cause), cleanupErr).Error(),
 		}
-		report(EventFailure, value)
+		report(EventCanceled, value)
 	}
 	if requestCanceled(ctx) {
 		cancel(nil, false)
@@ -747,6 +747,8 @@ func (h *Handler) executeBufferedResponse(w http.ResponseWriter, incoming *http.
 	}
 	if outcome.Class == scheduler.FailureNone {
 		report(EventSuccess, outcome)
+	} else if outcome.Class == scheduler.FailureDownstream {
+		report(EventCanceled, outcome)
 	} else {
 		report(EventFailure, outcome)
 	}

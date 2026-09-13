@@ -1476,7 +1476,7 @@ func TestCanceledEventPhasesAndDownstreamFailure(t *testing.T) {
 	}{
 		{false, 0, "before_upstream"}, {true, 0, "awaiting_response"}, {true, 200, "receiving_response"},
 	} {
-		event := h.outcomeEvent(EventFailure, requestAttemptLease{AttemptLease: leaseFor(item, "m"), stream: true, started: test.started}, scheduler.Outcome{Class: scheduler.FailureClientCanceled, HTTPStatus: test.status, UpstreamURL: "https://provider.invalid/v1/messages", RawError: "context canceled"}, 1, scheduler.HealthUpdate{})
+		event := h.outcomeEvent(EventCanceled, requestAttemptLease{AttemptLease: leaseFor(item, "m"), stream: true, started: test.started}, scheduler.Outcome{Class: scheduler.FailureClientCanceled, HTTPStatus: test.status, UpstreamURL: "https://provider.invalid/v1/messages", RawError: "context canceled"}, 1, scheduler.HealthUpdate{})
 		if event.Kind != EventCanceled || event.CancelPhase != test.phase || event.CancelReason != "client_canceled" || event.RawError != "" || !event.Stream || event.ResponseStarted {
 			t.Fatalf("event = %#v", event)
 		}
@@ -1517,4 +1517,13 @@ func waitGatewayEvents(t *testing.T, events *eventCollector, count int) []Event 
 	}
 	t.Fatalf("expected %d events, got %#v", count, events.snapshot())
 	return nil
+}
+
+func TestCancellationRequiresExplicitEventKind(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("implicit canceled kind was accepted")
+		}
+	}()
+	(&Handler{}).outcomeEvent(EventFailure, requestAttemptLease{}, scheduler.Outcome{Class: scheduler.FailureClientCanceled}, 1, scheduler.HealthUpdate{})
 }
