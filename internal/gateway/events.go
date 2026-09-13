@@ -33,6 +33,7 @@ type Event struct {
 	Model                  string
 	RequestType            traffic.RequestType
 	Stream                 bool
+	TraceID                string
 	ResponseStarted        bool
 	CancelReason           cancellationReason
 	CancelPhase            cancellationPhase

@@ -96,7 +96,7 @@ func TestClassifierAndUnconfiguredModelStream(t *testing.T) {
 			t.Fatalf("no events: %d %s", response.Code, response.Body.String())
 		}
 		for _, event := range got {
-			if !event.Stream || event.RequestType != traffic.RequestTypeClassifier {
+			if !event.Stream || event.RequestType != traffic.RequestTypeClassifier || len(event.TraceID) != 32 {
 				t.Fatalf("event = %#v", event)
 			}
 		}

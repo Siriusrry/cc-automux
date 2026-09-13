@@ -58,7 +58,7 @@
       ctx.title('Logs');
       ctx.subtitle(['Structured gateway and service records · ', h('b', null, 'history'), ' from the log files and ', h('b', null, 'live'), ' records as they are written']);
       const state = {
-        filter: { level: [], kind: [], event: [], request_type: [], provider_id: [], model: [], session_id: [], http_status: [], since: '', until: '' },
+        filter: { level: [], kind: [], event: [], request_type: [], provider_id: [], model: [], session_id: [], trace_id: [], http_status: [], since: '', until: '' },
         live: true, following: true, buffer: [], reloadRequired: false, dropped: 0,
         stream: null, records: new Map(), hasMore: false, nextCursor: null, loading: false, malformed: 0, providers: [], conn: 'off', generation: 0
       };
@@ -106,7 +106,7 @@
       function renderChips() {
         const out = [];
         const add = (k, v, remove) => out.push(h('span', { class: 'fchip' }, h('span', { class: 'k' }, k), h('span', { class: 'mono' }, v), h('button', { type: 'button', 'aria-label': 'Remove filter', onclick: remove }, icon('x'))));
-        ['level', 'kind', 'event', 'request_type', 'model', 'session_id', 'http_status'].forEach(k => state.filter[k].forEach(v => add(k.replace('_', ' '), k === 'session_id' ? fmt.middle(v, 18) : v, () => { state.filter[k] = state.filter[k].filter(x => x !== v); syncControls(); reload(); })));
+        ['level', 'kind', 'event', 'request_type', 'model', 'session_id', 'trace_id', 'http_status'].forEach(k => state.filter[k].forEach(v => add(k.replace('_', ' '), k === 'session_id' ? fmt.middle(v, 18) : v, () => { state.filter[k] = state.filter[k].filter(x => x !== v); syncControls(); reload(); })));
         state.filter.provider_id.forEach(v => { const p = state.providers.find(x => x.id === v); add('provider', p ? p.name : v, () => { state.filter.provider_id = []; syncControls(); reload(); }); });
         if (state.filter.since) add('since', state.filter.since.replace('T', ' '), () => { state.filter.since = ''; syncControls(); reload(); });
         if (state.filter.until) add('until', state.filter.until.replace('T', ' '), () => { state.filter.until = ''; syncControls(); reload(); });
@@ -114,7 +114,7 @@
       }
       function queryString(history) {
         const q = new URLSearchParams();
-        ['level', 'kind', 'event', 'request_type', 'provider_id', 'model', 'session_id', 'http_status'].forEach(k => state.filter[k].forEach(v => q.append(k, v)));
+        ['level', 'kind', 'event', 'request_type', 'provider_id', 'model', 'session_id', 'trace_id', 'http_status'].forEach(k => state.filter[k].forEach(v => q.append(k, v)));
         if (state.filter.since) q.append('since', new Date(state.filter.since).toISOString());
         if (state.filter.until) q.append('until', new Date(state.filter.until).toISOString());
         if (history) q.append('limit', String(PAGE));
@@ -167,6 +167,8 @@
         const parts = [];
         if (r.msg === 'service') { parts.push(h('span', { class: 'p' }, r.event || 'service')); if (r.listen_addr) parts.push(h('span', { class: 'm' }, r.listen_addr)); }
         else {
+          if (r.trace_id) parts.push(h('button', { type: 'button', class: 'rt mono lg-trace', 'data-tip': r.trace_id, 'aria-label': 'Filter by trace ' + r.trace_id,
+            onclick: (e) => { e.stopPropagation(); state.filter.trace_id = [r.trace_id]; reload(); } }, r.trace_id.slice(0, 8)));
           if (r.provider_name) parts.push(h('span', { class: 'p' }, r.provider_name));
           if (r.model) parts.push(h('span', { class: 'm' }, r.model));
           if (r.request_type) parts.push(h('span', { class: 'rt ' + r.request_type, 'data-tip': RT_TIP[r.request_type] || '' }, r.request_type));

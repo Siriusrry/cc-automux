@@ -25,6 +25,7 @@ var stringFilterNames = map[string]struct{}{
 	"provider_name":        {},
 	"model":                {},
 	"session_id":           {},
+	"trace_id":             {},
 	"patch_id":             {},
 	"error_code":           {},
 	"cancel_reason":        {},

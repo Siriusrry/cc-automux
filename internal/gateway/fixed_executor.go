@@ -33,6 +33,7 @@ type fixedLifecycle struct {
 	errorLimit    int
 	bodyTruncated bool
 	stream        bool
+	traceID       string
 	control       *upstreamAttempt
 	mu            sync.Mutex
 
@@ -351,7 +352,7 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 		execution = nil
 		return current.Close()
 	}
-	lifecycle := &fixedLifecycle{stream: prepared.Plan.Stream, errorLimit: h.limits.ErrorTextBytes}
+	lifecycle := &fixedLifecycle{stream: prepared.Plan.Stream, traceID: prepared.Plan.TraceID, errorLimit: h.limits.ErrorTextBytes}
 	upstream := ""
 	lifecycle.cleanup = func() error {
 		patchErr := closeExecution()
@@ -1274,10 +1275,12 @@ func (h *Handler) recordFixedCall(ctx context.Context, target *provider.Compiled
 
 func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *provider.CompiledFixedTarget, sessionID, model, upstream string, attempt, status int, raw string) {
 	stream := false
+	traceID := ""
 	if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {
 		stream = lifecycle.stream
+		traceID = lifecycle.traceID
 	}
-	event := Event{Kind: kind, Stream: stream, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
+	event := Event{Kind: kind, Stream: stream, TraceID: traceID, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
 	if kind == EventFailure {
 		raw, truncated := textlimit.Prefix(event.RawError, h.limits.ErrorTextBytes)
 		event.RawError = raw

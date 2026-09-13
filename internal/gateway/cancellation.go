@@ -35,7 +35,7 @@ func (w *downstreamWriter) Write(p []byte) (int, error) {
 }
 
 func (h *Handler) recordBetweenAttemptCanceled(plan traffic.RequestPlan, attempt int) {
-	h.record(Event{Kind: EventCanceled, SessionID: plan.OriginalSessionID, Model: plan.EffectiveModel, RequestType: plan.RequestType, Stream: plan.Stream, Attempt: attempt, CancelReason: canceledByClient, CancelPhase: cancelBeforeUpstream})
+	h.record(Event{Kind: EventCanceled, SessionID: plan.OriginalSessionID, Model: plan.EffectiveModel, RequestType: plan.RequestType, Stream: plan.Stream, TraceID: plan.TraceID, Attempt: attempt, CancelReason: canceledByClient, CancelPhase: cancelBeforeUpstream})
 }
 
 type copyCancellation struct {

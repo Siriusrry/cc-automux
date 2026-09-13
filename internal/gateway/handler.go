@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,6 +174,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	var traceBytes [16]byte
+	if _, err := rand.Read(traceBytes[:]); err != nil {
+		writeError(w, http.StatusInternalServerError, "request_prepare_failed", "request could not be identified")
+		return
+	}
+	traceID := hex.EncodeToString(traceBytes[:])
 	h.active.Add(1)
 	defer h.active.Add(-1)
 	if r.Body == nil {
@@ -210,7 +218,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer captured.Close()
-	ingress, err := h.prepareIngress(captured, index, r)
+	ingress, err := h.prepareIngress(captured, index, r, traceID)
 	if err != nil {
 		if errors.Is(err, traffic.ErrAmbiguousRequestType) {
 			writeError(w, http.StatusBadRequest, "ambiguous_request_type", "request type is ambiguous")
@@ -316,6 +324,7 @@ func (h *Handler) fixedDiagnosticScope(snapshot scheduler.Snapshot, target *prov
 type requestAttemptLease struct {
 	scheduler.AttemptLease
 	stream  bool
+	traceID string
 	started bool
 	control *upstreamAttempt
 }
@@ -429,6 +438,7 @@ func (h *Handler) outcomeEvent(kind EventKind, lease requestAttemptLease, outcom
 		EndReason:              outcomeEndReason(lease, outcome),
 		Kind:                   kind,
 		Stream:                 lease.stream,
+		TraceID:                lease.traceID,
 		SessionID:              outcome.SessionID,
 		Model:                  lease.Model,
 		RequestType:            lease.RequestType,

@@ -358,6 +358,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		slog.String("model", event.Model),
 		slog.String("request_type", string(event.RequestType)),
 		slog.Bool("stream", event.Stream),
+		slog.String("trace_id", event.TraceID),
 	}
 	if event.EndReason != "" && (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover) {
 		attrs = append(attrs, slog.String("end_reason", string(event.EndReason)))

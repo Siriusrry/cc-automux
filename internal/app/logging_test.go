@@ -93,6 +93,7 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 		SessionID:    "session-id",
 		Model:        "model-name",
 		RequestType:  traffic.RequestTypeNormal,
+		TraceID:      "1234567890abcdef1234567890abcdef",
 		Attempt:      1,
 		UpstreamURL:  "https://provider.example/v1/messages",
 	}
@@ -149,7 +150,7 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 		t.Fatalf("failover record = %#v", records[3])
 	}
 	for i, record := range records {
-		if record["stream"] != (i == 0) {
+		if record["trace_id"] != "1234567890abcdef1234567890abcdef" || record["stream"] != (i == 0) {
 			t.Fatalf("stream missing or invalid: %#v", record)
 		}
 		if record["msg"] != "gateway" || record["event"] != nil {

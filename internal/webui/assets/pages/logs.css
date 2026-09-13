@@ -109,3 +109,5 @@
   .lg-range { grid-template-columns: 1fr; }
   .lg-range .to { display: none; }
 }
+
+.lg .lg-trace { cursor: pointer; font-family: var(--mono); }

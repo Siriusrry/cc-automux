@@ -111,7 +111,7 @@ func (h *Handler) finishFixedHTTPFailure(ctx context.Context, w http.ResponseWri
 	}
 	record := func(raw string, incomplete incompleteMark) Event {
 		h.recordFixedCall(ctx, target, automode.FixedTargetCall{UpstreamURL: upstream, GatewayStatus: gatewayStatus, GatewayError: code, UpstreamStatus: status, UpstreamHeaders: response.Header.Clone(), UpstreamBody: raw, SessionID: session, Error: raw, UpstreamBodyTruncated: incomplete == incompleteTruncated})
-		event := Event{Kind: EventFailure, ProviderID: target.ID, SessionID: session, Model: model, RequestType: traffic.RequestTypeClassifier, Stream: lifecycle.stream, Attempt: 1, UpstreamURL: upstream, HTTPStatus: status, EndReason: endHTTPError, RawError: raw, RawErrorIncomplete: incomplete}
+		event := Event{Kind: EventFailure, ProviderID: target.ID, SessionID: session, Model: model, RequestType: traffic.RequestTypeClassifier, Stream: lifecycle.stream, TraceID: lifecycle.traceID, Attempt: 1, UpstreamURL: upstream, HTTPStatus: status, EndReason: endHTTPError, RawError: raw, RawErrorIncomplete: incomplete}
 		h.record(event)
 		return event
 	}

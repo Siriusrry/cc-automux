@@ -121,6 +121,7 @@ type DetectionRequest struct {
 	OriginalModel     string
 	OriginalSessionID string
 	Stream            bool
+	TraceID           string
 	Headers           HeaderView
 }
 
@@ -131,6 +132,7 @@ type RequestView struct {
 	OriginalModel     string
 	OriginalSessionID string
 	Stream            bool
+	TraceID           string
 	Headers           HeaderView
 }
 
@@ -143,6 +145,7 @@ func (d DetectionRequest) View() RequestView {
 		OriginalModel:     d.OriginalModel,
 		OriginalSessionID: d.OriginalSessionID,
 		Stream:            d.Stream,
+		TraceID:           d.TraceID,
 		Headers:           normalizeHeaders(d.Headers),
 	}
 }
@@ -166,6 +169,7 @@ func NewDetectionRequestFromView(view RequestView) DetectionRequest {
 		OriginalModel:     view.OriginalModel,
 		OriginalSessionID: view.OriginalSessionID,
 		Stream:            view.Stream,
+		TraceID:           view.TraceID,
 		Headers:           normalizeHeaders(view.Headers),
 	}
 }
@@ -177,6 +181,7 @@ type IngressRequest struct {
 	OriginalModel     string
 	OriginalSessionID string
 	Stream            bool
+	TraceID           string
 	RequestType       RequestType
 }
 
@@ -197,6 +202,7 @@ func NewIngressRequest(d DetectionRequest, requestType RequestType) (IngressRequ
 		OriginalModel:     d.OriginalModel,
 		OriginalSessionID: d.OriginalSessionID,
 		Stream:            d.Stream,
+		TraceID:           d.TraceID,
 		RequestType:       requestType,
 	}, nil
 }
@@ -224,6 +230,7 @@ type RequestPlan struct {
 	EffectiveModel    string
 	OriginalSessionID string
 	Stream            bool
+	TraceID           string
 	RequestType       RequestType
 }
 

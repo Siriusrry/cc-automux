@@ -59,12 +59,13 @@ func capturedFlowView(runtimeSnapshot, capturedSnapshot scheduler.Snapshot, norm
 	return capturedFlowSnapshot{snapshot: capturedSnapshot, view: view, normal: normal}
 }
 
-func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, request *http.Request) (traffic.IngressRequest, error) {
+func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, request *http.Request, traceID string) (traffic.IngressRequest, error) {
 	model := index.ModelValue()
 	session := singleSessionHeader(request.Header)
 	stream := requestStream(index)
 	detection := traffic.NewDetectionRequest(body, index, model, session, traffic.NewHeaderView(request.Header))
 	detection.Stream = stream
+	detection.TraceID = traceID
 	if h.detectors == nil {
 		return traffic.IngressRequest{}, traffic.ErrNilDetectorRegistry
 	}
@@ -131,6 +132,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			Model:       prepared.Plan.EffectiveModel,
 			RequestType: prepared.Plan.RequestType,
 			Stream:      prepared.Plan.Stream,
+			TraceID:     prepared.Plan.TraceID,
 			HTTPStatus:  http.StatusNotFound,
 			ErrorCode:   ErrorCodeModelNotConfigured,
 			RawError:    "Requested model is not configured in any enabled provider.",
@@ -183,7 +185,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			h.finishCapturedFailure(w, incoming.Context(), prepared.BaseBody, last, err)
 			return
 		}
-		lease := requestAttemptLease{AttemptLease: selected, stream: prepared.Plan.Stream}
+		lease := requestAttemptLease{AttemptLease: selected, stream: prepared.Plan.Stream, traceID: prepared.Plan.TraceID}
 		if lease.Provider == nil {
 			if requestCanceled(incoming.Context()) {
 				if last != nil {
@@ -410,7 +412,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		return cancelAttempt(mutable.Body, requestBody, nil)
 	}
 	lease.started = true
-	h.record(Event{Kind: EventForward, Stream: prepared.Plan.Stream, ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
+	h.record(Event{Kind: EventForward, Stream: prepared.Plan.Stream, TraceID: prepared.Plan.TraceID, ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
 	control := h.newUpstreamAttempt(ctx, prepared.Plan.Stream)
 	lease.control = control
 	defer func() {
