@@ -82,7 +82,7 @@
             ['Started', fmt.dateTime(st.start_time) + ' · up ' + fmt.duration(st.uptime_seconds)],
             ['Listening on', h('span', { class: 'mono' }, st.listen_addr)],
             [h('span', { 'data-tip': 'Messages requests being served right now, including retries and failovers still in progress.' }, 'Requests in flight'), String(st.active_data_requests)],
-            [h('span', { 'data-tip': "Sessions currently pinned to a provider. A pin lasts one hour after the session's last request." }, 'Sticky sessions'), String(st.sticky_assignment_count)],
+            [h('span', { 'data-tip': "Session bindings currently pinned to a provider, keyed by session, model, and request type. A binding lasts one hour after its last request. Not the number of running Claude Code sessions." }, 'Sticky bindings'), String(st.sticky_assignment_count)],
             [h('span', { 'data-tip': 'idle — nothing pending\npending — the new configuration is written and waits for the re-exec\nrestarting — the new process is binding\nfailed — the previous configuration and listener were restored' }, 'Restart'), [pill(r.state === 'idle' ? 'idle' : r.state, r.state === 'idle' ? 'mist' : r.state === 'failed' ? 'bad' : 'warn', 'plain'), r.pending ? ' pending configuration written' : '', r.requested_at ? ' · ' + fmt.relative(r.requested_at) : '']],
             r.last_error ? ['Last restart error', h('span', { class: 'mono' }, r.last_error)] : null
           ], { compact: true }),

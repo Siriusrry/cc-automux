@@ -78,8 +78,8 @@
         const patchNames = p.patches.map(id => patchIndex[id] ? patchIndex[id].name : id);
         const patchesCell = tip(h('span', { class: 'm' }, icon('patch'), String(p.patches.length)), () => tipBlock({ title: 'Provider patches · ' + p.patches.length, list: patchNames,
           note: patchNames.length ? 'Request rewrites applied to every request sent here, in this order.' : 'No patches — requests are forwarded exactly as received.' }));
-        const sessionsCell = tip(h('span', { class: 'm' }, icon('sessions'), String(p.active_session_count)), () => tipBlock({ title: 'Sticky sessions · ' + p.active_session_count,
-          note: (p.active_session_count ? 'Sessions currently pinned to this provider. ' : 'No session is pinned to this provider right now. ') + 'A session keeps its provider for one hour after its last request, so a conversation stays on one upstream.' }));
+        const sessionsCell = tip(h('span', { class: 'm' }, icon('sessions'), String(p.active_session_count)), () => tipBlock({ title: 'Sticky bindings · ' + p.active_session_count,
+          note: (p.active_session_count ? 'Session bindings currently pinned to this provider. ' : 'No session is pinned to this provider right now. ') + 'A session keeps its provider for one hour after its last request, so a conversation stays on one upstream.' }));
         const prioCell = tip(h('span', { class: 'prio' }, 'P ' + fmt.priorityLabel(p.priority)), priorityTip(p.priority));
         // Hover targets sit above the row-wide link, so a click on them navigates explicitly.
         return h('div', { class: 'row-card pr-row' + (stat !== 'active' ? ' dim' : ''), onclick: (e) => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
@@ -204,7 +204,7 @@
 
           const sessions = diag.sessions.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl compact' }, h('thead', null, h('tr', null, h('th', null, 'Session'), h('th', null, 'Model'), h('th', null, 'Type'), h('th', null, 'Last used'))),
             h('tbody', null, diag.sessions.map(s => h('tr', null, h('td', { class: 'sid nowrap', 'data-tip': s.session_id }, fmt.middle(s.session_id, 13)), h('td', { class: 'mono wrap-any' }, s.model), h('td', null, tag(s.request_type, s.request_type === 'classifier' ? 'iris' : '')), h('td', { class: 'nowrap' }, fmt.relative(s.last_used_at))))))) : h('p', { class: 'lede', style: { margin: 0 } }, 'No session is currently pinned to this provider.');
-          const sessionCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('p', { class: 'eyebrow' }, 'Sticky sessions'), pill(String(diag.active_session_count), 'iris', 'plain')), sessions);
+          const sessionCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('p', { class: 'eyebrow' }, 'Sticky bindings'), pill(String(diag.active_session_count), 'iris', 'plain')), sessions);
 
           const dangerCard = h('div', { class: 'card danger-card' }, h('p', { class: 'eyebrow mist' }, 'Remove'), h('p', { class: 'lede' }, 'Deleting stops routing to this provider immediately. Sessions pinned to it are released and re-scheduled.'),
             h('button', { class: 'btn danger', type: 'button', onclick: async () => {

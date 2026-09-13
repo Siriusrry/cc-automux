@@ -39,7 +39,7 @@
         g.healthy, 'of ' + status.active_provider_count + ' active', [capSeg(c.degraded + ' degraded', 'warn'), capSeg((g.cooldown + c.cooldown) + ' cooling', 'bad'), capSeg(g.disabled + ' health off', 'mist')]),
       stat('amber', 'bolt', 'In flight', 'Messages requests being served right now, including retries and failovers still in progress.',
         status.active_data_requests, null, capSeg('Messages requests right now')),
-      stat('iris', 'sessions', 'Sticky sessions', "Sessions currently pinned to a provider. A pin lasts one hour after the session's last request, so a conversation keeps its upstream.",
+      stat('iris', 'sessions', 'Sticky bindings', "Session bindings currently pinned to a provider, keyed by session, model, and request type. A binding lasts one hour after its last request, so a conversation keeps its upstream. This is not the number of running Claude Code sessions.",
         status.sticky_assignment_count, null, capSeg('pinned to a provider · 1h sliding'))
     );
   }
