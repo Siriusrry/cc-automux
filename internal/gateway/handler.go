@@ -30,6 +30,7 @@ type requestScanSnapshot interface {
 }
 
 type Options struct {
+	UpstreamLimits   UpstreamLimits
 	ClientPool       *ClientPool
 	Recorder         EventRecorder
 	ReplayDirectory  string
@@ -47,6 +48,9 @@ type Options struct {
 }
 
 type Handler struct {
+	limits           UpstreamLimits
+	shutdown         context.Context
+	stopShutdown     context.CancelFunc
 	snapshot         SnapshotFunc
 	selector         scheduler.Selector
 	clients          *ClientPool
@@ -109,7 +113,9 @@ func NewWithOptions(snapshot SnapshotFunc, selector scheduler.Selector, options 
 	if diagnostics == nil {
 		diagnostics = automode.NewDiagnostics()
 	}
+	shutdown, stopShutdown := context.WithCancel(context.Background())
 	return &Handler{
+		limits: options.UpstreamLimits.defaults(), shutdown: shutdown, stopShutdown: stopShutdown,
 		snapshot:         snapshot,
 		selector:         selector,
 		clients:          clients,
@@ -127,6 +133,7 @@ func (h *Handler) Close() error {
 	if h == nil {
 		return nil
 	}
+	h.stopShutdown()
 	return h.clients.Close()
 }
 
@@ -310,6 +317,7 @@ type requestAttemptLease struct {
 	scheduler.AttemptLease
 	stream  bool
 	started bool
+	control *upstreamAttempt
 }
 
 type capturedFailure struct {
@@ -320,6 +328,8 @@ type capturedFailure struct {
 	headers      http.Header
 	body         []byte
 	transport    bool
+	errorCode    string
+	errorMessage string
 	patchFailure bool
 	patchID      string
 	patchStage   string
@@ -459,6 +469,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, ctx context.Context, res
 }
 
 func (h *Handler) writeCapturedFailure(w http.ResponseWriter, failure *capturedFailure) {
+	if failure != nil && failure.errorCode != "" {
+		writeError(w, http.StatusGatewayTimeout, failure.errorCode, failure.errorMessage)
+		return
+	}
 	if failure != nil && (failure.patchFailure || failure.patchID != "") {
 		writeError(w, http.StatusBadGateway, "patch_failed", "provider request patch failed")
 		return
@@ -510,6 +524,7 @@ func (h *Handler) recordOutcomeWithPatch(kind EventKind, lease requestAttemptLea
 func (h *Handler) outcomeEvent(kind EventKind, lease requestAttemptLease, outcome scheduler.Outcome, attempt int, update scheduler.HealthUpdate) Event {
 	item := lease.Provider
 	event := Event{
+		EndReason:              outcomeEndReason(lease, outcome),
 		Kind:                   kind,
 		Stream:                 lease.stream,
 		SessionID:              outcome.SessionID,

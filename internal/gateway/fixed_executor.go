@@ -29,8 +29,9 @@ type fixedDiagnosticContextKey struct{}
 // terminal outcome after EventForward; the lifecycle also lets that outcome
 // include cleanup errors before a response is made visible.
 type fixedLifecycle struct {
-	stream bool
-	mu     sync.Mutex
+	stream  bool
+	control *upstreamAttempt
+	mu      sync.Mutex
 
 	started         bool
 	responseStarted bool
@@ -285,21 +286,9 @@ func consumeFixedResponse(response *http.Response) fixedResponseFacts {
 	return facts
 }
 
-func fixedRequestCanceled(ctx context.Context, response *http.Response) bool {
-	if requestCanceled(ctx) {
-		return true
-	}
-	return response != nil && response.Request != nil && requestCanceled(response.Request.Context())
-}
-
-func fixedCancellationCause(ctx context.Context, response *http.Response, cause error) error {
-	if ctx != nil && ctx.Err() != nil {
-		cause = errors.Join(cause, ctx.Err())
-	}
-	if response != nil && response.Request != nil && response.Request.Context() != nil && response.Request.Context().Err() != nil {
-		cause = errors.Join(cause, response.Request.Context().Err())
-	}
-	return cause
+func fixedRequestCanceled(ctx context.Context, _ *http.Response) bool { return requestCanceled(ctx) }
+func fixedCancellationCause(ctx context.Context, _ *http.Response, cause error) error {
+	return errors.Join(cause, ctx.Err())
 }
 
 func withFixedDiagnosticScope(ctx context.Context, scope automode.DiagnosticScope, scoped bool) context.Context {
@@ -603,9 +592,18 @@ func (h *Handler) forwardFixedExecution(w http.ResponseWriter, incoming *http.Re
 	}
 	lifecycle.markStarted()
 	h.recordFixedEvent(ctx, EventForward, target, sessionID, model, upstream, 1, 0, "")
+	control := h.newUpstreamAttempt(ctx, prepared.Plan.Stream)
+	lifecycle.control = control
+	defer control.close()
+	request = request.WithContext(control.ctx)
 	response, requestErr := clientLease.Client().Do(request)
+	response, requestErr = control.receiveHeaders(response, requestErr)
 	requestCloseErr := lifecycle.closeRequestBody()
 	if requestErr != nil {
+		if code, message, ok := timeoutResponse(requestErr); ok {
+			h.fixedTerminalForModelWithRaw(ctx, w, model, target, sessionID, upstream, http.StatusGatewayTimeout, code, message, requestErr, 0, nil, "", "")
+			return
+		}
 		facts := consumeFixedResponse(response)
 		lifecycle.observeResponse(facts.status, facts.headers, nil)
 		lifecycle.observeBody(string(facts.body))
@@ -1277,6 +1275,17 @@ func (h *Handler) recordFixedEvent(ctx context.Context, kind EventKind, target *
 		stream = lifecycle.stream
 	}
 	event := Event{Kind: kind, Stream: stream, SessionID: sessionID, Model: model, RequestType: traffic.RequestTypeClassifier, Attempt: attempt, UpstreamURL: upstream, HTTPStatus: status, RawError: raw}
+	if kind == EventFailure {
+		event.EndReason = "local_error"
+		if status != 0 {
+			event.EndReason = "http_error"
+		}
+		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil && lifecycle.control != nil {
+			if reason := lifecycle.control.reason(); reason == "response_header_timeout" || reason == "response_idle_timeout" {
+				event.EndReason = reason
+			}
+		}
+	}
 	if kind == EventCanceled {
 		started := false
 		if lifecycle := fixedLifecycleFromContext(ctx); lifecycle != nil {

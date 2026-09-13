@@ -29,6 +29,7 @@ var stringFilterNames = map[string]struct{}{
 	"error_code":    {},
 	"cancel_reason": {},
 	"cancel_phase":  {},
+	"end_reason":    {},
 }
 
 var boolFilterNames = map[string]struct{}{

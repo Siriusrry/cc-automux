@@ -36,6 +36,7 @@ type Event struct {
 	ResponseStarted        bool
 	CancelReason           string
 	CancelPhase            string
+	EndReason              string
 	Attempt                int
 	UpstreamURL            string
 	HTTPStatus             int
@@ -69,3 +70,23 @@ func (f EventRecorderFunc) RecordGatewayEvent(event Event) {
 type discardRecorder struct{}
 
 func (discardRecorder) RecordGatewayEvent(Event) {}
+
+func outcomeEndReason(lease requestAttemptLease, outcome scheduler.Outcome) string {
+	switch outcome.Class {
+	case scheduler.FailureNone, scheduler.FailureClientCanceled, scheduler.FailureDownstream:
+		return ""
+	}
+	if reason := lease.control.reason(); reason == "response_header_timeout" || reason == "response_idle_timeout" {
+		return reason
+	}
+	if outcome.Class == scheduler.FailureChannelStream {
+		return "stream_interrupted"
+	}
+	if outcome.HTTPStatus != 0 {
+		return "http_error"
+	}
+	if outcome.Class == scheduler.FailureGlobalTransient {
+		return "transport_error"
+	}
+	return "local_error"
+}

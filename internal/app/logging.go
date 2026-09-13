@@ -359,6 +359,9 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		slog.String("request_type", string(event.RequestType)),
 		slog.Bool("stream", event.Stream),
 	}
+	if event.EndReason != "" && (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover) {
+		attrs = append(attrs, slog.String("end_reason", event.EndReason))
+	}
 	if event.Kind == gateway.EventCanceled {
 		attrs = append(attrs, slog.Bool("response_started", event.ResponseStarted), slog.String("cancel_reason", event.CancelReason), slog.String("cancel_phase", event.CancelPhase))
 		if event.CancelReason == "client_disconnected" {

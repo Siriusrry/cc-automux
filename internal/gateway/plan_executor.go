@@ -398,7 +398,12 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	}
 	lease.started = true
 	h.record(Event{Kind: EventForward, Stream: prepared.Plan.Stream, ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
+	control := h.newUpstreamAttempt(ctx, prepared.Plan.Stream)
+	lease.control = control
+	defer control.close()
+	request = request.WithContext(control.ctx)
 	response, requestErr := clientLease.Client().Do(request)
+	response, requestErr = control.receiveHeaders(response, requestErr)
 	requestCloseErr := requestBody.Close()
 	if requestErr != nil {
 		if response != nil && response.Body != nil {
@@ -531,6 +536,11 @@ func (h *Handler) requestPatchFailure(w http.ResponseWriter, base bodyfile.Body,
 }
 
 func (h *Handler) handlePlanTransportError(w http.ResponseWriter, ctx context.Context, base bodyfile.Body, lease requestAttemptLease, sessionID string, attempt int, upstream string, err error) (*capturedFailure, bool) {
+	if code, message, ok := timeoutResponse(err); ok {
+		outcome := scheduler.Outcome{Class: scheduler.FailureChannelImmediate, UpstreamURL: upstream, RawError: message, SessionID: sessionID}
+		update := h.selector.Report(lease.AttemptLease, outcome)
+		return &capturedFailure{lease: lease, outcome: outcome, update: update, attempt: attempt, errorCode: code, errorMessage: message}, false
+	}
 	outcome := scheduler.Outcome{Class: scheduler.FailureGlobalTransient, UpstreamURL: upstream, RawError: err.Error(), SessionID: sessionID}
 	if requestCanceled(ctx) {
 		outcome.Class = scheduler.FailureClientCanceled
