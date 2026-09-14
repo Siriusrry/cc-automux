@@ -172,7 +172,7 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 	currentSnapshot := s.revision == 0 || snapshot.Revision() == s.revision
 	first := !request.initialized
 	var assigned *assignmentEntry
-	if currentSnapshot && key.SessionID != "" {
+	if first && currentSnapshot && key.SessionID != "" {
 		assigned = s.assignments[key]
 	}
 	if first {
@@ -229,15 +229,18 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 					}
 				}
 				request.visited[item.ID] = true
-				fromSticky := assigned != nil && item.ID == assigned.assignment.ProviderID && item.Generation == assigned.assignment.Generation
+				fromSticky := request.source.ProviderID != "" && item.ID == request.source.ProviderID && item.Generation == request.source.Generation
 				allocate := first && assigned == nil && request.source.ProviderID == "" && currentSnapshot
 				if allocate && key.SessionID != "" {
 					s.putAssignmentLocked(key, item, now)
 					assigned = s.assignments[key]
 					request.source = migrationSource(assigned)
 				}
-				if fromSticky {
-					s.touchAssignmentLocked(assigned, now)
+				if fromSticky && currentSnapshot {
+					entry := s.assignments[key]
+					if entry != nil && entry.version == request.source.Version {
+						s.touchAssignmentLocked(entry, now)
+					}
 				}
 				source := request.source
 				migration := source.ProviderID != "" && (item.ID != source.ProviderID || item.Generation != source.Generation)
@@ -267,9 +270,8 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 	return AttemptLease{}, &UnavailableError{RetryAt: earliestRetry}
 }
 
-func migrationSource(entry *assignmentEntry) pendingMigration {
-	return pendingMigration{ProviderID: entry.assignment.ProviderID, Generation: entry.assignment.Generation,
-		CreatedAt: entry.assignment.CreatedAt, LastUsedAt: entry.assignment.LastUsedAt, Version: entry.version}
+func migrationSource(entry *assignmentEntry) affinitySource {
+	return affinitySource{ProviderID: entry.assignment.ProviderID, Generation: entry.assignment.Generation, Version: entry.version}
 }
 
 func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) (HealthUpdate, uint64) {

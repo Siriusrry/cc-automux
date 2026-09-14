@@ -153,8 +153,8 @@ type AttemptLease struct {
 
 	stickyKey StickyKey
 	// stickyMigration carries the assignment observed at the start of this
-	// request. A successful replacement can then
-	// atomically move the session affinity only if that source assignment is
+	// request. A successful replacement can atomically move affinity only if
+	// that source assignment is
 	// still current; unrelated concurrent requests cannot overwrite it.
 	stickyMigration        bool
 	stickySourceProviderID string
@@ -208,7 +208,16 @@ type RequestSelection struct {
 	initialized  bool
 	ordered      []*provider.CompiledProvider
 	visited      map[string]bool
-	source       pendingMigration
+	source       affinitySource
+}
+
+// affinitySource is the identity/version observed by this request. Unlike a
+// cooldown tombstone it owns no lifetime timestamps and is never refreshed from
+// another request's replacement binding.
+type affinitySource struct {
+	ProviderID string
+	Generation ProviderGeneration
+	Version    uint64
 }
 
 func NewRequestSelection(policy AttemptPolicy) *RequestSelection {

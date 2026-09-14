@@ -1425,3 +1425,33 @@ func TestBlockedProbePreservesRetryAtFromBlockingTierAndAbove(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryDoesNotRefreshReplacementBinding(t *testing.T) {
+	now := time.Now()
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, func() time.Time { return now })
+	p := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{p}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+	request := NewRequestSelection(snapshot.AttemptPolicy())
+	first, err := selector.Acquire(snapshot, key, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.StartAttempt()
+	selector.mu.Lock()
+	selector.putAssignmentLocked(key, p, now)
+	selector.mu.Unlock()
+	replacement := selector.assignments[key]
+	now = now.Add(time.Minute)
+	retry, err := selector.Acquire(snapshot, key, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retry.FromSticky || replacement.assignment.LastUsedAt.Equal(now) {
+		t.Fatal("retry refreshed a replacement binding")
+	}
+	selector.Report(first, Outcome{Class: FailureClientCanceled})
+	selector.Report(retry, Outcome{Class: FailureNone})
+}
