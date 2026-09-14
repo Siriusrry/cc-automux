@@ -252,7 +252,8 @@ func (h *Handler) finishLocalSelectionFailure(w http.ResponseWriter, base bodyfi
 }
 
 func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, prepared traffic.PreparedRequest, lease requestAttemptLease, sessionID string, selection *scheduler.RequestSelection) (*capturedFailure, bool) {
-	attempt := 0 // No call has been issued; preparation failures have no call number.
+	// Preparation logs use the intended call number without consuming budget.
+	attempt := selection.AttemptsUsed() + 1
 	item := lease.Provider
 	if item == nil || incoming == nil || incoming.URL == nil {
 		return nil, true
@@ -260,7 +261,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	ctx := incoming.Context()
 	if requestCanceled(ctx) {
 		_ = prepared.BaseBody.Close()
-		h.reportClientCanceledWithAttempt(lease, sessionID, "", 0, selection.AttemptsUsed()+1, contextError(ctx, nil))
+		h.reportClientCanceledWithAttempt(lease, sessionID, "", 0, attempt, contextError(ctx, nil))
 		return nil, true
 	}
 	url, err := upstreamURL(item, incoming.URL)
@@ -295,7 +296,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 			closeErr = requestBody.Close()
 		}
 		cleanupErr := closeRequestAttempt(base, attemptBody, execution, true)
-		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), 0, selection.AttemptsUsed()+1, errors.Join(contextError(ctx, nil), extra, closeErr, cleanupErr))
+		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), 0, attempt, errors.Join(contextError(ctx, nil), extra, closeErr, cleanupErr))
 		return nil, true
 	}
 	if requestCanceled(ctx) {

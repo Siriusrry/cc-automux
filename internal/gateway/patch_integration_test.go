@@ -159,7 +159,7 @@ func TestGatewayRequestPatchFailureTerminatesWithoutFailover(t *testing.T) {
 		t.Fatalf("reports = %#v", reports)
 	}
 	got := events.snapshot()
-	if len(got) != 1 || got[0].Kind != EventFailure || got[0].Attempt != 0 {
+	if len(got) != 1 || got[0].Kind != EventFailure || got[0].Attempt != 1 {
 		t.Fatalf("events = %#v", got)
 	}
 	if got[0].PatchID != patchID || got[0].PatchStage != string(patch.StageRequest) || got[0].ProviderID != first.ID {
@@ -733,5 +733,97 @@ func TestGatewayPinsUncompressedUpstreamOnlyWhenRewritingResponse(t *testing.T) 
 				t.Fatalf("response patch applied = %v, want %v", patched, want)
 			}
 		})
+	}
+}
+
+type preparationFailureSelector struct {
+	fakeSelector
+	selection *scheduler.RequestSelection
+}
+
+func (s *preparationFailureSelector) Acquire(snapshot scheduler.Snapshot, key scheduler.StickyKey, selection *scheduler.RequestSelection) (scheduler.AttemptLease, error) {
+	s.selection = selection
+	return s.fakeSelector.Acquire(snapshot, key, selection)
+}
+
+func TestPreparationFailureKeepsIntendedAttemptWithoutSpendingBudget(t *testing.T) {
+	for _, priorCalls := range []int{0, 1} {
+		for _, mode := range []string{"request_build", "request_patch", "replay", "auth", "client_pool"} {
+			t.Run(fmt.Sprintf("%s/after_%d_calls", mode, priorCalls), func(t *testing.T) {
+				var calls atomic.Int32
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					io.Copy(io.Discard, r.Body)
+					calls.Add(1)
+					w.WriteHeader(http.StatusServiceUnavailable)
+					io.WriteString(w, "retryable upstream failure")
+				}))
+				defer upstream.Close()
+				pool := NewClientPool()
+				const patchID = "test-preparation-failure"
+				registry := testRequestPatchRegistry(t, patchID, func(patch.FactoryContext) patch.RequestPatch {
+					return requestPatchFunc(func(_ patch.PatchContext, request *patch.MutableRequest) error {
+						switch mode {
+						case "request_patch":
+							return errors.New("request patch failed")
+						case "replay":
+							return request.Body.Close()
+						case "client_pool":
+							return pool.Close()
+						}
+						return nil
+					})
+				})
+				first := compileWithRegistry(t, registry, "11111111-1111-4111-8111-111111111111", "first", upstream.URL, "key-a", "m")
+				target := compileWithRegistry(t, registry, "22222222-2222-4222-8222-222222222222", "target", upstream.URL, "key-b", "m", patchID)
+				selected := target.Clone()
+				switch mode {
+				case "request_build":
+					selected.BaseURL = nil
+				case "auth":
+					selected.APIKey = ""
+				}
+				leases := []scheduler.AttemptLease{leaseFor(selected, "m")}
+				if priorCalls > 0 {
+					leases = append([]scheduler.AttemptLease{leaseFor(first, "m")}, leases...)
+				}
+				selector := &preparationFailureSelector{fakeSelector: fakeSelector{leases: leases}}
+				snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{first, target}}
+				events := &eventCollector{}
+				handler := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{Recorder: events, ClientPool: pool})
+				defer handler.Close()
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`))
+				wantStatus := http.StatusBadGateway
+				if mode == "replay" || mode == "client_pool" {
+					wantStatus = http.StatusInternalServerError
+				}
+				if response.Code != wantStatus || int(calls.Load()) != priorCalls || selector.selection.AttemptsUsed() != priorCalls {
+					t.Fatalf("status=%d calls=%d budget_used=%d", response.Code, calls.Load(), selector.selection.AttemptsUsed())
+				}
+				got := waitGatewayEvents(t, events, 2*priorCalls+1)
+				var failure, failover Event
+				for _, event := range got {
+					if event.Kind == EventFailure {
+						failure = event
+					}
+					if event.Kind == EventFailover {
+						failover = event
+					}
+					if event.Kind == EventForward && event.ProviderID == target.ID {
+						t.Fatal("preparation failure issued a forward")
+					}
+				}
+				if failure.Attempt != priorCalls+1 || failure.ProviderID != target.ID {
+					t.Fatalf("failure=%#v", failure)
+				}
+				if priorCalls > 0 && (failover.Attempt != priorCalls || failover.NextAttempt != failure.Attempt || failover.NextProviderID != failure.ProviderID || failover.TraceID != failure.TraceID) {
+					t.Fatalf("failover=%#v failure=%#v", failover, failure)
+				}
+				_, reports := selector.snapshot()
+				if len(reports) != priorCalls+1 || reports[len(reports)-1].Class != scheduler.FailureNeutral {
+					t.Fatalf("reports=%#v", reports)
+				}
+			})
+		}
 	}
 }
