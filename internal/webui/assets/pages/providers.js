@@ -26,17 +26,77 @@
       ctx.root.appendChild(host);
       let disposed = false;
       let patchIndex = {};
+      let loadEpoch = 0;
+      const duplicating = new Set();
+      const duplicateButtons = new Map();
 
       async function load() {
+        const epoch = ++loadEpoch;
         try {
           const [data, patchList] = await Promise.all([store.providerHealth(), store.patches().catch(() => [])]);
-          if (disposed) return;
+          if (disposed || epoch !== loadEpoch) return;
           patchIndex = {};
           (Array.isArray(patchList) ? patchList : (patchList && patchList.patches) || []).forEach(x => { patchIndex[x.id] = x; });
           render(data.providers);
-        } catch (e) { if (!disposed) replace(host, errorCard(e.detail || e.message, load)); }
+        } catch (e) { if (!disposed && epoch === loadEpoch) replace(host, errorCard(e.detail || e.message, load)); }
+      }
+      async function duplicate(id) {
+        if (disposed || duplicating.has(id)) return;
+        duplicating.add(id);
+        duplicateButtons.get(id).disabled = true;
+        let posting = false;
+        try {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const response = await api.get('/api/v1/providers', { response: true });
+            if (disposed) return;
+            // Keep JSON number tokens as text while copying. Provider priority
+            // accepts int64 values that JavaScript numbers cannot all represent.
+            const list = JSON.parse(response.text.replace(/"(?:\\.|[^"\\])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
+              token => token[0] === '"' ? token : JSON.stringify(token)));
+            const source = list.find(p => p.id === id);
+            if (!source) {
+              toast('Could not duplicate provider: it no longer exists.', 'bad');
+              store.invalidate();
+              return;
+            }
+            const names = new Set(list.map(p => p.name));
+            const base = source.name + ' copy';
+            let name = base;
+            for (let suffix = 2; names.has(name); suffix++) name = base + ' ' + suffix;
+            const copy = JSON.parse(JSON.stringify(source));
+            const priority = copy.priority;
+            delete copy.id; delete copy.priority;
+            copy.name = name;
+            if (!/^-?(?:0|[1-9]\d*)$/.test(priority)) throw new Error('Invalid provider priority in service response.');
+            const body = JSON.stringify(copy).slice(0, -1) + ',"priority":' + priority + '}';
+            try {
+              posting = true;
+              const created = await api.write('POST', '/api/v1/providers', body, { rawBody: true });
+              posting = false;
+              store.invalidate();
+              if (!disposed) toast('Created ' + created.name);
+              return;
+            } catch (e) {
+              if (attempt === 0 && e.status === 409 && e.code === 'conflict' && e.field === 'name') {
+                posting = false;
+                continue;
+              }
+              throw e;
+            }
+          }
+        } catch (e) {
+          if (!disposed) {
+            const uncertain = posting && (e.isNetwork || !e.status || e.code === 'invalid_response');
+            toast(uncertain ? 'The copy result is uncertain. Refresh the provider list to check before trying again.'
+              : 'Could not duplicate provider: ' + (e.detail || e.message), 'bad');
+          }
+        } finally {
+          duplicating.delete(id);
+          if (!disposed && duplicateButtons.has(id)) duplicateButtons.get(id).disabled = false;
+        }
       }
       function render(list) {
+        duplicateButtons.clear();
         ctx.subtitle([h('b', null, fmt.plural(list.length, 'provider')), ' · upstreams that speak the Anthropic Messages API, scheduled by priority']);
         if (!list.length) {
           replace(host, h('div', { class: 'card' }, empty({ title: 'No providers yet', text: 'Add an upstream that accepts the Anthropic Messages API directly. CC AutoMux appends /v1/messages to its base URL and does no protocol conversion for normal traffic.', action: h('a', { class: 'btn primary', href: '#/providers/new' }, icon('plus'), 'Add provider') })));
@@ -81,6 +141,8 @@
         const sessionsCell = tip(h('span', { class: 'm' }, icon('sessions'), String(p.active_session_count)), () => tipBlock({ title: 'Sticky bindings · ' + p.active_session_count,
           note: (p.active_session_count ? 'Session bindings currently pinned to this provider. ' : 'No session is pinned to this provider right now. ') + 'A session keeps its provider for one hour after its last request, so a conversation stays on one upstream.' }));
         const prioCell = tip(h('span', { class: 'prio' }, 'P ' + fmt.priorityLabel(p.priority)), priorityTip(p.priority));
+        const duplicateButton = h('button', { class: 'btn sm', type: 'button', disabled: duplicating.has(p.id), onclick: () => duplicate(p.id) }, 'Duplicate');
+        duplicateButtons.set(p.id, duplicateButton);
         // Hover targets sit above the row-wide link, so a click on them navigates explicitly.
         return h('div', { class: 'row-card pr-row' + (stat !== 'active' ? ' dim' : ''), onclick: (e) => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
           healthDot(stat === 'active' ? state : 'unknown'),
@@ -90,7 +152,7 @@
             h('div', { class: 'rc-sub' }, fmt.host(p.base_url))),
           h('div', { class: 'rc-tags' }, modelsCell),
           h('div', { class: 'rc-meta' }, prioCell, patchesCell, sessionsCell, h('span', { class: 'hs' }, healthCell)),
-          sw,
+          h('div', { class: 'pr-actions' }, duplicateButton, sw),
           icon('chevron-right', 'chev'));
       }
       load();
