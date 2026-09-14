@@ -148,7 +148,7 @@
         CCAM.router.setGuard(async () => { if (!dirty() && !isNew) return true; if (isNew && JSON.stringify(draft) === JSON.stringify(blankProvider())) return true; return confirm({ title: 'Discard changes?', text: 'This provider has unsaved changes.', confirmLabel: 'Discard', danger: true }); });
 
         // --- form ---
-        fields.name = field({ label: 'Name', for: 'p-name', control: input({ id: 'p-name', sans: true, value: draft.name, placeholder: 'e.g. AnyRouter', oninput: (e) => { draft.name = e.target.value; check(); } }), help: 'Shown in logs and health diagnostics. Must be unique.' });
+        fields.name = field({ label: 'Name', for: 'p-name', control: input({ id: 'p-name', sans: true, value: draft.name, oninput: (e) => { draft.name = e.target.value; check(); } }), help: 'Shown in logs and health diagnostics. Must be unique.' });
         fields.base_url = field({ label: 'Base URL', for: 'p-url', control: input({ id: 'p-url', value: draft.base_url, placeholder: 'https://provider.example', oninput: (e) => { draft.base_url = e.target.value; check(); } }),
           help: ['CC AutoMux appends ', h('code', null, '/v1/messages'), ' and keeps the client query string. The provider must accept the ', h('b', null, 'Anthropic Messages API'), ' directly — normal requests are never converted.'] });
         const keyWrap = secretInput({ id: 'p-key', value: draft.api_key, placeholder: 'provider API key', copy: true, oninput: (e) => { draft.api_key = e.target.value; check(); } });
