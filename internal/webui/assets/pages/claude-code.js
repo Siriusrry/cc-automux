@@ -172,7 +172,7 @@
             }
           } }, isActive ? [icon('check'), 'Active'] : [icon('play'), 'Activate']);
           return h('div', { class: 'profile' + (isActive ? ' active' : '') },
-            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, (p.subagent_model || p.teammate_default_model) ? 'with optional overrides' : 'four required mappings', ' · Max attempts per request: ' + p.max_attempts)),
+            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, 'Max attempts per request: ' + p.max_attempts)),
             map,
             h('div', { class: 'p-acts' },
               wrapTip(activate, !gatewayOk ? 'Set a gateway key before activating a profile.' : isActive ? 'Active — settings.json matches this profile.' : 'Writes this mapping, the gateway address and key into settings.json.'),
