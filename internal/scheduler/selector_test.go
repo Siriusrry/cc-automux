@@ -416,15 +416,9 @@ func TestCaptureAttemptPolicyFreezesOneSnapshotRead(t *testing.T) {
 		revision: 1,
 		attempts: AttemptPolicy{MaxAttempts: 5},
 	}}
-	captured, policy, err := CaptureAttemptPolicy(source)
+	policy, err := CaptureAttemptPolicy(source)
 	if err != nil || policy.MaxAttempts != 5 {
 		t.Fatalf("CaptureAttemptPolicy() = %#v, %v", policy, err)
-	}
-	for i := 0; i < 3; i++ {
-		got, err := ResolveAttemptPolicy(captured)
-		if err != nil || got != policy {
-			t.Fatalf("captured policy = %#v, %v", got, err)
-		}
 	}
 	if source.calls != 1 {
 		t.Fatalf("source AttemptPolicy() calls = %d", source.calls)

@@ -153,12 +153,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
-	snapshot, attemptPolicy, err := scheduler.CaptureAttemptPolicy(runtimeSnapshot)
+	snapshot := runtimeSnapshot
+	attemptPolicy, err := scheduler.CaptureAttemptPolicy(snapshot)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "gateway is unavailable")
 		return
 	}
-	plannerSnapshot := capturedFlowView(runtimeSnapshot, snapshot, attemptPolicy)
+	plannerSnapshot := capturedFlowView(snapshot, attemptPolicy)
 	key := snapshot.GatewayKey()
 	if key == "" {
 		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured", "gateway key is not configured")

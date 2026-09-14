@@ -72,21 +72,9 @@ func ResolveAttemptPolicy(snapshot Snapshot) (AttemptPolicy, error) {
 	return policy, nil
 }
 
-type requestPolicySnapshot struct {
-	Snapshot
-	attempts AttemptPolicy
-}
-
-func (s requestPolicySnapshot) AttemptPolicy() AttemptPolicy { return s.attempts }
-
-// CaptureAttemptPolicy freezes the snapshot's request budget behind a wrapper
-// so every consumer of one request observes the same validated value.
-func CaptureAttemptPolicy(snapshot Snapshot) (Snapshot, AttemptPolicy, error) {
-	policy, err := ResolveAttemptPolicy(snapshot)
-	if err != nil {
-		return nil, AttemptPolicy{}, err
-	}
-	return requestPolicySnapshot{Snapshot: snapshot, attempts: policy}, policy, nil
+// CaptureAttemptPolicy reads the immutable request budget once.
+func CaptureAttemptPolicy(snapshot Snapshot) (AttemptPolicy, error) {
+	return ResolveAttemptPolicy(snapshot)
 }
 
 func (p Policy) Validate() error {

@@ -49,14 +49,9 @@ func (s capturedFlowSnapshot) AutoMode() flow.AutoModeSnapshot {
 	return flow.AutoModeSnapshot{}
 }
 
-func capturedFlowView(runtimeSnapshot, capturedSnapshot scheduler.Snapshot, normal scheduler.AttemptPolicy) flow.SnapshotView {
-	var view flow.SnapshotView
-	if candidate, ok := runtimeSnapshot.(flow.SnapshotView); ok {
-		view = candidate
-	} else if candidate, ok := capturedSnapshot.(flow.SnapshotView); ok {
-		view = candidate
-	}
-	return capturedFlowSnapshot{snapshot: capturedSnapshot, view: view, normal: normal}
+func capturedFlowView(snapshot scheduler.Snapshot, normal scheduler.AttemptPolicy) flow.SnapshotView {
+	view, _ := snapshot.(flow.SnapshotView)
+	return capturedFlowSnapshot{snapshot: snapshot, view: view, normal: normal}
 }
 
 func (h *Handler) prepareIngress(body bodyfile.Body, index bodyfile.JSONIndex, request *http.Request, traceID string) (traffic.IngressRequest, error) {
