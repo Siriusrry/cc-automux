@@ -86,7 +86,9 @@
   }
 
   function authHeaderSeg(opts) {
-    return h('div', { class: 'auth-header' }, seg({ ariaLabel: 'Authentication header', value: opts.useXApiKey ? 'x-api-key' : 'bearer', options: [{ value: 'bearer', label: 'Authorization: Bearer' }, { value: 'x-api-key', label: 'x-api-key' }], onchange: (v) => opts.onchange(v === 'x-api-key') }));
+    const option = (value, text) => ({ value, label: h('span', { class: 'auth-option-label' }, text), title: text });
+    return seg({ class: 'auth-header', ariaLabel: 'Authentication header', value: opts.useXApiKey ? 'x-api-key' : 'bearer',
+      options: [option('bearer', 'Authorization: Bearer'), option('x-api-key', 'x-api-key')], onchange: (v) => opts.onchange(v === 'x-api-key') });
   }
 
   // ---- hover summaries ----

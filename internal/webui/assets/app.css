@@ -247,12 +247,10 @@ textarea.in { resize: vertical; min-height: 96px; line-height: 1.5; }
 .seg.icons button { padding: 6px 9px; }
 .seg.icons svg { width: 15px; height: 15px; }
 .seg.quiet button[aria-checked="true"] { background: var(--card); color: var(--paper); box-shadow: var(--shadow-sm); }
-.auth-header { container-type: inline-size; }
-.auth-header .seg { flex-wrap: wrap; }
-@container (max-width: 300px) {
-  .auth-header .seg { border-radius: var(--r-md); }
-  .auth-header .seg button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
-}
+.seg.auth-header { flex-wrap: nowrap; border-radius: 999px; }
+/* Intrinsic text widths determine each option's share of the shrinkage. */
+.seg.auth-header button { flex: 0 1 auto; min-width: 0; padding: 7px 15px; }
+.auth-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Switch */
 .sw { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--paper); user-select: none; }
