@@ -269,9 +269,10 @@ func (s *Snapshot) CreatedAt() time.Time {
 }
 
 // NormalAttemptStatus describes the strategy in this immutable snapshot.
-func (s *Snapshot) NormalAttemptStatus() (int, string) {
+func (s *Snapshot) NormalAttemptStatus() config.NormalAttemptState {
 	if s == nil {
-		return 0, ""
+		return config.NormalAttemptState{}
 	}
-	return s.normalAttempts.Policy.MaxAttempts, string(s.normalAttempts.Source)
+	return config.NormalAttemptState{MaxAttempts: s.normalAttempts.Policy.MaxAttempts,
+		StickyNoCooldownAttempts: s.normalAttempts.Policy.StickyNoCooldownAttempts, Source: string(s.normalAttempts.Source)}
 }

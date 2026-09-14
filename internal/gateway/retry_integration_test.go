@@ -67,7 +67,7 @@ func newRetryFixture(t *testing.T, budget int, targets []retryTarget, reply func
 			t.Errorf("upstream observations: %v", f.problems)
 		}
 	})
-	f.snapshot = &fakeSnapshot{revision: 1, gatewayKey: "gateway", attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: budget}}
+	f.snapshot = &fakeSnapshot{revision: 1, gatewayKey: "gateway", attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: budget, StickyNoCooldownAttempts: 1}}
 	for i, target := range targets {
 		label := string(rune('A' + i))
 		p := compileTestProvider(t, fmt.Sprintf("%08d-1111-4111-8111-111111111111", i+1), label, upstream.URL, label, "m", false)
@@ -247,9 +247,23 @@ func TestSameTargetLateBodyCannotReplaceNewObservation(t *testing.T) {
 		}
 		fmt.Fprintf(w, "failure-%d", n)
 	})
+	f.snapshot.attemptPolicy.StickyNoCooldownAttempts = 2
+	seedExistingRetryBinding(t, f, "session")
 	f.serve("session")
 	close(release)
-	waitGatewayEvents(t, f.events, 4)
+	events := waitGatewayEvents(t, f.events, 4)
+	var retries int
+	for _, e := range events {
+		if e.Kind == EventRetry {
+			retries++
+			if e.RawError != "failure-1" {
+				t.Fatalf("late retry error=%#v", e)
+			}
+		}
+	}
+	if retries != 1 {
+		t.Fatalf("events=%#v", events)
+	}
 	p := f.snapshot.providers[0]
 	state, _ := f.store.ProviderSnapshot(p.ID, p.Generation)
 	if len(state.Channels) != 1 || state.Channels[0].LastError != "failure-2" || state.Channels[0].ObservedFailures != 2 {
@@ -449,5 +463,257 @@ func TestConfirmedSuccessMigrationSurvivesClientCancellation(t *testing.T) {
 	bindings := f.selector.Assignments("")
 	if len(bindings) != 1 || bindings[0].ProviderID != f.snapshot.providers[0].ID || events[1].Kind != EventSuccess || events[2].Kind != EventCanceled {
 		t.Fatalf("bindings=%#v events=%#v", bindings, events)
+	}
+}
+
+func seedExistingRetryBinding(t *testing.T, f *retryFixture, session string) {
+	t.Helper()
+	lease, err := f.selector.Acquire(f.snapshot, scheduler.StickyKey{SessionID: session, Model: "m", RequestType: traffic.RequestTypeNormal}, scheduler.NewRequestSelection(f.snapshot.AttemptPolicy()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNone})
+}
+
+func TestStickyNoCooldownAttemptSequencesAndEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name                              string
+		targets, limit, budget, successAt int
+		bind, healthOff                   bool
+		want                              string
+		retries                           int
+	}{
+		{"third succeeds", 3, 5, 10, 3, true, true, "AAA", 2},
+		{"six providers", 6, 5, 10, 0, true, true, "AAAAABCDEF", 4},
+		{"round trip does not renew", 3, 5, 10, 0, true, true, "AAAAABCABC", 4},
+		{"only one provider", 1, 5, 10, 0, true, true, "AAAAAAAAAA", 4},
+		{"default preserves round robin", 3, 1, 7, 0, true, true, "ABCABCA", 0},
+		{"total budget truncates allowance", 3, 5, 3, 0, true, true, "AAA", 2},
+		{"total budget one", 3, 5, 1, 0, true, true, "A", 0},
+		{"new binding has no allowance", 3, 5, 7, 0, false, true, "ABCABCA", 0},
+		{"cooldown enabled has no allowance", 3, 5, 5, 0, true, false, "ABCAB", 0},
+		{"replacement success migrates", 3, 3, 8, 4, true, true, "AAAB", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targets := make([]retryTarget, tc.targets)
+			for i := range targets {
+				targets[i] = retryTarget{0, tc.healthOff, 503}
+			}
+			var calls atomic.Int64
+			f := newRetryFixture(t, tc.budget, targets, func(label string, w http.ResponseWriter, r *http.Request) {
+				status := 503
+				if int(calls.Add(1)) == tc.successAt {
+					status = 200
+				}
+				w.WriteHeader(status)
+				fmt.Fprint(w, label)
+			})
+			f.snapshot.attemptPolicy.StickyNoCooldownAttempts = tc.limit
+			if tc.bind {
+				seedExistingRetryBinding(t, f, "session")
+			}
+			w := f.serve("session")
+			f.mu.Lock()
+			got := strings.Join(f.calls, "")
+			f.mu.Unlock()
+			wantStatus := 503
+			if tc.successAt > 0 {
+				wantStatus = 200
+			}
+			if got != tc.want || w.Code != wantStatus {
+				t.Fatalf("calls=%s status=%d; want %s/%d", got, w.Code, tc.want, wantStatus)
+			}
+			events := waitGatewayEvents(t, f.events, 2*len(tc.want))
+			forward, result := map[int]Event{}, map[int]Event{}
+			for _, e := range events {
+				dst := result
+				if e.Kind == EventForward {
+					dst = forward
+				}
+				if _, exists := dst[e.Attempt]; exists {
+					t.Fatalf("duplicate attempt event: %#v", events)
+				}
+				dst[e.Attempt] = e
+				if e.TraceID == "" || e.TraceID != events[0].TraceID || e.Stream {
+					t.Fatalf("request facts changed: %#v", e)
+				}
+			}
+			for i := 1; i <= len(tc.want); i++ {
+				e := result[i]
+				kind := EventFailover
+				if i <= tc.retries {
+					kind = EventRetry
+				}
+				if i == len(tc.want) {
+					kind = EventFailure
+					if tc.successAt > 0 {
+						kind = EventSuccess
+					}
+				}
+				if e.Kind != kind || e.ProviderName != string(tc.want[i-1]) || forward[i].ProviderName != e.ProviderName {
+					t.Fatalf("attempt %d: %#v", i, events)
+				}
+				if kind == EventSuccess {
+					continue
+				}
+				if e.RawError != e.ProviderName || e.EndReason != endHTTPError || e.HTTPStatus != 503 {
+					t.Fatalf("lost error fields: %#v", e)
+				}
+				if i < len(tc.want) && (e.NextAttempt != i+1 || e.NextProviderName != string(tc.want[i]) || e.NextUpstreamURL == "" || e.NextProviderID != forward[i+1].ProviderID) {
+					t.Fatalf("lost continuation: %#v", e)
+				}
+			}
+			bindings := f.selector.Assignments("")
+			wantBinding := f.snapshot.providers[0].ID
+			if tc.successAt > 0 {
+				wantBinding = forward[len(tc.want)].ProviderID
+			}
+			if len(bindings) != 1 || bindings[0].ProviderID != wantBinding {
+				t.Fatalf("bindings=%#v", bindings)
+			}
+		})
+	}
+}
+
+func TestStickyRetryUsesExistingHTTPClassification(t *testing.T) {
+	for _, status := range []int{400, 408, 425, 429, 503, 401, 403, 405, 302, 404} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			f := newRetryFixture(t, 3, []retryTarget{{0, true, status}, {0, true, 200}}, nil)
+			f.snapshot.attemptPolicy.StickyNoCooldownAttempts = 2
+			seedExistingRetryBinding(t, f, "session")
+			w := f.serve("session")
+			want := "AAB"
+			wantStatus := 200
+			if status == 400 {
+				want = "A"
+				wantStatus = 400
+			}
+			f.mu.Lock()
+			got := strings.Join(f.calls, "")
+			f.mu.Unlock()
+			if got != want || w.Code != wantStatus {
+				t.Fatalf("calls=%s status=%d", got, w.Code)
+			}
+		})
+	}
+}
+
+func TestStickyRetryRequiresUniqueNonEmptySessionHeader(t *testing.T) {
+	for _, headers := range [][]string{nil, {""}, {"  "}, {"session", "session"}} {
+		t.Run(fmt.Sprint(headers), func(t *testing.T) {
+			f := newRetryFixture(t, 3, []retryTarget{{0, true, 503}, {0, true, 503}}, nil)
+			f.snapshot.attemptPolicy.StickyNoCooldownAttempts = 5
+			seedExistingRetryBinding(t, f, "session")
+			r := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","stream":false}`)
+			for _, header := range headers {
+				r.Header.Add("X-Claude-Code-Session-Id", header)
+			}
+			f.handler.ServeHTTP(httptest.NewRecorder(), r)
+			f.mu.Lock()
+			got := strings.Join(f.calls, "")
+			f.mu.Unlock()
+			if got != "BAB" {
+				t.Fatalf("unexpected sticky allowance: %s", got)
+			}
+			for _, e := range waitGatewayEvents(t, f.events, 6) {
+				if e.Kind == EventRetry {
+					t.Fatalf("unexpected retry: %#v", e)
+				}
+			}
+		})
+	}
+}
+
+func TestStickyRetryStopsAfterResponseProcessingBegins(t *testing.T) {
+	for _, payload := range []string{"event: error\ndata: {\"error\":{\"type\":\"overloaded_error\"}}\n\n", "event: message_start\ndata: {}\n\n"} {
+		f := newRetryFixture(t, 5, []retryTarget{{0, true, 200}}, func(_ string, w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, payload)
+		})
+		f.snapshot.attemptPolicy.StickyNoCooldownAttempts = 5
+		seedExistingRetryBinding(t, f, "session")
+		w := f.serve("session")
+		f.mu.Lock()
+		callCount := len(f.calls)
+		f.mu.Unlock()
+		if w.Code != 200 || callCount != 1 {
+			t.Fatalf("2xx retried: calls=%d status=%d", callCount, w.Code)
+		}
+		got := waitGatewayEvents(t, f.events, 2)
+		if got[1].Kind != EventFailure {
+			t.Fatalf("events=%#v", got)
+		}
+	}
+}
+
+func TestStickyRetryCanceledAfterContinuationDoesNotForward(t *testing.T) {
+	f := newRetryFixture(t, 5, []retryTarget{{0, true, 503}}, func(_ string, _ http.ResponseWriter, _ *http.Request) { panic(http.ErrAbortHandler) })
+	f.snapshot.attemptPolicy.StickyNoCooldownAttempts = 5
+	seedExistingRetryBinding(t, f, "session")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.handler.recorder = EventRecorderFunc(func(e Event) {
+		f.events.RecordGatewayEvent(e)
+		if e.Kind == EventRetry {
+			cancel()
+		}
+	})
+	r := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","stream":false}`).WithContext(ctx)
+	r.Header.Set("X-Claude-Code-Session-Id", "session")
+	f.handler.ServeHTTP(httptest.NewRecorder(), r)
+	got := waitGatewayEvents(t, f.events, 3)
+	f.mu.Lock()
+	callCount := len(f.calls)
+	f.mu.Unlock()
+	if callCount != 1 || got[0].Kind != EventForward || got[1].Kind != EventRetry || got[2].Kind != EventCanceled || got[2].Attempt != 2 || got[2].ProviderID != got[0].ProviderID {
+		t.Fatalf("calls=%d events=%#v", callCount, got)
+	}
+}
+
+func TestStickyRetryAllowsTransportAndHeaderTimeout(t *testing.T) {
+	for _, headerTimeout := range []bool{false, true} {
+		var calls atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			if calls.Add(1) == 1 {
+				if headerTimeout {
+					<-r.Context().Done()
+					return
+				}
+				panic(http.ErrAbortHandler)
+			}
+			io.WriteString(w, "ok")
+		}))
+		item := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "A", upstream.URL, "key", "m", false)
+		item.DisableHealth = true
+		snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}, attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 3}}
+		store := health.NewDefault()
+		selector, err := scheduler.New(store, scheduler.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		selector.Reconcile(snapshot)
+		key := scheduler.StickyKey{SessionID: "session", Model: "m", RequestType: traffic.RequestTypeNormal}
+		lease, err := selector.Acquire(snapshot, key, scheduler.NewRequestSelection(snapshot.AttemptPolicy()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNone})
+		events := &eventCollector{}
+		handler := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{Recorder: events, UpstreamLimits: UpstreamLimits{ResponseHeader: 25 * time.Millisecond}})
+		r := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","stream":true}`)
+		r.Header.Set("X-Claude-Code-Session-Id", "session")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		got := waitGatewayEvents(t, events, 4)
+		want := endTransportError
+		if headerTimeout {
+			want = endResponseHeaderTimeout
+		}
+		if calls.Load() != 2 || w.Code != 200 || got[1].Kind != EventRetry || got[1].EndReason != want {
+			t.Fatalf("status=%d calls=%d events=%#v", w.Code, calls.Load(), got)
+		}
+		handler.Close()
+		upstream.Close()
 	}
 }

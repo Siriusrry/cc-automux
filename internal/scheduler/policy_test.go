@@ -25,7 +25,7 @@ func TestAttemptPolicyValidation(t *testing.T) {
 	if got := DefaultAttemptPolicy().MaxAttempts; got != 3 {
 		t.Fatalf("default maximum attempts = %d", got)
 	}
-	if err := (AttemptPolicy{MaxAttempts: 1}).Validate(); err != nil {
+	if err := (AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1}).Validate(); err != nil {
 		t.Fatalf("valid attempt policy = %v", err)
 	}
 	if err := (AttemptPolicy{}).Validate(); err == nil {

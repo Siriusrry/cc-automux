@@ -412,6 +412,7 @@ func TestHarnessHTTPRestartReadStateAndActivationConflict(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	profile := managerProfileForManagementTest(profileID, "Daily")
 	profile.MaxAttempts = 8
+	profile.StickyNoCooldownAttempts = 5
 	if _, err := fixture.harness.CreateProfile(harnessconfig.ClaudeCodeAdapterID, profile); err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +443,7 @@ func TestHarnessHTTPRestartReadStateAndActivationConflict(t *testing.T) {
 		t.Fatalf("restart harness status = %#v", status)
 	}
 
-	if status.NormalMaxAttempts != 8 || status.AttemptPolicySource != "profile" || fixture.runtime.Snapshot() != before {
+	if status.NormalMaxAttempts != 8 || status.NormalStickyNoCooldownAttempts != 5 || status.AttemptPolicySource != "profile" || fixture.runtime.Snapshot() != before {
 		t.Fatalf("blocked check changed policy: %#v", status)
 	}
 	activation := harnessRequest(fixture.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles/"+profileID+"/activate", "{}")
@@ -480,25 +481,27 @@ func TestHarnessHTTPStatusDoesNotExposeTargetContents(t *testing.T) {
 func TestProfileAttemptBudgetHTTP(t *testing.T) {
 	f := newHarnessHandlerFixture(t, "gateway-key")
 	const base = `"name":"Budget","haiku_model":"h","sonnet_model":"s","opus_model":"o","fable_model":"f"`
-	for _, value := range []string{"0", "-2", "2.5", `"3"`, "true", "null", "9007199254740992"} {
-		for _, method := range []string{http.MethodPost, http.MethodPut} {
-			path := "/api/v1/harnesses/claude-code/profiles"
-			if method == http.MethodPut {
-				path += "/11111111-1111-4111-8111-111111111111"
-			}
-			response := harnessRequest(f.handler, method, path, "{"+base+`,"max_attempts":`+value+"}")
-			if response.Code != http.StatusBadRequest {
-				t.Fatalf("%s %s accepted: %d %s", method, value, response.Code, response.Body)
+	for _, field := range []string{"max_attempts", "sticky_no_cooldown_attempts"} {
+		for _, value := range []string{"0", "-2", "2.5", `"3"`, "true", "null", "9007199254740992"} {
+			for _, method := range []string{http.MethodPost, http.MethodPut} {
+				path := "/api/v1/harnesses/claude-code/profiles"
+				if method == http.MethodPut {
+					path += "/11111111-1111-4111-8111-111111111111"
+				}
+				response := harnessRequest(f.handler, method, path, "{"+base+`,"`+field+`":`+value+"}")
+				if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"field":"`+field+`"`) {
+					t.Fatalf("%s %s accepted: %d %s", method, value, response.Code, response.Body)
+				}
 			}
 		}
 	}
-	response := harnessRequest(f.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles", "{"+base+`,"max_attempts":9007199254740991}`)
+	response := harnessRequest(f.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles", "{"+base+`,"max_attempts":9007199254740991,"sticky_no_cooldown_attempts":9007199254740991}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", response.Code, response.Body)
 	}
 	var profile harnessconfig.ProfileView
 	json.Unmarshal(response.Body.Bytes(), &profile)
-	if profile.MaxAttempts != 9007199254740991 {
+	if profile.MaxAttempts != 9007199254740991 || profile.StickyNoCooldownAttempts != 9007199254740991 {
 		t.Fatalf("unsafe round trip: %#v", profile)
 	}
 	path := "/api/v1/harnesses/claude-code/profiles/" + profile.ID
@@ -511,13 +514,13 @@ func TestProfileAttemptBudgetHTTP(t *testing.T) {
 		t.Fatalf("replace: %d %s", response.Code, response.Body)
 	}
 	json.Unmarshal(response.Body.Bytes(), &profile)
-	if profile.MaxAttempts != 3 || !profile.Active {
+	if profile.MaxAttempts != 3 || profile.StickyNoCooldownAttempts != 1 || !profile.Active {
 		t.Fatalf("replacement default: %#v", profile)
 	}
 	response = harnessRequest(f.handler, http.MethodGet, "/api/v1/harnesses/claude-code", "")
 	var status harnessconfig.HarnessStatus
 	json.Unmarshal(response.Body.Bytes(), &status)
-	if status.NormalMaxAttempts != 3 || status.AttemptPolicySource != "profile" || status.State != harnessconfig.StateInSync {
+	if status.NormalMaxAttempts != 3 || status.NormalStickyNoCooldownAttempts != 1 || status.AttemptPolicySource != "profile" || status.State != harnessconfig.StateInSync {
 		t.Fatalf("status: %#v", status)
 	}
 }
@@ -546,6 +549,7 @@ func TestFullConfigurationHTTPBudgetEditAppliesImmediately(t *testing.T) {
 	f := newHarnessHandlerFixture(t, "gateway-key")
 	p := managerProfileForManagementTest("11111111-1111-4111-8111-111111111111", "Daily")
 	p.MaxAttempts = 8
+	p.StickyNoCooldownAttempts = 5
 	if _, err := f.harness.CreateProfile(harnessconfig.ClaudeCodeAdapterID, p); err != nil {
 		t.Fatal(err)
 	}
@@ -555,13 +559,14 @@ func TestFullConfigurationHTTPBudgetEditAppliesImmediately(t *testing.T) {
 	old := f.runtime.Snapshot()
 	cfg := f.runtime.Config()
 	cfg.Harnesses.ClaudeCode.Profiles[0].MaxAttempts = 2
+	cfg.Harnesses.ClaudeCode.Profiles[0].StickyNoCooldownAttempts = 4
 	raw, _ := json.Marshal(cfg)
 	var object map[string]any
 	json.Unmarshal(raw, &object)
 	delete(object["harnesses"].(map[string]any)["claude_code"].(map[string]any), "active_profile_id")
 	raw, _ = json.Marshal(object)
 	response := harnessRequest(f.handler, http.MethodPut, "/api/v1/config", string(raw))
-	if response.Code != 200 || f.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID != p.ID || f.runtime.Snapshot().NormalAttemptPolicy().MaxAttempts != 2 || old.NormalAttemptPolicy().MaxAttempts != 8 {
+	if response.Code != 200 || f.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID != p.ID || f.runtime.Snapshot().NormalAttemptPolicy().MaxAttempts != 2 || old.NormalAttemptPolicy().MaxAttempts != 8 || old.NormalAttemptPolicy().StickyNoCooldownAttempts != 5 || f.runtime.Snapshot().NormalAttemptPolicy().StickyNoCooldownAttempts != 4 {
 		t.Fatalf("budget PUT=%d %s", response.Code, response.Body)
 	}
 }
@@ -584,6 +589,7 @@ func TestClearingGatewayKeyPreservesActivationInvalidationReason(t *testing.T) {
 			f := newHarnessHandlerFixture(t, "gateway-key")
 			p := managerProfileForManagementTest("11111111-1111-4111-8111-111111111111", "Daily")
 			p.MaxAttempts = 8
+			p.StickyNoCooldownAttempts = 5
 			if _, err := f.harness.CreateProfile(harnessconfig.ClaudeCodeAdapterID, p); err != nil {
 				t.Fatal(err)
 			}
@@ -653,7 +659,7 @@ func TestClearingGatewayKeyPreservesActivationInvalidationReason(t *testing.T) {
 					t.Fatal(err)
 				}
 				status := readStatus()
-				if status.State != harnessconfig.StateInSync || status.LastInvalidationReason != "" || status.NormalMaxAttempts != 8 {
+				if status.State != harnessconfig.StateInSync || status.LastInvalidationReason != "" || status.NormalMaxAttempts != 8 || status.NormalStickyNoCooldownAttempts != 5 {
 					t.Fatalf("reactivation=%#v", status)
 				}
 			}

@@ -34,7 +34,7 @@
   ];
 
   function profileDialog(profile, models) {
-    const draft = Object.assign({ name: '', haiku_model: '', sonnet_model: '', opus_model: '', fable_model: '', subagent_model: '', teammate_default_model: '', max_attempts: 3 }, profile || {});
+    const draft = Object.assign({ name: '', haiku_model: '', sonnet_model: '', opus_model: '', fable_model: '', subagent_model: '', teammate_default_model: '', max_attempts: 3, sticky_no_cooldown_attempts: 1 }, profile || {});
     const isNew = !profile;
     const fields = {};
     const list = h('datalist', { id: 'cc-models' }, models.map(m => h('option', { value: m })));
@@ -44,10 +44,12 @@
       fields[key] = f; return f;
     });
     const attemptsInput = input({ id: 'pf-max-attempts', type: 'number', attrs: { min: 1, max: 9007199254740991 }, value: draft.max_attempts, oninput: e => { draft.max_attempts = e.target.value; } });
-    fields.max_attempts = field({ label: 'Max attempts per request', for: 'pf-max-attempts', control: attemptsInput, help: 'Total upstream calls allowed for each normal request. Default: 3. A value of 1 returns after one call.' });
+    fields.max_attempts = field({ label: 'Max attempts per request', for: 'pf-max-attempts', control: attemptsInput, help: 'Total upstream calls allowed for each normal request. Default: 3.' });
+    const stickyAttemptsInput = input({ id: 'pf-sticky-attempts', type: 'number', attrs: { min: 1, max: 9007199254740991 }, value: draft.sticky_no_cooldown_attempts, oninput: e => { draft.sticky_no_cooldown_attempts = e.target.value; } });
+    fields.sticky_no_cooldown_attempts = field({ label: 'Sticky attempts before failover', for: 'pf-sticky-attempts', control: stickyAttemptsInput, help: 'Attempts on an existing sticky provider with health cooldown disabled before normal failover. Default: 1.' });
     const form = h('div', { class: 'profile-form' }, list, fields.name, h('div', { class: 'row-2' }, mf[0], mf[1]), h('div', { class: 'row-2' }, mf[2], mf[3]),
       h('p', { class: 'help', style: { margin: '4px 0 14px' } }, 'Subagent model, when set, forces every subagent, agent-team and workflow agent to one model; the teammate default only applies to teammates without an explicit model and is overridden by the subagent model.'),
-      h('div', { class: 'row-2' }, mf[4], mf[5]), fields.max_attempts);
+      h('div', { class: 'row-2' }, mf[4], mf[5]), h('div', { class: 'row-2' }, fields.max_attempts, fields.sticky_no_cooldown_attempts));
     return dialog({ title: isNew ? 'New profile' : 'Edit ' + profile.name, body: form, wide: true, focus: '#pf-name', actions: [
       { label: 'Cancel', value: null },
       { label: isNew ? 'Create profile' : 'Save profile', primary: true, onClick: async () => {
@@ -56,10 +58,12 @@
         if (!draft.name.trim()) { fields.name.setError('Give the profile a name.'); bad = true; }
         MODEL_FIELDS.filter(m => m[3]).forEach(([key, label]) => { if (!draft[key].trim()) { fields[key].setError(label + ' mapping is required.'); bad = true; } });
         const attempts = String(draft.max_attempts).trim() === '' ? 3 : Number(draft.max_attempts);
-        if (attemptsInput.validity.badInput || !Number.isSafeInteger(attempts) || attempts < 1) { fields.max_attempts.setError('Enter an integer from 1 to 9007199254740991.'); bad = true; }
+        if (attemptsInput.validity.badInput || !Number.isSafeInteger(attempts) || attempts < 1) { fields.max_attempts.setError('Enter an integer of at least 1.'); bad = true; }
+        const stickyAttempts = String(draft.sticky_no_cooldown_attempts).trim() === '' ? 1 : Number(draft.sticky_no_cooldown_attempts);
+        if (stickyAttemptsInput.validity.badInput || !Number.isSafeInteger(stickyAttempts) || stickyAttempts < 1) { fields.sticky_no_cooldown_attempts.setError('Enter an integer of at least 1.'); bad = true; }
         if (bad) return false;
         try {
-          const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts };
+          const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts, sticky_no_cooldown_attempts: stickyAttempts };
           if (isNew) return await api.post('/api/v1/harnesses/claude-code/profiles', body);
           return await api.put('/api/v1/harnesses/claude-code/profiles/' + profile.id, Object.assign({ id: profile.id }, body));
         } catch (e) {
@@ -172,7 +176,7 @@
             }
           } }, isActive ? [icon('check'), 'Active'] : [icon('play'), 'Activate']);
           return h('div', { class: 'profile' + (isActive ? ' active' : '') },
-            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, 'Max attempts per request: ' + p.max_attempts)),
+            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, 'Max attempts per request: ' + p.max_attempts), h('div', { class: 'p-sub' }, 'Sticky attempts before failover: ' + p.sticky_no_cooldown_attempts)),
             map,
             h('div', { class: 'p-acts' },
               wrapTip(activate, !gatewayOk ? 'Set a gateway key before activating a profile.' : isActive ? 'Active — settings.json matches this profile.' : 'Writes this mapping, the gateway address and key into settings.json.'),

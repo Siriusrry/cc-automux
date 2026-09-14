@@ -12,6 +12,7 @@ type EventKind string
 const (
 	EventForward  EventKind = "forward"
 	EventFailover EventKind = "failover"
+	EventRetry    EventKind = "retry"
 	EventSuccess  EventKind = "success"
 	EventFailure  EventKind = "failure"
 	EventCanceled EventKind = "canceled"

@@ -370,7 +370,7 @@ func TestAttemptBudgetComesFromRequestSnapshot(t *testing.T) {
 	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
 	snapshot := &fakeSnapshot{
 		revision: 1,
-		attempts: AttemptPolicy{MaxAttempts: 2},
+		attempts: AttemptPolicy{MaxAttempts: 2, StickyNoCooldownAttempts: 1},
 		providers: []*provider.CompiledProvider{
 			compileProvider(t, providerA, "a", []string{"m"}, 0),
 			compileProvider(t, providerB, "b", []string{"m"}, 0),
@@ -398,7 +398,7 @@ func TestSelectionUsesCapturedPolicy(t *testing.T) {
 	selector := newTestScheduler(t, health, DefaultPolicy(), nil)
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{compileProvider(t, providerA, "a", []string{"m"}, 0)}}
 	key := StickyKey{Model: "m", RequestType: traffic.RequestTypeClassifier}
-	selection := NewRequestSelection(AttemptPolicy{MaxAttempts: 1})
+	selection := NewRequestSelection(AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1})
 	if _, err := selector.Acquire(snapshot, key, selection); err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestSelectionUsesCapturedPolicy(t *testing.T) {
 func TestCaptureAttemptPolicyFreezesOneSnapshotRead(t *testing.T) {
 	source := &countingAttemptSnapshot{fakeSnapshot: &fakeSnapshot{
 		revision: 1,
-		attempts: AttemptPolicy{MaxAttempts: 5},
+		attempts: AttemptPolicy{MaxAttempts: 5, StickyNoCooldownAttempts: 1},
 	}}
 	policy, err := CaptureAttemptPolicy(source)
 	if err != nil || policy.MaxAttempts != 5 {
@@ -1348,7 +1348,7 @@ func TestMigrationSourceSurvivesRoundsAndConcurrentUpdate(t *testing.T) {
 	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
 	selector.Reconcile(snapshot)
 	key := normalKey("session", "m")
-	old := NewRequestSelection(AttemptPolicy{MaxAttempts: 6})
+	old := NewRequestSelection(AttemptPolicy{MaxAttempts: 6, StickyNoCooldownAttempts: 1})
 	first, err := selector.Acquire(snapshot, key, old)
 	if err != nil {
 		t.Fatal(err)
@@ -1357,7 +1357,7 @@ func TestMigrationSourceSurvivesRoundsAndConcurrentUpdate(t *testing.T) {
 	selector.Report(first, Outcome{Class: FailureChannelTransient})
 	old.StartAttempt()
 	// A concurrent request also starts at A and succeeds at B.
-	newer := NewRequestSelection(AttemptPolicy{MaxAttempts: 3})
+	newer := NewRequestSelection(AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 1})
 	lease, err := selector.Acquire(snapshot, key, newer)
 	if err != nil {
 		t.Fatal(err)
@@ -1454,4 +1454,253 @@ func TestRetryDoesNotRefreshReplacementBinding(t *testing.T) {
 	}
 	selector.Report(first, Outcome{Class: FailureClientCanceled})
 	selector.Report(retry, Outcome{Class: FailureNone})
+}
+
+func TestStickyRetryRespectsHigherTierChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name, initial, later, want            string
+		highOff, highDisabled, highOtherModel bool
+	}{
+		{"higher available", "ready", "", "BBBBBB", false, false, false},
+		{"higher without cooldown", "ready", "", "BBBBBB", true, false, false},
+		{"higher cools after first call", "ready", "cooldown", "BAAAAA", false, false, false},
+		{"higher initially cooling", "cooldown", "", "AAAAAA", false, false, false},
+		{"higher recovers during allowance", "cooldown", "ready", "ABBBBB", false, false, false},
+		{"higher initially occupied", "occupied", "", "", false, false, false},
+		{"higher becomes occupied", "cooldown", "occupied", "A", false, false, false},
+		{"disabled higher is ineligible", "ready", "", "AAAAAA", false, true, false},
+		{"different higher model is ineligible", "ready", "", "AAAAAA", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			health := newFakeHealth()
+			selector := newTestScheduler(t, health, Policy{}, nil)
+			a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+			a.DisableHealth = true
+			b := compileProvider(t, providerB, "b", []string{"m"}, 10)
+			b.DisableHealth = tc.highOff
+			b.Enabled = !tc.highDisabled
+			if tc.highOtherModel {
+				cfg := b.Config()
+				cfg.Models = []string{"other"}
+				b = compileProviderConfig(t, cfg)
+			}
+			seed := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a}}
+			selector.Reconcile(seed)
+			key := normalKey("session", "m")
+			lease, err := selector.Acquire(seed, key, NewRequestSelection(seed.AttemptPolicy()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selector.Report(lease, Outcome{Class: FailureNone})
+			snapshot := &fakeSnapshot{revision: 2, providers: []*provider.CompiledProvider{a, b}}
+			selector.Reconcile(snapshot)
+			highKey := HealthKey{ProviderID: b.ID, Generation: b.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
+			setHigh := func(state string) {
+				switch state {
+				case "ready":
+					delete(health.decisions, highKey)
+				case "cooldown":
+					health.decisions[highKey] = HealthDecision{ChannelState: ChannelCooldown}
+				case "occupied":
+					health.decisions[highKey] = HealthDecision{ChannelState: ChannelHalfOpen}
+				}
+			}
+			setHigh(tc.initial)
+			r := NewRequestSelection(AttemptPolicy{MaxAttempts: 6, StickyNoCooldownAttempts: 3})
+			got := ""
+			for r.HasBudget() {
+				used := r.AttemptsUsed()
+				lease, err = selector.Acquire(snapshot, key, r)
+				if r.AttemptsUsed() != used {
+					t.Fatal("selection consumed call budget")
+				}
+				if err != nil {
+					if !errors.Is(err, ErrNoEligibleProvider) {
+						t.Fatal(err)
+					}
+					break
+				}
+				got += map[string]string{providerA: "A", providerB: "B"}[lease.Provider.ID]
+				wantReason := SelectionRegular
+				if len(got) > 1 && len(got) <= 3 && tc.want == "AAAAAA" {
+					wantReason = SelectionStickyRetry
+				}
+				if lease.SelectionReason != wantReason {
+					t.Fatalf("attempt %d reason=%s want=%s", len(got), lease.SelectionReason, wantReason)
+				}
+				r.StartAttempt()
+				selector.Report(lease, Outcome{Class: FailureChannelTransient})
+				if len(got) == 1 {
+					setHigh(tc.later)
+				}
+			}
+			if got != tc.want {
+				t.Fatalf("calls=%s want=%s", got, tc.want)
+			}
+			if len(tc.want) == 0 || len(tc.want) == 1 {
+				if r.stickyPhase != stickyRetryEnded {
+					t.Fatal("blocked request retained allowance")
+				}
+			}
+		})
+	}
+}
+
+func TestStickyRetryDoesNotAdvancePeerOrderOrNewSessionCursor(t *testing.T) {
+	health := newFakeHealth()
+	selector := newTestScheduler(t, health, Policy{}, nil)
+	a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+	a.DisableHealth = true
+	b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+	b.DisableHealth = true
+	c := compileProvider(t, providerC, "c", []string{"m"}, 0)
+	c.DisableHealth = true
+	snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b, c}}
+	selector.Reconcile(snapshot)
+	key := normalKey("session", "m")
+	seed, err := selector.Acquire(snapshot, key, NewRequestSelection(DefaultAttemptPolicy()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.Report(seed, Outcome{Class: FailureNone})
+	r := NewRequestSelection(AttemptPolicy{MaxAttempts: 7, StickyNoCooldownAttempts: 3})
+	for i, want := range []string{providerA, providerA, providerA, providerB, providerC, providerA, providerB} {
+		lease, err := selector.Acquire(snapshot, key, r)
+		if err != nil || lease.Provider.ID != want {
+			t.Fatalf("attempt %d: %#v %v", i+1, lease, err)
+		}
+		r.StartAttempt()
+		selector.Report(lease, Outcome{Class: FailureChannelTransient})
+	}
+	next, err := selector.Acquire(snapshot, normalKey("new-session", "m"), NewRequestSelection(DefaultAttemptPolicy()))
+	if err != nil || next.Provider.ID != providerB {
+		t.Fatalf("sticky retry advanced shared cursor: %#v %v", next, err)
+	}
+	selector.Report(next, Outcome{Class: FailureNone})
+}
+
+func TestStickyRetryCannotRefreshOrRecreateInvalidatedSource(t *testing.T) {
+	for _, invalidation := range []string{"expired", "evicted", "same-provider replacement", "other-provider replacement", "generation"} {
+		t.Run(invalidation, func(t *testing.T) {
+			now := time.Now()
+			health := newFakeHealth()
+			selector := newTestScheduler(t, health, Policy{}, func() time.Time { return now })
+			a := compileProvider(t, providerA, "a", []string{"m"}, 0)
+			a.DisableHealth = true
+			b := compileProvider(t, providerB, "b", []string{"m"}, 0)
+			b.DisableHealth = true
+			snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+			selector.Reconcile(snapshot)
+			key := normalKey("session", "m")
+			seed, err := selector.Acquire(snapshot, key, NewRequestSelection(DefaultAttemptPolicy()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selector.Report(seed, Outcome{Class: FailureNone})
+			r := NewRequestSelection(AttemptPolicy{MaxAttempts: 6, StickyNoCooldownAttempts: 3})
+			first, err := selector.Acquire(snapshot, key, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.StartAttempt()
+			selector.Report(first, Outcome{Class: FailureChannelTransient})
+			source := r.source
+			switch invalidation {
+			case "expired":
+				now = now.Add(2 * time.Hour)
+				selector.expireLocked(now)
+			case "evicted":
+				selector.removeAssignmentLocked(selector.assignments[key])
+			case "same-provider replacement":
+				selector.putAssignmentLocked(key, a, now)
+			case "other-provider replacement":
+				selector.putAssignmentLocked(key, b, now)
+			case "generation":
+				cfg := a.Config()
+				cfg.APIKey = "new-test-key"
+				newA := compileProviderConfig(t, cfg)
+				newSnapshot := &fakeSnapshot{revision: 2, providers: []*provider.CompiledProvider{newA, b}}
+				selector.Reconcile(newSnapshot)
+				lease, err := selector.Acquire(newSnapshot, key, NewRequestSelection(DefaultAttemptPolicy()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				selector.Report(lease, Outcome{Class: FailureNone})
+			}
+			entry := selector.assignments[key]
+			var version uint64
+			var lastUsed time.Time
+			if entry != nil {
+				version = entry.version
+				lastUsed = entry.assignment.LastUsedAt
+			}
+			now = now.Add(time.Minute)
+			for i := 0; i < 3; i++ {
+				lease, err := selector.Acquire(snapshot, key, r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.source != source {
+					t.Fatal("source recaptured")
+				}
+				r.StartAttempt()
+				outcome := Outcome{Class: FailureChannelTransient}
+				if i == 2 {
+					outcome.Class = FailureNone
+				}
+				selector.Report(lease, outcome)
+			}
+			current := selector.assignments[key]
+			if entry == nil && current != nil {
+				t.Fatal("expired source recreated")
+			}
+			if entry != nil && (current == nil || current.version != version || !current.assignment.LastUsedAt.Equal(lastUsed)) {
+				t.Fatal("replacement source refreshed or overwritten")
+			}
+		})
+	}
+}
+
+func TestStickyRetryQualificationIsSeparateByModelAndType(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		key    StickyKey
+		expire bool
+	}{
+		{"other model", normalKey("session", "other"), false},
+		{"classifier", StickyKey{SessionID: "session", Model: "m", RequestType: traffic.RequestTypeClassifier}, false},
+		{"expired before selection", normalKey("session", "m"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			health := newFakeHealth()
+			selector := newTestScheduler(t, health, Policy{}, func() time.Time { return now })
+			a := compileProvider(t, providerA, "a", []string{"m", "other"}, 0)
+			a.DisableHealth = true
+			b := compileProvider(t, providerB, "b", []string{"m", "other"}, 0)
+			b.DisableHealth = true
+			snapshot := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b}}
+			selector.Reconcile(snapshot)
+			seed, err := selector.Acquire(snapshot, normalKey("session", "m"), NewRequestSelection(DefaultAttemptPolicy()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selector.Report(seed, Outcome{Class: FailureNone})
+			if tc.expire {
+				now = now.Add(2 * time.Hour)
+			}
+			r := NewRequestSelection(AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 5})
+			for i := 0; i < 3; i++ {
+				lease, err := selector.Acquire(snapshot, tc.key, r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if lease.SelectionReason != SelectionRegular {
+					t.Fatal("ineligible allowance")
+				}
+				r.StartAttempt()
+				selector.Report(lease, Outcome{Class: FailureChannelTransient})
+			}
+		})
+	}
 }

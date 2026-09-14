@@ -59,6 +59,7 @@
 .lg[data-kind="forward"] { box-shadow: inset 3px 0 0 var(--iris-line); }
 .lg[data-kind="success"] { box-shadow: inset 3px 0 0 rgba(18, 163, 116, 0.45); }
 .lg[data-kind="failure"] { box-shadow: inset 3px 0 0 rgba(236, 91, 80, 0.55); }
+.lg[data-kind="retry"] { box-shadow: inset 3px 0 0 var(--iris-line); }
 .lg[data-kind="failover"] { box-shadow: inset 3px 0 0 rgba(201, 118, 13, 0.55); }
 .lg[data-kind="service"], .lg[data-kind="canceled"] { box-shadow: inset 3px 0 0 var(--line-2); }
 .lg .ts { color: var(--mist-2); font-variant-numeric: tabular-nums; padding-top: 2px; white-space: nowrap; }
@@ -66,6 +67,7 @@
 .lg .lvl.INFO { color: var(--mist); background: var(--raise); } .lg .lvl.WARN { color: var(--amber); background: var(--amber-soft); } .lg .lvl.ERROR { color: var(--coral); background: var(--coral-soft); }
 .lg .kind { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 6px; font-size: 10.5px; letter-spacing: 0.06em; font-weight: 700; text-transform: uppercase; margin-top: 1px; justify-self: start; white-space: nowrap; }
 .lg .kind.forward { color: var(--iris); background: var(--iris-soft); } .lg .kind.success { color: var(--emerald); background: var(--emerald-soft); }
+.lg .kind.retry { color: var(--iris); background: var(--iris-soft); }
 .lg .kind.failure { color: var(--coral); background: var(--coral-soft); } .lg .kind.failover { color: var(--amber); background: var(--amber-soft); }
 .lg .kind.service, .lg .kind.canceled { color: var(--mist); background: var(--raise); }
 .lg .body { min-width: 0; }

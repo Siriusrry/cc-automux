@@ -492,11 +492,15 @@ func (h *Handler) recordCapturedFailure(failure *capturedFailure) {
 	h.record(event)
 }
 
-func (h *Handler) recordFailover(failure *capturedFailure, next requestAttemptLease, nextAttempt int, incoming *http.Request) {
+func (h *Handler) recordContinuation(failure *capturedFailure, next requestAttemptLease, nextAttempt int, incoming *http.Request) {
 	if failure == nil || next.Provider == nil {
 		return
 	}
-	event := h.outcomeEvent(EventFailover, failure.lease, failure.outcome, failure.attempt, failure.update)
+	kind := EventFailover
+	if next.SelectionReason == scheduler.SelectionStickyRetry {
+		kind = EventRetry
+	}
+	event := h.outcomeEvent(kind, failure.lease, failure.outcome, failure.attempt, failure.update)
 	event.PatchID = failure.patchID
 	event.PatchStage = failure.patchStage
 	event.NextProviderID = next.Provider.ID

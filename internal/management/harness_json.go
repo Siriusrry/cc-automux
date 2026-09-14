@@ -181,7 +181,7 @@ func (e *profileFieldError) Unwrap() error { return e.Err }
 var profileAllowed = map[string]struct{}{
 	"id": {}, "name": {}, "haiku_model": {}, "sonnet_model": {},
 	"opus_model": {}, "fable_model": {}, "subagent_model": {},
-	"teammate_default_model": {}, "active": {}, "max_attempts": {},
+	"teammate_default_model": {}, "active": {}, "max_attempts": {}, "sticky_no_cooldown_attempts": {},
 }
 
 func decodeProfile(data []byte) (config.Profile, error) {
@@ -211,12 +211,17 @@ func decodeProfile(data []byte) (config.Profile, error) {
 			}
 		}
 	}
-	if raw, present := object["max_attempts"]; present {
-		value, err := config.DecodeMaxAttempts(raw)
-		if err != nil {
-			return config.Profile{}, &profileFieldError{Field: "max_attempts", Err: fmt.Errorf("%w: %v", harnessconfig.ErrInvalidJSON, err)}
+	for field, destination := range map[string]*int{
+		"max_attempts":                &profile.MaxAttempts,
+		"sticky_no_cooldown_attempts": &profile.StickyNoCooldownAttempts,
+	} {
+		if raw, present := object[field]; present {
+			value, err := config.DecodeAttemptLimit(field, raw)
+			if err != nil {
+				return config.Profile{}, &profileFieldError{Field: field, Err: fmt.Errorf("%w: %v", harnessconfig.ErrInvalidJSON, err)}
+			}
+			*destination = value
 		}
-		profile.MaxAttempts = value
 	}
 	return profile.Normalize(), nil
 }

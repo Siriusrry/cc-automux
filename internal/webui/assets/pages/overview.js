@@ -24,7 +24,7 @@
     const actions = [h('a', { class: 'btn sm', href: '#/claude-code' }, 'Manage profiles')];
     if (harnessError) out.push(banner('bad', 'Profile status could not be read', [harnessError.detail || harnessError.message, ' The current attempt limit could not be confirmed.'], [h('button', { class: 'btn sm', type: 'button', onclick: retry }, 'Retry'), ...actions]));
     else if (harness && harness.state !== 'in_sync') {
-      const detail = 'Normal requests are using ' + (harness.attempt_policy_source === 'profile' ? 'the active profile attempt limit of ' : 'the default attempt limit of ') + harness.normal_max_attempts + '. ';
+      const detail = 'Normal requests are using ' + (harness.attempt_policy_source === 'profile' ? 'the active profile attempt limit of ' : 'the default attempt limit of ') + harness.normal_max_attempts + '. Sticky attempts before failover: ' + harness.normal_sticky_no_cooldown_attempts + '. ';
       if (harness.state === 'state_error') out.push(banner('bad', 'Claude Code settings could not be checked', detail + (harness.last_invalidation_reason || ''), actions));
       else if (['projection_mismatch', 'target_missing', 'target_invalid', 'target_unreadable', 'gateway_not_configured'].includes(harness.last_invalidation_reason)) out.push(banner('warn', 'Profile activation is invalid', detail + (harness.last_invalidation_reason || ''), actions));
       else out.push(banner('warn', 'No active profile', detail + (harness.last_invalidation_reason || 'Activate a profile to apply its settings.'), actions));
@@ -200,6 +200,7 @@
         body.push(h('div', { class: 'ov-big' }, active ? active.name : 'No profile active', pill(stateText, stateKind)));
         body.push(h('p', { class: 'ov-line' }, h('span', { class: 'mono trunc', style: { display: 'block', maxWidth: '100%' }, 'data-tip': harness.resolved_settings_path }, harness.resolved_settings_path)));
         body.push(h('p', { class: 'ov-line' }, 'Max attempts per request: ' + harness.normal_max_attempts));
+        body.push(h('p', { class: 'ov-line' }, 'Sticky attempts before failover: ' + harness.normal_sticky_no_cooldown_attempts));
         if (active) {
           const mapTag = (slot, env, model) => tip(tag(slot + ' → ' + model), env + ' = ' + model + '\nWritten into settings.json while this profile is active.');
           body.push(h('div', { class: 'ov-cands' }, mapTag('haiku', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', active.haiku_model), mapTag('sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL', active.sonnet_model), mapTag('opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL', active.opus_model), mapTag('fable', 'ANTHROPIC_DEFAULT_FABLE_MODEL', active.fable_model)));

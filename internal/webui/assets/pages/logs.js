@@ -13,6 +13,7 @@
     success: "Success — the upstream answered and the provider's health channel was marked healthy.",
     failure: 'Failure — the request could not be completed. Expand the record for details.',
     canceled: 'Canceled — Claude Code canceled or disconnected before the upstream call finished. Not a provider failure.',
+    retry: 'Retry — after this failure the sticky provider was selected again within its continuous attempt limit.',
     failover: 'Failover — after this failure the request continued with another upstream attempt.'
   };
   const EVENT_TIP = {
@@ -35,7 +36,7 @@
   const PAGE = 200;
   const BUFFER_MAX = 2000;
   const LEVELS = ['INFO', 'WARN', 'ERROR'];
-  const KINDS = ['forward', 'success', 'failure', 'failover', 'canceled'];
+  const KINDS = ['forward', 'success', 'failure', 'retry', 'failover', 'canceled'];
   const EVENTS = ['listening', 'pending_rejected', 'restart_failed'];
   const KNOWN = ['time', 'level', 'msg', 'seq', 'kind', 'event', 'truncated', 'ref'];
 
@@ -67,7 +68,7 @@
       // ---- toolbar ----
       const liveSw = switchCtl({ checked: true, label: 'Live', class: 'ok', tip: 'Stream new records as they are written. Off shows history only.', onchange: (v) => { state.live = v; reload(); } });
       const levelTg = toggleGroup(LEVELS, [], (v, on) => setMulti('level', v, on));
-      const kindTg = toggleGroup(KINDS, [], (v, on) => setMulti('kind', v, on), { forward: 'iris', success: 'ok', failure: 'bad', failover: 'warn' });
+      const kindTg = toggleGroup(KINDS, [], (v, on) => setMulti('kind', v, on), { forward: 'iris', success: 'ok', failure: 'bad', retry: 'iris', failover: 'warn' });
       const providerSel = select({ value: '', options: [{ value: '', label: 'Any provider' }], onchange: (e) => { state.filter.provider_id = e.target.value ? [e.target.value] : []; reload(); } });
       providerSel.setAttribute('aria-label', 'Provider');
       const moreBtn = h('button', { class: 'btn sm', type: 'button', 'aria-expanded': 'false', onclick: () => { more.hidden = !more.hidden; moreBtn.setAttribute('aria-expanded', String(!more.hidden)); } }, icon('filter'), 'More filters');
@@ -175,6 +176,7 @@
           if (typeof r.stream === 'boolean') parts.push(h('span', { class: 'rt' }, r.stream ? 'stream' : 'non-stream'));
           if (r.http_status) parts.push(h('span', { class: 'hs' + (r.http_status >= 400 ? ' bad' : '') }, 'HTTP ' + r.http_status));
           if (r.attempt) parts.push(h('span', { class: 'm' }, 'attempt ' + r.attempt));
+          if (r.kind === 'retry' && r.next_provider_name) parts.push(h('span', { class: 'arrow' }, 'Retry ' + r.next_provider_name + ' (attempt ' + r.next_attempt + ')'));
           if (r.kind === 'failover' && r.next_provider_name) parts.push(h('span', { class: 'arrow' }, '→ ' + r.next_provider_name + ' (attempt ' + r.next_attempt + ')'));
           if (r.patch_id) parts.push(h('span', { class: 'm' }, 'patch ' + r.patch_id + '/' + r.patch_stage));
         }

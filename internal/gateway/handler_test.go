@@ -887,7 +887,7 @@ func TestGatewayCapturesAttemptPolicyOncePerRequest(t *testing.T) {
 			snapshot := &fakeSnapshot{
 				revision:      1,
 				gatewayKey:    "gateway",
-				attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: maxAttempts},
+				attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: maxAttempts, StickyNoCooldownAttempts: 1},
 				providers:     providers,
 			}
 			handler := New(func() scheduler.Snapshot { return snapshot }, selector)

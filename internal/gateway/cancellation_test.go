@@ -42,54 +42,63 @@ func (s *cancellationSelector) Report(lease scheduler.AttemptLease, outcome sche
 }
 
 func TestCancellationWhileSelectingNextAttemptIsRecorded(t *testing.T) {
-	for _, point := range []string{"between", "acquire_error", "acquired"} {
-		t.Run(point, func(t *testing.T) {
-			release := make(chan struct{})
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = io.Copy(io.Discard, r.Body)
-				w.WriteHeader(429)
-				w.(http.Flusher).Flush()
-				select {
-				case <-release:
-					_, _ = io.WriteString(w, "original failure")
-				case <-r.Context().Done():
+	for _, stickyRetry := range []bool{false, true} {
+		for _, point := range []string{"between", "acquire_error", "acquired"} {
+			t.Run(point, func(t *testing.T) {
+				release := make(chan struct{})
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = io.Copy(io.Discard, r.Body)
+					w.WriteHeader(429)
+					w.(http.Flusher).Flush()
+					select {
+					case <-release:
+						_, _ = io.WriteString(w, "original failure")
+					case <-r.Context().Done():
+					}
+				}))
+				defer upstream.Close()
+				first := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", upstream.URL, "key", "m", false)
+				second := compileTestProvider(t, "22222222-2222-4222-8222-222222222222", "two", upstream.URL, "key", "m", false)
+				snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{first, second}}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if stickyRetry {
+					second = first
 				}
-			}))
-			defer upstream.Close()
-			first := compileTestProvider(t, "11111111-1111-4111-8111-111111111111", "one", upstream.URL, "key", "m", false)
-			second := compileTestProvider(t, "22222222-2222-4222-8222-222222222222", "two", upstream.URL, "key", "m", false)
-			snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{first, second}}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			selector := &cancellationSelector{fakeSelector: &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(first, "m"), leaseFor(second, "m")}}, cancel: cancel, point: point}
-			events := &eventCollector{}
-			h := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{Recorder: events})
-			defer h.Close()
-			h.ServeHTTP(httptest.NewRecorder(), gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`).WithContext(ctx))
-			close(release)
-			got := waitGatewayEvents(t, events, 3)
-			var canceled, failure Event
-			for _, event := range got {
-				if event.Kind == EventCanceled {
-					canceled = event
+				selector := &cancellationSelector{fakeSelector: &fakeSelector{leases: []scheduler.AttemptLease{leaseFor(first, "m"), leaseFor(second, "m")}}, cancel: cancel, point: point}
+				if stickyRetry {
+					selector.leases[1].SelectionReason = scheduler.SelectionStickyRetry
 				}
-				if event.Kind == EventFailure {
-					failure = event
+				events := &eventCollector{}
+				h := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{Recorder: events})
+				defer h.Close()
+				h.ServeHTTP(httptest.NewRecorder(), gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`).WithContext(ctx))
+				close(release)
+				got := waitGatewayEvents(t, events, 3)
+				var canceled, failure Event
+				for _, event := range got {
+					if event.Kind == EventCanceled {
+						canceled = event
+					}
+					if event.Kind == EventFailure {
+						failure = event
+					}
 				}
-			}
-			if canceled.Attempt != 2 || canceled.CancelPhase != cancelBeforeUpstream || failure.RawError != "original failure" || failure.NextProviderID != "" {
-				t.Fatalf("events=%#v", got)
-			}
-			_, reports := selector.snapshot()
-			if point == "acquired" {
-				if canceled.ProviderID != second.ID || len(reports) != 2 || reports[1].Class != scheduler.FailureClientCanceled {
+				if canceled.Attempt != 2 || canceled.CancelPhase != cancelBeforeUpstream || failure.RawError != "original failure" || failure.NextProviderID != "" {
+					t.Fatalf("events=%#v", got)
+				}
+				_, reports := selector.snapshot()
+				if point == "acquired" {
+					if canceled.ProviderID != second.ID || len(reports) != 2 || reports[1].Class != scheduler.FailureClientCanceled {
+						t.Fatalf("canceled=%#v reports=%#v", canceled, reports)
+					}
+				} else if canceled.ProviderID != "" || len(reports) != 1 {
 					t.Fatalf("canceled=%#v reports=%#v", canceled, reports)
 				}
-			} else if canceled.ProviderID != "" || len(reports) != 1 {
-				t.Fatalf("canceled=%#v reports=%#v", canceled, reports)
-			}
-		})
+			})
+		}
 	}
+
 }
 
 func TestUpstreamResultAndCancellationAreIndependent(t *testing.T) {

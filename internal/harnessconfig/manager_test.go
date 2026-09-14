@@ -499,6 +499,7 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	}
 	profile := managerProfile(testProfileOneID, "one")
 	profile.MaxAttempts = 8
+	profile.StickyNoCooldownAttempts = 5
 	if _, err := harness.CreateProfile(ClaudeCodeAdapterID, profile); err != nil {
 		t.Fatal(err)
 	}
@@ -518,12 +519,13 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	if err != nil || !result.Active {
 		t.Fatalf("retry activation = %#v, err %v", result, err)
 	}
-	if result.Harness.NormalMaxAttempts != 8 || result.Harness.AttemptPolicySource != "profile" {
+	if result.Harness.NormalMaxAttempts != 8 || result.Harness.NormalStickyNoCooldownAttempts != 5 || result.Harness.AttemptPolicySource != "profile" {
 		t.Fatalf("active policy = %#v", result)
 	}
 	oldSnapshot := runtimeManager.Snapshot()
 	changed := profile
 	changed.MaxAttempts = 2
+	changed.StickyNoCooldownAttempts = 4
 	store.setFailNext(errors.New("injected budget save failure"))
 	if _, err := harness.UpdateProfile(ClaudeCodeAdapterID, profile.ID, changed); err == nil {
 		t.Fatal("save should fail")
@@ -548,10 +550,10 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	if got := runtimeManager.Config().Harnesses.ClaudeCode.ActiveProfileID; got != profile.ID {
 		t.Fatalf("failed reconciliation clear changed runtime active ID to %q", got)
 	}
-	if state.NormalMaxAttempts != 3 || state.AttemptPolicySource != "default" || runtimeManager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 {
+	if state.NormalMaxAttempts != 3 || state.NormalStickyNoCooldownAttempts != 1 || state.AttemptPolicySource != "default" || runtimeManager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 || runtimeManager.Snapshot().NormalAttemptPolicy().StickyNoCooldownAttempts != 1 {
 		t.Fatalf("failed clear retained invalid budget: %#v", state)
 	}
-	if oldSnapshot.NormalAttemptPolicy().MaxAttempts != 8 {
+	if oldSnapshot.NormalAttemptPolicy().MaxAttempts != 8 || oldSnapshot.NormalAttemptPolicy().StickyNoCooldownAttempts != 5 {
 		t.Fatal("old snapshot mutated")
 	}
 	if _, err := runtimeManager.Update(func(cfg *config.Config) error {
@@ -561,7 +563,7 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if runtimeManager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 {
+	if runtimeManager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 || runtimeManager.Snapshot().NormalAttemptPolicy().StickyNoCooldownAttempts != 1 {
 		t.Fatal("unrelated update lifted invalidation guard")
 	}
 	store.setFailNext(nil)

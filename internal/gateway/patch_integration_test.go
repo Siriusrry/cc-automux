@@ -21,6 +21,7 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/bodyfile"
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/flow"
+	"github.com/Siriusrry/cc-automux/internal/health"
 	"github.com/Siriusrry/cc-automux/internal/patch"
 	"github.com/Siriusrry/cc-automux/internal/provider"
 	"github.com/Siriusrry/cc-automux/internal/scheduler"
@@ -441,7 +442,7 @@ func TestGatewayPlannerReceivesOriginalFlowSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAttempts := scheduler.AttemptPolicy{MaxAttempts: 1}
+	wantAttempts := scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1}
 	wantAuto := flow.AutoModeSnapshot{Mode: "test-mode", ClassifierModel: "test-classifier"}
 	flows, err := flow.NewRegistry(snapshotCheckingClassifierPlanner{wantAttempts: wantAttempts, wantAuto: wantAuto})
 	if err != nil {
@@ -825,5 +826,84 @@ func TestPreparationFailureKeepsIntendedAttemptWithoutSpendingBudget(t *testing.
 				}
 			})
 		}
+	}
+}
+
+func TestStickyRetryCreatesIndependentPatchInstancesAndBodies(t *testing.T) {
+	const patchID = "test-sticky-body"
+	var instances atomic.Int32
+	registry := testRequestPatchRegistry(t, patchID, func(patch.FactoryContext) patch.RequestPatch {
+		instances.Add(1)
+		applied := false
+		return requestPatchFunc(func(_ patch.PatchContext, request *patch.MutableRequest) error {
+			if applied {
+				return errors.New("patch instance reused")
+			}
+			applied = true
+			reader, err := request.Body.OpenReader()
+			if err != nil {
+				return err
+			}
+			data, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				return err
+			}
+			if string(data) != `{"model":"m"}` {
+				return errors.New("previous attempt body reused")
+			}
+			body, index, err := bodyfile.ApplyEditsAndScan(request.Body, []bodyfile.Edit{{Start: 1, End: 1, Replacement: []byte(`"added":true,`)}}, bodyfile.ScanSpec{})
+			if err != nil {
+				return err
+			}
+			if err = request.SetBody(body, index); err != nil {
+				body.Close()
+			}
+			return err
+		})
+	})
+	var calls atomic.Int32
+	var badBody atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		if string(data) != `{"added":true,"model":"m"}` {
+			badBody.Store(true)
+		}
+		calls.Add(1)
+		w.WriteHeader(503)
+		io.WriteString(w, "busy")
+	}))
+	defer upstream.Close()
+	item := compileWithRegistry(t, registry, "11111111-1111-4111-8111-111111111111", "A", upstream.URL, "key", "m", patchID)
+	item.DisableHealth = true
+	snapshot := &fakeSnapshot{revision: 1, gatewayKey: "gateway", providers: []*provider.CompiledProvider{item}, attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 3}}
+	store := health.NewDefault()
+	selector, err := scheduler.New(store, scheduler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.Reconcile(snapshot)
+	key := scheduler.StickyKey{SessionID: "session", Model: "m", RequestType: traffic.RequestTypeNormal}
+	lease, err := selector.Acquire(snapshot, key, scheduler.NewRequestSelection(snapshot.AttemptPolicy()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNone})
+	dir := t.TempDir()
+	events := &eventCollector{}
+	handler := NewWithOptions(func() scheduler.Snapshot { return snapshot }, selector, Options{Recorder: events, ReplayDirectory: dir})
+	defer handler.Close()
+	r := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m"}`)
+	r.Header.Set("X-Claude-Code-Session-Id", "session")
+	w := httptest.NewRecorder()
+	initialInstances := instances.Load()
+	handler.ServeHTTP(w, r)
+	if w.Code != 503 || calls.Load() != 3 || instances.Load()-initialInstances != 3 || badBody.Load() {
+		t.Fatalf("status=%d calls=%d instances=%d bad_body=%t", w.Code, calls.Load(), instances.Load(), badBody.Load())
+	}
+	waitGatewayEvents(t, events, 6)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("temporary files=%v err=%v", entries, err)
 	}
 }

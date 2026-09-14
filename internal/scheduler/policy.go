@@ -11,12 +11,16 @@ import (
 // AttemptPolicy contains request-scoped retry limits. Runtime snapshots own a
 // value so an in-flight request keeps the policy it captured at start.
 type AttemptPolicy struct {
-	MaxAttempts int
+	MaxAttempts              int
+	StickyNoCooldownAttempts int
 }
 
 func (p AttemptPolicy) Validate() error {
 	if p.MaxAttempts <= 0 {
 		return errors.New("maximum attempts must be positive")
+	}
+	if p.StickyNoCooldownAttempts <= 0 {
+		return errors.New("sticky no-cooldown attempts must be positive")
 	}
 	return nil
 }
@@ -51,13 +55,15 @@ func DefaultPolicy() Policy {
 // DefaultAttemptPolicy is the canonical default for the request retry budget.
 // It is intentionally independent from the health and affinity policy.
 func DefaultAttemptPolicy() AttemptPolicy {
-	return AttemptPolicy{MaxAttempts: config.DefaultNormalMaxAttempts}
+	return AttemptPolicy{MaxAttempts: config.DefaultNormalMaxAttempts, StickyNoCooldownAttempts: config.DefaultStickyNoCooldownAttempts}
 }
 
 // DefaultClassifierAttemptPolicy is the immutable one-attempt classifier
 // budget carried by runtime snapshots. Classifier traffic uses it independently
 // from the normal request budget.
-func DefaultClassifierAttemptPolicy() AttemptPolicy { return AttemptPolicy{MaxAttempts: 1} }
+func DefaultClassifierAttemptPolicy() AttemptPolicy {
+	return AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1}
+}
 
 // ResolveAttemptPolicy reads and validates the immutable request budget from a
 // runtime snapshot. It never supplies a request-path default.

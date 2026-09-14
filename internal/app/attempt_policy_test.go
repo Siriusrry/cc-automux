@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,15 +48,17 @@ func TestProfileSwitchChangesNewRequestBudgetOnly(t *testing.T) {
 			cfg.Providers = []config.ProviderConfig{{ID: "11111111-1111-4111-8111-111111111111", Name: "A", BaseURL: upstream.URL, APIKey: "key", Models: []string{"m"}, Enabled: true, DisableHealth: true}}
 			for i, id := range []string{"22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"} {
 				budget := 8
+				sticky := 5
 				if i == 1 {
 					budget = 2
+					sticky = 1
 				}
-				cfg.Harnesses.ClaudeCode.Profiles = append(cfg.Harnesses.ClaudeCode.Profiles, config.Profile{ID: id, Name: id, HaikuModel: "m", SonnetModel: "m", OpusModel: "m", FableModel: "m", MaxAttempts: budget})
+				cfg.Harnesses.ClaudeCode.Profiles = append(cfg.Harnesses.ClaudeCode.Profiles, config.Profile{ID: id, Name: id, HaikuModel: "m", SonnetModel: "m", OpusModel: "m", FableModel: "m", MaxAttempts: budget, StickyNoCooldownAttempts: sticky})
 			}
 			root := t.TempDir()
 			path := filepath.Join(root, "config.json")
 			writeAppConfig(t, path, cfg)
-			var logs bytes.Buffer
+			var logs lockedLogBuffer
 			app, err := New(Options{ConfigPath: path, LogOpener: appLogOpenerFor(&logs), HarnessHomeDir: func() (string, error) { return filepath.Join(root, "home"), nil }})
 			if err != nil {
 				t.Fatal(err)
@@ -76,6 +77,7 @@ func TestProfileSwitchChangesNewRequestBudgetOnly(t *testing.T) {
 					t.Errorf("response=%d", w.Code)
 				}
 			}
+			serve("seed")
 			done := make(chan struct{})
 			go func() { defer close(done); serve("old") }()
 			select {
@@ -88,6 +90,7 @@ func TestProfileSwitchChangesNewRequestBudgetOnly(t *testing.T) {
 			} else {
 				p := cfg.Harnesses.ClaudeCode.Profiles[0]
 				p.MaxAttempts = 2
+				p.StickyNoCooldownAttempts = 1
 				_, err = app.harnesses.UpdateProfile(harnessconfig.ClaudeCodeAdapterID, p.ID, p)
 			}
 			if err != nil {
@@ -99,6 +102,16 @@ func TestProfileSwitchChangesNewRequestBudgetOnly(t *testing.T) {
 			case <-done:
 			case <-time.After(3 * time.Second):
 				t.Fatal("old request did not finish")
+			}
+			app.Close()
+			retryCounts := map[string]int{}
+			for _, event := range decodeLogLines(t, []byte(logs.String())) {
+				if event["kind"] == "retry" {
+					retryCounts[strings.Split(event["upstream_url"].(string), "?")[1]]++
+				}
+			}
+			if retryCounts["old"] != 4 || retryCounts["new"] != 0 || retryCounts["seed"] != 0 {
+				t.Fatalf("snapshot retry counts=%v", retryCounts)
 			}
 			mu.Lock()
 			defer mu.Unlock()
@@ -132,12 +145,12 @@ func TestClassifierIgnoresLargeActiveProfileBudget(t *testing.T) {
 				cfg.AutoMode.FixedProvider = &config.FixedProviderConfig{BaseURL: upstream.URL, APIKey: "key", Protocol: "anthropic_messages"}
 			}
 			cfg.Providers = []config.ProviderConfig{{ID: "11111111-1111-4111-8111-111111111111", Name: "A", BaseURL: upstream.URL, APIKey: "key", Models: []string{"m"}, Enabled: true, DisableHealth: true}}
-			p := config.Profile{ID: "22222222-2222-4222-8222-222222222222", Name: "Large", HaikuModel: "m", SonnetModel: "m", OpusModel: "m", FableModel: "m", MaxAttempts: 9007199254740991}
+			p := config.Profile{ID: "22222222-2222-4222-8222-222222222222", Name: "Large", HaikuModel: "m", SonnetModel: "m", OpusModel: "m", FableModel: "m", MaxAttempts: 9007199254740991, StickyNoCooldownAttempts: 9007199254740991}
 			cfg.Harnesses.ClaudeCode.Profiles = []config.Profile{p}
 			root := t.TempDir()
 			path := filepath.Join(root, "config.json")
 			writeAppConfig(t, path, cfg)
-			var logs bytes.Buffer
+			var logs lockedLogBuffer
 			app, err := New(Options{ConfigPath: path, LogOpener: appLogOpenerFor(&logs), HarnessHomeDir: func() (string, error) { return filepath.Join(root, "home"), nil }})
 			if err != nil {
 				t.Fatal(err)
@@ -148,11 +161,20 @@ func TestClassifierIgnoresLargeActiveProfileBudget(t *testing.T) {
 			}
 			r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m","system":[{"text":"You are a security monitor for autonomous AI coding agents"}]}`))
 			r.Header.Set("Authorization", "Bearer gateway-key")
+			r.Header.Set("X-Claude-Code-Session-Id", "classifier-session")
 			w := httptest.NewRecorder()
 			app.server.Handler.ServeHTTP(w, r)
+			repeated := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m","system":[{"text":"You are a security monitor for autonomous AI coding agents"}]}`))
+			repeated.Header = r.Header.Clone()
+			w = httptest.NewRecorder()
+			app.server.Handler.ServeHTTP(w, repeated)
+			app.Close()
+			if strings.Contains(logs.String(), `"kind":"retry"`) {
+				t.Fatal("classifier produced retry")
+			}
 			mu.Lock()
 			defer mu.Unlock()
-			if calls != 1 || w.Code != 503 {
+			if calls != 2 || w.Code != 503 {
 				t.Fatalf("classifier calls=%d status=%d", calls, w.Code)
 			}
 		})

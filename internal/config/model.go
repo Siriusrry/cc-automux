@@ -120,8 +120,16 @@ type HarnessMutation interface {
 	ClearActiveProfileID() error
 	SetActiveProfileID(string) error
 	InvalidateActiveProfile() error
-	NormalAttemptStatus() (int, string)
+	NormalAttemptStatus() NormalAttemptState
 	ReconcileActiveProfile() (HarnessValidation, error)
+}
+
+// NormalAttemptState carries both effective limits and their common origin
+// without exposing scheduler types to configuration transactions.
+type NormalAttemptState struct {
+	MaxAttempts              int
+	StickyNoCooldownAttempts int
+	Source                   string
 }
 
 // HarnessValidation describes a read-only check of the supplied configuration.
@@ -155,15 +163,16 @@ type ClaudeCodeConfig struct {
 // Profile stores one immutable-by-ID model mapping. Empty optional model
 // fields mean that the corresponding Claude Code setting is unset.
 type Profile struct {
-	ID                   string `json:"id"`
-	Name                 string `json:"name"`
-	HaikuModel           string `json:"haiku_model"`
-	SonnetModel          string `json:"sonnet_model"`
-	OpusModel            string `json:"opus_model"`
-	FableModel           string `json:"fable_model"`
-	SubagentModel        string `json:"subagent_model"`
-	TeammateDefaultModel string `json:"teammate_default_model"`
-	MaxAttempts          int    `json:"max_attempts"`
+	ID                       string `json:"id"`
+	Name                     string `json:"name"`
+	HaikuModel               string `json:"haiku_model"`
+	SonnetModel              string `json:"sonnet_model"`
+	OpusModel                string `json:"opus_model"`
+	FableModel               string `json:"fable_model"`
+	SubagentModel            string `json:"subagent_model"`
+	TeammateDefaultModel     string `json:"teammate_default_model"`
+	MaxAttempts              int    `json:"max_attempts"`
+	StickyNoCooldownAttempts int    `json:"sticky_no_cooldown_attempts"`
 }
 
 func DefaultClaudeCodeConfig() ClaudeCodeConfig {
@@ -183,11 +192,15 @@ func DefaultHarnesses() HarnessesConfig {
 func (p Profile) Clone() Profile { return p }
 
 const DefaultNormalMaxAttempts = 3
+const DefaultStickyNoCooldownAttempts = 1
 const MaxSafeAttempts int64 = 9007199254740991
 
 func (p Profile) Normalize() Profile {
 	if p.MaxAttempts == 0 {
 		p.MaxAttempts = DefaultNormalMaxAttempts
+	}
+	if p.StickyNoCooldownAttempts == 0 {
+		p.StickyNoCooldownAttempts = DefaultStickyNoCooldownAttempts
 	}
 	return p
 }
@@ -516,7 +529,7 @@ func (current Config) ActiveProfileInputsEqual(next Config) bool {
 	if left.PathMode != right.PathMode || left.SettingsPath != right.SettingsPath || left.DisableTelemetry != right.DisableTelemetry {
 		return false
 	}
-	// Names are display-only and max_attempts controls only gateway execution.
+	// Names are display-only and attempt limits control only gateway execution.
 	// Neither changes the managed client settings or invalidates activation.
 	leftProfile, leftOK := findProfile(left.Profiles, activeID)
 	rightProfile, rightOK := findProfile(right.Profiles, activeID)
@@ -700,8 +713,11 @@ func validateClaudeCode(prefix string, value ClaudeCodeConfig) error {
 }
 
 func validateProfile(prefix string, profile Profile) error {
-	if err := ValidateMaxAttempts(profile.MaxAttempts); err != nil {
+	if err := ValidateAttemptLimit("max_attempts", profile.MaxAttempts); err != nil {
 		return &ValidationError{Field: prefix + ".max_attempts", Message: err.Error()}
+	}
+	if err := ValidateAttemptLimit("sticky_no_cooldown_attempts", profile.StickyNoCooldownAttempts); err != nil {
+		return &ValidationError{Field: prefix + ".sticky_no_cooldown_attempts", Message: err.Error()}
 	}
 	if !isUUID(profile.ID) {
 		return validation(prefix+".id", "must be a canonical UUID")

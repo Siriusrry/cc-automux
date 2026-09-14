@@ -132,8 +132,8 @@ func TestNormalPlannerBuildsImmutableProviderPoolPlan(t *testing.T) {
 	ingress := flowTestIngress(t, traffic.RequestTypeNormal)
 	snapshot := &flowTestSnapshot{
 		revision:   41,
-		normal:     scheduler.AttemptPolicy{MaxAttempts: 3},
-		classifier: scheduler.AttemptPolicy{MaxAttempts: 1},
+		normal:     scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 1},
+		classifier: scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1},
 	}
 	plan, err := NewNormalPlanner().Build(context.Background(), snapshot, ingress)
 	if err != nil {
@@ -172,7 +172,7 @@ func TestNormalPlannerBuildsImmutableProviderPoolPlan(t *testing.T) {
 func TestNormalPlannerRejectsInvalidInputs(t *testing.T) {
 	planner := NewNormalPlanner()
 	valid := flowTestIngress(t, traffic.RequestTypeNormal)
-	validSnapshot := &flowTestSnapshot{normal: scheduler.AttemptPolicy{MaxAttempts: 3}}
+	validSnapshot := &flowTestSnapshot{normal: scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 1}}
 
 	if _, err := planner.Build(context.Background(), nil, valid); err == nil {
 		t.Fatal("nil snapshot succeeded")
@@ -208,7 +208,7 @@ func TestExecutionPlanValidation(t *testing.T) {
 	validPool := ExecutionPlan{
 		PreparedRequest: prepared,
 		TargetMode:      TargetModeProviderPool,
-		AttemptPolicy:   scheduler.AttemptPolicy{MaxAttempts: 3},
+		AttemptPolicy:   scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 1},
 	}
 	if err := validPool.Validate(); err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestExecutionPlanValidation(t *testing.T) {
 	validFixed.PreparedRequest = preparedClassifier
 	validFixed.TargetMode = TargetModeFixedTarget
 	validFixed.FixedTarget = &provider.CompiledFixedTarget{ID: "fixed", Protocol: "openai_responses"}
-	validFixed.AttemptPolicy = scheduler.AttemptPolicy{MaxAttempts: 1}
+	validFixed.AttemptPolicy = scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1}
 	if err := validFixed.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestExecutionPlanValidation(t *testing.T) {
 		}()},
 		{name: "classifier wrong budget", plan: func() ExecutionPlan {
 			p := validFixed
-			p.AttemptPolicy = scheduler.AttemptPolicy{MaxAttempts: 3}
+			p.AttemptPolicy = scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 1}
 			return p
 		}()},
 	}
@@ -264,8 +264,8 @@ func TestDispatcherSupportsFutureTypeWithoutBusinessSwitch(t *testing.T) {
 	ingress := flowTestIngress(t, futureType)
 	prepared := flowTestPrepared(t, futureType)
 	snapshot := &flowTestSnapshot{
-		normal:     scheduler.AttemptPolicy{MaxAttempts: 3},
-		classifier: scheduler.AttemptPolicy{MaxAttempts: 1},
+		normal:     scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 1},
+		classifier: scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1},
 	}
 	type contextKey struct{}
 	ctx := context.WithValue(context.Background(), contextKey{}, "expected")
@@ -280,7 +280,7 @@ func TestDispatcherSupportsFutureTypeWithoutBusinessSwitch(t *testing.T) {
 			return ExecutionPlan{
 				PreparedRequest: prepared,
 				TargetMode:      TargetModeProviderPool,
-				AttemptPolicy:   scheduler.AttemptPolicy{MaxAttempts: 1},
+				AttemptPolicy:   scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1},
 			}, nil
 		},
 	}
@@ -325,7 +325,7 @@ func TestDispatcherSupportsFutureTypeWithoutBusinessSwitch(t *testing.T) {
 
 func TestDispatcherFailsClosedForMissingBuildErrorAndInvalidPlan(t *testing.T) {
 	ingress := flowTestIngress(t, traffic.RequestTypeNormal)
-	snapshot := &flowTestSnapshot{normal: scheduler.AttemptPolicy{MaxAttempts: 3}}
+	snapshot := &flowTestSnapshot{normal: scheduler.AttemptPolicy{MaxAttempts: 3, StickyNoCooldownAttempts: 1}}
 	var nilDispatcher *Dispatcher
 	if _, err := nilDispatcher.Dispatch(context.Background(), snapshot, ingress); !errors.Is(err, ErrMissingPlanner) {
 		t.Fatalf("nil dispatcher error = %v", err)
@@ -358,7 +358,7 @@ func TestDispatcherFailsClosedForMissingBuildErrorAndInvalidPlan(t *testing.T) {
 	invalid, err := NewRegistry(&flowTestPlanner{
 		typ: traffic.RequestTypeNormal,
 		build: func(context.Context, SnapshotView, traffic.IngressRequest) (ExecutionPlan, error) {
-			return ExecutionPlan{TargetMode: TargetModeProviderPool, AttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: 1}}, nil
+			return ExecutionPlan{TargetMode: TargetModeProviderPool, AttemptPolicy: scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1}}, nil
 		},
 	})
 	if err != nil {

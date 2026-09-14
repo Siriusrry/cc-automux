@@ -64,48 +64,57 @@ const (
 // later management/API layers. It never contains unknown target fields or
 // credentials read from the target document.
 type HarnessStatus struct {
-	ID                     string       `json:"id"`
-	PathMode               string       `json:"path_mode"`
-	SettingsPath           string       `json:"settings_path"`
-	ResolvedSettingsPath   string       `json:"resolved_settings_path"`
-	DisableTelemetry       bool         `json:"disable_telemetry"`
-	ActiveProfileID        string       `json:"active_profile_id"`
-	State                  HarnessState `json:"state"`
-	ProfileCount           int          `json:"profile_count"`
-	LastInvalidationReason string       `json:"last_invalidation_reason"`
-	NormalMaxAttempts      int          `json:"normal_max_attempts"`
-	AttemptPolicySource    string       `json:"attempt_policy_source"`
+	ID                             string       `json:"id"`
+	PathMode                       string       `json:"path_mode"`
+	SettingsPath                   string       `json:"settings_path"`
+	ResolvedSettingsPath           string       `json:"resolved_settings_path"`
+	DisableTelemetry               bool         `json:"disable_telemetry"`
+	ActiveProfileID                string       `json:"active_profile_id"`
+	State                          HarnessState `json:"state"`
+	ProfileCount                   int          `json:"profile_count"`
+	LastInvalidationReason         string       `json:"last_invalidation_reason"`
+	NormalMaxAttempts              int          `json:"normal_max_attempts"`
+	NormalStickyNoCooldownAttempts int          `json:"normal_sticky_no_cooldown_attempts"`
+	AttemptPolicySource            string       `json:"attempt_policy_source"`
+}
+
+func (s *HarnessStatus) setAttemptPolicy(policy config.NormalAttemptState) {
+	s.NormalMaxAttempts = policy.MaxAttempts
+	s.NormalStickyNoCooldownAttempts = policy.StickyNoCooldownAttempts
+	s.AttemptPolicySource = policy.Source
 }
 
 // ProfileView adds the derived active bit to a persisted profile. The bit is
 // never persisted and is true only when the manager has verified the complete
 // external projection.
 type ProfileView struct {
-	ID                   string `json:"id"`
-	Name                 string `json:"name"`
-	HaikuModel           string `json:"haiku_model"`
-	SonnetModel          string `json:"sonnet_model"`
-	OpusModel            string `json:"opus_model"`
-	FableModel           string `json:"fable_model"`
-	SubagentModel        string `json:"subagent_model"`
-	TeammateDefaultModel string `json:"teammate_default_model"`
-	Active               bool   `json:"active"`
-	MaxAttempts          int    `json:"max_attempts"`
+	ID                       string `json:"id"`
+	Name                     string `json:"name"`
+	HaikuModel               string `json:"haiku_model"`
+	SonnetModel              string `json:"sonnet_model"`
+	OpusModel                string `json:"opus_model"`
+	FableModel               string `json:"fable_model"`
+	SubagentModel            string `json:"subagent_model"`
+	TeammateDefaultModel     string `json:"teammate_default_model"`
+	Active                   bool   `json:"active"`
+	MaxAttempts              int    `json:"max_attempts"`
+	StickyNoCooldownAttempts int    `json:"sticky_no_cooldown_attempts"`
 }
 
 func profileView(profile config.Profile, activeID string) ProfileView {
 	profile = profile.Normalize()
 	return ProfileView{
-		ID:                   profile.ID,
-		Name:                 profile.Name,
-		HaikuModel:           profile.HaikuModel,
-		SonnetModel:          profile.SonnetModel,
-		OpusModel:            profile.OpusModel,
-		FableModel:           profile.FableModel,
-		SubagentModel:        profile.SubagentModel,
-		TeammateDefaultModel: profile.TeammateDefaultModel,
-		Active:               activeID != "" && profile.ID == activeID,
-		MaxAttempts:          profile.MaxAttempts,
+		ID:                       profile.ID,
+		Name:                     profile.Name,
+		HaikuModel:               profile.HaikuModel,
+		SonnetModel:              profile.SonnetModel,
+		OpusModel:                profile.OpusModel,
+		FableModel:               profile.FableModel,
+		SubagentModel:            profile.SubagentModel,
+		TeammateDefaultModel:     profile.TeammateDefaultModel,
+		Active:                   activeID != "" && profile.ID == activeID,
+		MaxAttempts:              profile.MaxAttempts,
+		StickyNoCooldownAttempts: profile.StickyNoCooldownAttempts,
 	}
 }
 
@@ -287,12 +296,12 @@ func (m *Manager) Status(id string) (HarnessStatus, error) {
 		// complete under the mutation boundary.
 		var blocked *runtime.RestartBlockedError
 		if errors.As(err, &blocked) {
-			cfg, attempts, source := blocked.State()
+			cfg, policy := blocked.State()
 			status = m.statusWithoutReconcile(id, adapter, cfg)
 			status.State = StateError
 			status.ActiveProfileID = ""
 			status.LastInvalidationReason = runtime.ErrRestartInProgress.Error()
-			status.NormalMaxAttempts, status.AttemptPolicySource = attempts, source
+			status.setAttemptPolicy(policy)
 			return status, nil
 		}
 		return HarnessStatus{}, err
@@ -350,7 +359,7 @@ func (m *Manager) reconcileInMutation(tx config.HarnessMutation, id string) Harn
 	} else {
 		status.LastInvalidationReason = m.rememberedReason(id)
 	}
-	status.NormalMaxAttempts, status.AttemptPolicySource = tx.NormalAttemptStatus()
+	status.setAttemptPolicy(tx.NormalAttemptStatus())
 	return status
 }
 
@@ -499,7 +508,7 @@ func (m *Manager) Activate(id, profileID string) (ActivationResult, error) {
 		finalStatus := baseStatus(id, finalCfg, path)
 		finalStatus.ActiveProfileID = profileID
 		finalStatus.State = StateInSync
-		finalStatus.NormalMaxAttempts, finalStatus.AttemptPolicySource = tx.NormalAttemptStatus()
+		finalStatus.setAttemptPolicy(tx.NormalAttemptStatus())
 		result = ActivationResult{
 			Harness:    finalStatus,
 			Profile:    profileView(selected, profileID),

@@ -186,9 +186,9 @@ func (m *Manager) invalidatePolicyLocked() {
 	}
 }
 
-func (t *HarnessMutation) NormalAttemptStatus() (int, string) {
+func (t *HarnessMutation) NormalAttemptStatus() config.NormalAttemptState {
 	if t == nil || t.manager == nil {
-		return 0, ""
+		return config.NormalAttemptState{}
 	}
 	return t.manager.current.Load().NormalAttemptStatus()
 }
@@ -199,7 +199,8 @@ func (m *Manager) normalAttempts(cfg config.Config, invalid bool) NormalAttemptP
 	if !invalid && cfg.Harnesses.ClaudeCode.ActiveProfileID != "" {
 		for _, p := range cfg.Harnesses.ClaudeCode.Profiles {
 			if p.ID == cfg.Harnesses.ClaudeCode.ActiveProfileID {
-				return NormalAttemptPolicy{Policy: scheduler.AttemptPolicy{MaxAttempts: p.Normalize().MaxAttempts}, Source: AttemptPolicyProfile}
+				p = p.Normalize()
+				return NormalAttemptPolicy{Policy: scheduler.AttemptPolicy{MaxAttempts: p.MaxAttempts, StickyNoCooldownAttempts: p.StickyNoCooldownAttempts}, Source: AttemptPolicyProfile}
 			}
 		}
 	}
@@ -813,7 +814,6 @@ type RestartBlockedError struct{ snapshot *Snapshot }
 
 func (e *RestartBlockedError) Error() string { return ErrRestartInProgress.Error() }
 func (e *RestartBlockedError) Unwrap() error { return ErrRestartInProgress }
-func (e *RestartBlockedError) State() (config.Config, int, string) {
-	attempts, source := e.snapshot.NormalAttemptStatus()
-	return e.snapshot.Config(), attempts, source
+func (e *RestartBlockedError) State() (config.Config, config.NormalAttemptState) {
+	return e.snapshot.Config(), e.snapshot.NormalAttemptStatus()
 }

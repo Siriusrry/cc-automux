@@ -141,6 +141,13 @@ type HealthUpdate struct {
 	CooldownUntil          *time.Time
 }
 
+type SelectionReason string
+
+const (
+	SelectionRegular     SelectionReason = "regular"
+	SelectionStickyRetry SelectionReason = "sticky_retry"
+)
+
 type AttemptLease struct {
 	SnapshotRevision uint64
 	Provider         *provider.CompiledProvider
@@ -148,6 +155,7 @@ type AttemptLease struct {
 	RequestType      traffic.RequestType
 	Generation       ProviderGeneration
 	FromSticky       bool
+	SelectionReason  SelectionReason
 	HalfOpenProbe    bool
 	HealthLease      HealthLease
 
@@ -203,13 +211,25 @@ type Selector interface {
 // budget. Round membership only controls order, never eligibility or call count.
 // The gateway owns StartAttempt; the selector owns selection and affinity state.
 type RequestSelection struct {
-	policy       AttemptPolicy
-	attemptsUsed int
-	initialized  bool
-	ordered      []*provider.CompiledProvider
-	visited      map[string]bool
-	source       affinitySource
+	policy             AttemptPolicy
+	attemptsUsed       int
+	initialized        bool
+	ordered            []*provider.CompiledProvider
+	visited            map[string]bool
+	source             affinitySource
+	stickyPhase        stickyRetryPhase
+	stickyAttemptsUsed int
 }
+
+// The continuous allowance is considered once and cannot be reactivated by
+// later round-robin visits to the same provider.
+type stickyRetryPhase uint8
+
+const (
+	stickyRetryPending stickyRetryPhase = iota
+	stickyRetryActive
+	stickyRetryEnded
+)
 
 // affinitySource is the identity/version observed by this request. Unlike a
 // cooldown tombstone it owns no lifetime timestamps and is never refreshed from
@@ -227,7 +247,16 @@ func NewRequestSelection(policy AttemptPolicy) *RequestSelection {
 func (r *RequestSelection) AttemptsUsed() int { return r.attemptsUsed }
 
 // StartAttempt is called immediately before issuing the upstream HTTP call.
-func (r *RequestSelection) StartAttempt() int { r.attemptsUsed++; return r.attemptsUsed }
+func (r *RequestSelection) StartAttempt() int {
+	r.attemptsUsed++
+	if r.stickyPhase == stickyRetryActive {
+		r.stickyAttemptsUsed++
+		if r.stickyAttemptsUsed >= r.policy.StickyNoCooldownAttempts {
+			r.stickyPhase = stickyRetryEnded
+		}
+	}
+	return r.attemptsUsed
+}
 
 func (r *RequestSelection) HasBudget() bool {
 	return r != nil && r.attemptsUsed < r.policy.MaxAttempts

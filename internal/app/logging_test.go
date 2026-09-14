@@ -114,6 +114,8 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 
 	failure := base
 	failure.Kind = gateway.EventFailure
+	failure.EndReason = "http_error"
+	failure.RawErrorIncomplete = "timeout"
 	failure.HTTPStatus = 502
 	failure.RawError = "raw=\"failure\"\nline"
 	failure.PatchID = "patch-id"
@@ -133,8 +135,15 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 	failover.NextUpstreamURL = "https://next.example/v1/messages"
 	application.recordGatewayEvent(failover)
 
+	retry := failover
+	retry.Kind = gateway.EventRetry
+	retry.NextProviderID = retry.ProviderID
+	retry.NextProviderName = retry.ProviderName
+	retry.NextUpstreamURL = retry.UpstreamURL
+	application.recordGatewayEvent(retry)
+
 	records := decodeLogLines(t, output.Bytes())
-	if len(records) != 4 {
+	if len(records) != 5 {
 		t.Fatalf("records = %#v", records)
 	}
 	if records[0]["level"] != "INFO" || records[0]["http_status"] != nil || records[0]["raw_error"] != nil || records[0]["global_health"] != nil || records[0]["next_provider_id"] != nil {
@@ -148,6 +157,14 @@ func TestGatewayEventFieldsAreSparseByKind(t *testing.T) {
 	}
 	if records[3]["level"] != "ERROR" || records[3]["next_provider_id"] != "next-id" || records[3]["next_attempt"] != float64(2) {
 		t.Fatalf("failover record = %#v", records[3])
+	}
+	if records[4]["kind"] != "retry" || records[4]["next_provider_id"] != retry.ProviderID || records[4]["next_provider_name"] != retry.ProviderName || records[4]["next_upstream_url"] != retry.UpstreamURL {
+		t.Fatalf("retry target fields = %#v", records[4])
+	}
+	for _, field := range []string{"level", "http_status", "raw_error", "end_reason", "raw_error_incomplete", "trace_id", "stream", "attempt", "next_attempt", "global_health", "channel_health", "global_entered_cooldown", "cooldown_until"} {
+		if records[4][field] != records[3][field] || records[4][field] == nil {
+			t.Fatalf("retry lost %s: %#v", field, records[4])
+		}
 	}
 	for i, record := range records {
 		if record["trace_id"] != "1234567890abcdef1234567890abcdef" || record["stream"] != (i == 0) {

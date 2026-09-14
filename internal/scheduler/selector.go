@@ -205,11 +205,18 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 		}
 		group := request.ordered[start:end]
 		blocked := false
-		// Inspect unvisited targets first, then revisit this tier. Never skip a
-		// tier merely because its providers have already served this request.
-		for pass := 0; pass < 2; pass++ {
+		// A sticky retry can precede this tier's regular order only after all
+		// higher tiers have passed their normal availability/probe checks.
+		// Regular selection visits unvisited targets before revisiting the tier.
+		for pass := -1; pass < 2; pass++ {
 			for _, item := range group {
-				if request.visited[item.ID] != (pass == 1) {
+				stickyRetry := pass == -1
+				if stickyRetry {
+					if request.stickyPhase != stickyRetryActive || request.stickyAttemptsUsed == 0 ||
+						item.ID != request.source.ProviderID || item.Generation != request.source.Generation || !item.DisableHealth {
+						continue
+					}
+				} else if request.visited[item.ID] != (pass == 1) {
 					continue
 				}
 				decision := s.health.Acquire(HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: key.Model, RequestType: key.RequestType}, item.DisableHealth)
@@ -228,8 +235,21 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 						delete(request.visited, member.ID)
 					}
 				}
-				request.visited[item.ID] = true
+				if !stickyRetry {
+					request.visited[item.ID] = true
+				}
 				fromSticky := request.source.ProviderID != "" && item.ID == request.source.ProviderID && item.Generation == request.source.Generation
+				reason := SelectionRegular
+				if first {
+					request.stickyPhase = stickyRetryEnded
+					if key.RequestType == traffic.RequestTypeNormal && fromSticky && item.DisableHealth && request.policy.StickyNoCooldownAttempts > 1 {
+						request.stickyPhase = stickyRetryActive
+					}
+				} else if stickyRetry {
+					reason = SelectionStickyRetry
+				} else {
+					request.stickyPhase = stickyRetryEnded
+				}
 				allocate := first && assigned == nil && request.source.ProviderID == "" && currentSnapshot
 				if allocate && key.SessionID != "" {
 					s.putAssignmentLocked(key, item, now)
@@ -254,7 +274,7 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 				return AttemptLease{
 					SnapshotRevision: snapshot.Revision(), Provider: item, Model: key.Model,
 					RequestType: key.RequestType, Generation: item.Generation,
-					FromSticky: fromSticky, HalfOpenProbe: halfOpen, HealthLease: decision.Lease,
+					FromSticky: fromSticky, SelectionReason: reason, HalfOpenProbe: halfOpen, HealthLease: decision.Lease,
 					stickyKey: key, stickyMigration: migration,
 					stickySourceProviderID: source.ProviderID, stickySourceGeneration: source.Generation,
 					stickySourceVersion: source.Version, cursorKey: cursorKey, cursorVersion: cursor.Version,
@@ -263,10 +283,12 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 			}
 		}
 		if blocked {
+			request.stickyPhase = stickyRetryEnded
 			return AttemptLease{}, &UnavailableError{RetryAt: earliestRetry}
 		}
 		start = end
 	}
+	request.stickyPhase = stickyRetryEnded
 	return AttemptLease{}, &UnavailableError{RetryAt: earliestRetry}
 }
 

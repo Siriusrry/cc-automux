@@ -162,7 +162,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			// A retryable response may already have been reported to Health, but its
 			// event is intentionally delayed until the gateway knows whether a
 			// replacement will be attempted.  Cancellation removes that decision:
-			// finish it as a normal terminal failure and never emit EventFailover.
+			// finish it as a terminal failure without a continuation event.
 			if last != nil {
 				h.recordCapturedFailure(last)
 				h.recordBetweenAttemptCanceled(prepared.Plan, attempt)
@@ -204,7 +204,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			return
 		}
 		if last != nil {
-			h.recordFailover(last, lease, attempt, incoming)
+			h.recordContinuation(last, lease, attempt, incoming)
 			last = nil
 		}
 		failure, done := h.executeAttempt(w, incoming, prepared, lease, sticky.SessionID, selection)

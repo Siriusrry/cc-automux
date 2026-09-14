@@ -347,7 +347,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		return
 	}
 	level := slog.LevelInfo
-	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover {
+	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover || event.Kind == gateway.EventRetry {
 		level = slog.LevelError
 	}
 	if event.Kind == gateway.EventFailure && event.ErrorCode == gateway.ErrorCodeModelNotConfigured {
@@ -360,7 +360,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 		slog.Bool("stream", event.Stream),
 		slog.String("trace_id", event.TraceID),
 	}
-	if event.EndReason != "" && (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover) {
+	if event.EndReason != "" && (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover || event.Kind == gateway.EventRetry) {
 		attrs = append(attrs, slog.String("end_reason", string(event.EndReason)))
 	}
 	if event.RawErrorIncomplete != "" {
@@ -396,7 +396,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 	if event.Kind != gateway.EventForward && event.HTTPStatus != 0 {
 		attrs = append(attrs, slog.Int("http_status", event.HTTPStatus))
 	}
-	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover {
+	if event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover || event.Kind == gateway.EventRetry {
 		attrs = append(attrs, slog.String("raw_error", event.RawError))
 		if event.PatchID != "" {
 			attrs = append(attrs,
@@ -413,7 +413,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 			attrs = append(attrs, slog.String("channel_health", string(event.ChannelHealth)))
 		}
 	}
-	if (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover) && (event.GlobalEnteredCooldown || event.ChannelEnteredCooldown) {
+	if (event.Kind == gateway.EventFailure || event.Kind == gateway.EventFailover || event.Kind == gateway.EventRetry) && (event.GlobalEnteredCooldown || event.ChannelEnteredCooldown) {
 		attrs = append(attrs,
 			slog.Bool("global_entered_cooldown", event.GlobalEnteredCooldown),
 			slog.Bool("channel_entered_cooldown", event.ChannelEnteredCooldown),
@@ -422,7 +422,7 @@ func (a *App) recordGatewayEvent(event gateway.Event) {
 			attrs = append(attrs, slog.Time("cooldown_until", event.CooldownUntil.UTC()))
 		}
 	}
-	if event.Kind == gateway.EventFailover {
+	if event.Kind == gateway.EventFailover || event.Kind == gateway.EventRetry {
 		attrs = append(attrs,
 			slog.String("next_provider_id", event.NextProviderID),
 			slog.String("next_provider_name", event.NextProviderName),
