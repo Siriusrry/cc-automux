@@ -674,11 +674,17 @@ func TestAppLogsUnconfiguredModelBeforeProviderSelection(t *testing.T) {
 }
 
 func TestAppLogsStructuredFailoverWithCompleteSourceAndNextProvider(t *testing.T) {
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	releaseFirstBody := make(chan struct{})
+	releaseBody := sync.OnceFunc(func() { close(releaseFirstBody) })
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusInternalServerError)
+		w.(http.Flusher).Flush()
+		<-releaseFirstBody
 		_, _ = io.WriteString(w, "raw-failover-error")
 	}))
 	defer first.Close()
+	defer releaseBody()
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "fallback-success")
 	}))
@@ -710,7 +716,7 @@ func TestAppLogsStructuredFailoverWithCompleteSourceAndNextProvider(t *testing.T
 		},
 	}
 	writeAppConfig(t, path, cfg)
-	var logOutput bytes.Buffer
+	var logOutput lockedLogBuffer
 	application, err := New(Options{
 		ConfigPath: path,
 		LogOpener:  appLogOpenerFor(&logOutput),
@@ -730,6 +736,12 @@ func TestAppLogsStructuredFailoverWithCompleteSourceAndNextProvider(t *testing.T
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
 
+	// Error-body collection may finish after the successful response returns.
+	releaseBody()
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(logOutput.String(), `"kind":"failover"`) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	logText := logOutput.String()
 	if !strings.Contains(logText, `"kind":"forward"`) || !strings.Contains(logText, `"kind":"success"`) ||
 		!strings.Contains(logText, `"request_type":"normal"`) {
