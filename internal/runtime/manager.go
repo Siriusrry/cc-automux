@@ -220,6 +220,9 @@ func (t *HarnessMutation) setActiveProfileID(id string) error {
 	if err == nil {
 		t.validation = &check
 		t.checkedRevision = t.manager.revision
+		if id != "" && check.State != "in_sync" {
+			return fmt.Errorf("%w: %s", config.ErrActiveProfileStateFailed, check.Reason)
+		}
 	}
 	return err
 }

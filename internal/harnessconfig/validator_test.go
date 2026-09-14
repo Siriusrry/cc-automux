@@ -132,3 +132,14 @@ func TestStartupUnreadableAndInvalidTargetsUseDefaultBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestActivationRejectsDriftAtFinalCandidateCheck(t *testing.T) {
+	f := newHarnessFixture(t, "gateway-key")
+	err := f.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error { return tx.SetActiveProfileID(testProfileOneID) })
+	if !errors.Is(err, config.ErrActiveProfileStateFailed) {
+		t.Fatalf("unverified activation accepted: %v", err)
+	}
+	if f.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID != "" || f.runtime.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 {
+		t.Fatal("unverified activation published")
+	}
+}
