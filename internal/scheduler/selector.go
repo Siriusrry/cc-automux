@@ -265,7 +265,7 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 			}
 		}
 		if blocked {
-			return AttemptLease{}, &UnavailableError{}
+			return AttemptLease{}, &UnavailableError{RetryAt: earliestRetry}
 		}
 		start = end
 	}

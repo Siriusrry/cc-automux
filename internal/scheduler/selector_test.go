@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"sync"
@@ -1391,5 +1392,41 @@ func TestMigrationSourceSurvivesRoundsAndConcurrentUpdate(t *testing.T) {
 	}
 	if selector.assignments[key].version != currentVersion || selector.assignments[key].assignment.ProviderID != providerB {
 		t.Fatal("late round replaced newer binding")
+	}
+}
+
+func TestBlockedProbePreservesRetryAtFromBlockingTierAndAbove(t *testing.T) {
+	for _, cooling := range []bool{false, true} {
+		t.Run(fmt.Sprint(cooling), func(t *testing.T) {
+			health := newFakeHealth()
+			selector := newTestScheduler(t, health, Policy{}, nil)
+			a := compileProvider(t, providerA, "a", []string{"m"}, 20)
+			b := compileProvider(t, providerB, "b", []string{"m"}, 10)
+			c := compileProvider(t, providerC, "c", []string{"m"}, 10)
+			d := compileProvider(t, providerD, "d", []string{"m"}, 0)
+			items := []*provider.CompiledProvider{b, d}
+			if cooling {
+				items = []*provider.CompiledProvider{a, b, c, d}
+			}
+			snapshot := &fakeSnapshot{revision: 1, providers: items}
+			selector.Reconcile(snapshot)
+			key := func(p *provider.CompiledProvider) HealthKey {
+				return HealthKey{ProviderID: p.ID, Generation: p.Generation, Model: "m", RequestType: traffic.RequestTypeNormal}
+			}
+			now := time.Now()
+			earlier, later, lowest := now.Add(time.Minute), now.Add(2*time.Minute), now.Add(time.Second)
+			health.decisions[key(a)] = HealthDecision{ChannelState: ChannelCooldown, RetryAt: &later}
+			health.decisions[key(b)] = HealthDecision{ChannelState: ChannelHalfOpen}
+			health.decisions[key(c)] = HealthDecision{ChannelState: ChannelCooldown, RetryAt: &earlier}
+			health.decisions[key(d)] = HealthDecision{ChannelState: ChannelCooldown, RetryAt: &lowest}
+			_, err := selector.Acquire(snapshot, normalKey("", "m"), NewRequestSelection(snapshot.AttemptPolicy()))
+			var unavailable *UnavailableError
+			if !errors.As(err, &unavailable) {
+				t.Fatal(err)
+			}
+			if cooling && !unavailable.RetryAt.Equal(earlier) || !cooling && !unavailable.RetryAt.IsZero() {
+				t.Fatalf("retry at=%v", unavailable.RetryAt)
+			}
+		})
 	}
 }
