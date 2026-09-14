@@ -269,7 +269,7 @@
             } }, icon('trash'), 'Delete provider');
           const actionsCard = h('div', { class: 'card pr-provider-actions' },
             h('p', { class: 'eyebrow' }, 'Provider actions'),
-            h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Create a copy to use another API key.'), duplicateButton),
+            h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Create a copy of this provider.'), duplicateButton),
             h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Remove this provider and release its session bindings.'), deleteButton));
           right = h('div', { class: 'stack' }, healthCard, channelCard, sessionCard, actionsCard);
         }
