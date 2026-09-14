@@ -62,6 +62,23 @@ type providerState struct {
 	Static   StaticAvailability
 }
 
+// candidateReason separates request initialization from later regular routing
+// without changing the selection reasons exposed by AttemptLease.
+type candidateReason uint8
+
+const (
+	candidateFirst candidateReason = iota
+	candidateStickyRetry
+	candidateRoundRobin
+)
+
+type candidateSelection struct {
+	provider    *provider.CompiledProvider
+	healthLease HealthLease
+	reason      candidateReason
+	newRound    bool
+}
+
 type assignmentEntry struct {
 	assignment Assignment
 	element    *list.Element
@@ -197,6 +214,10 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 		request.initialized = true
 	}
 
+	reason := candidateRoundRobin
+	if first {
+		reason = candidateFirst
+	}
 	var earliestRetry time.Time
 	for start := 0; start < len(request.ordered); {
 		end := start + 1
@@ -204,83 +225,12 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 			end++
 		}
 		group := request.ordered[start:end]
-		blocked := false
-		// A sticky retry can precede this tier's regular order only after all
-		// higher tiers have passed their normal availability/probe checks.
-		// Regular selection visits unvisited targets before revisiting the tier.
-		for pass := -1; pass < 2; pass++ {
-			for _, item := range group {
-				stickyRetry := pass == -1
-				if stickyRetry {
-					if request.stickyPhase != stickyRetryActive ||
-						item.ID != request.source.ProviderID || item.Generation != request.source.Generation || !item.DisableHealth {
-						continue
-					}
-				} else if request.visited[item.ID] != (pass == 1) {
-					continue
-				}
-				decision := s.health.Acquire(HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: key.Model, RequestType: key.RequestType}, item.DisableHealth)
-				if !decision.Available {
-					if decision.RetryAt != nil && (earliestRetry.IsZero() || decision.RetryAt.Before(earliestRetry)) {
-						earliestRetry = *decision.RetryAt
-					}
-					cooling := decision.GlobalState == GlobalCooldown || decision.ChannelState == ChannelCooldown
-					// An occupied half-open probe blocks lower tiers without taking
-					// another lease or waiting for its owner.
-					blocked = blocked || !cooling
-					continue
-				}
-				if pass == 1 {
-					for _, member := range group {
-						delete(request.visited, member.ID)
-					}
-				}
-				if !stickyRetry {
-					request.visited[item.ID] = true
-				}
-				fromSticky := request.source.ProviderID != "" && item.ID == request.source.ProviderID && item.Generation == request.source.Generation
-				reason := SelectionRegular
-				if first {
-					request.stickyPhase = stickyRetryEnded
-					if key.RequestType == traffic.RequestTypeNormal && fromSticky && item.DisableHealth && request.policy.StickyNoCooldownAttempts > 1 {
-						request.stickyPhase = stickyRetryActive
-					}
-				} else if stickyRetry {
-					reason = SelectionStickyRetry
-				} else {
-					request.stickyPhase = stickyRetryEnded
-				}
-				allocate := first && assigned == nil && request.source.ProviderID == "" && currentSnapshot
-				if allocate && key.SessionID != "" {
-					s.putAssignmentLocked(key, item, now)
-					assigned = s.assignments[key]
-					request.source = migrationSource(assigned)
-				}
-				if fromSticky && currentSnapshot {
-					entry := s.assignments[key]
-					if entry != nil && entry.version == request.source.Version {
-						s.touchAssignmentLocked(entry, now)
-					}
-				}
-				source := request.source
-				migration := source.ProviderID != "" && (item.ID != source.ProviderID || item.Generation != source.Generation)
-				cursorKey := roundRobinKey{Model: key.Model, RequestType: key.RequestType, Priority: item.Priority}
-				cursor := s.cursors[cursorKey]
-				halfOpen := decision.Lease.GlobalProbe || decision.Lease.ChannelProbe
-				advanceCursor := first && !fromSticky && currentSnapshot
-				if advanceCursor && !halfOpen {
-					s.setCursorLocked(cursorKey, item.ID)
-				}
-				return AttemptLease{
-					SnapshotRevision: snapshot.Revision(), Provider: item, Model: key.Model,
-					RequestType: key.RequestType, Generation: item.Generation,
-					FromSticky: fromSticky, SelectionReason: reason, HalfOpenProbe: halfOpen, HealthLease: decision.Lease,
-					stickyKey: key, stickyMigration: migration,
-					stickySourceProviderID: source.ProviderID, stickySourceGeneration: source.Generation,
-					stickySourceVersion: source.Version, cursorKey: cursorKey, cursorVersion: cursor.Version,
-					advanceCursorOnSuccess: advanceCursor && halfOpen,
-				}, nil
-			}
+		selected, blocked := s.selectInTierLocked(key, request, group, reason, &earliestRetry)
+		if selected.provider != nil {
+			request.recordSelection(selected, group, key.RequestType)
+			lease, source := s.makeAttemptLeaseLocked(snapshot, key, selected, request.source, currentSnapshot, now)
+			request.source = source
+			return lease, nil
 		}
 		if blocked {
 			request.stickyPhase = stickyRetryEnded
@@ -290,6 +240,117 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 	}
 	request.stickyPhase = stickyRetryEnded
 	return AttemptLease{}, &UnavailableError{RetryAt: earliestRetry}
+}
+
+// selectInTierLocked acquires at most one health lease. It reads request state
+// without changing round membership, affinity, or the continuous allowance.
+func (s *Scheduler) selectInTierLocked(key StickyKey, request *RequestSelection, group []*provider.CompiledProvider, reason candidateReason, earliestRetry *time.Time) (candidateSelection, bool) {
+	blocked := false
+	acquire := func(item *provider.CompiledProvider) (HealthLease, bool) {
+		decision := s.health.Acquire(HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: key.Model, RequestType: key.RequestType}, item.DisableHealth)
+		if !decision.Available {
+			if decision.RetryAt != nil && (earliestRetry.IsZero() || decision.RetryAt.Before(*earliestRetry)) {
+				*earliestRetry = *decision.RetryAt
+			}
+			cooling := decision.GlobalState == GlobalCooldown || decision.ChannelState == ChannelCooldown
+			// An occupied half-open probe blocks lower tiers, without waiting
+			// for its owner or excluding available peers in this tier.
+			blocked = blocked || !cooling
+		}
+		return decision.Lease, decision.Available
+	}
+
+	// This preference is local to the tier: all higher tiers were checked first.
+	if request.stickyPhase == stickyRetryActive {
+		item := findCandidate(group, request.source.ProviderID, request.source.Generation)
+		if item != nil && item.DisableHealth {
+			if lease, ok := acquire(item); ok {
+				return candidateSelection{provider: item, healthLease: lease, reason: candidateStickyRetry}, false
+			}
+		}
+	}
+
+	// Inspect unvisited targets first, then revisit this tier. Never skip a
+	// tier merely because its providers have already served this request.
+	for pass := 0; pass < 2; pass++ {
+		for _, item := range group {
+			if request.visited[item.ID] != (pass == 1) {
+				continue
+			}
+			if lease, ok := acquire(item); ok {
+				return candidateSelection{provider: item, healthLease: lease, reason: reason, newRound: pass == 1}, false
+			}
+		}
+	}
+	return candidateSelection{}, blocked
+}
+
+// recordSelection only changes request-local selection state. Actual call
+// counts still belong to StartAttempt, after upstream preparation succeeds.
+func (r *RequestSelection) recordSelection(selected candidateSelection, group []*provider.CompiledProvider, requestType traffic.RequestType) {
+	if selected.newRound {
+		for _, member := range group {
+			delete(r.visited, member.ID)
+		}
+	}
+	if selected.reason != candidateStickyRetry {
+		r.visited[selected.provider.ID] = true
+	}
+	switch selected.reason {
+	case candidateFirst:
+		r.stickyPhase = stickyRetryEnded
+		if requestType == traffic.RequestTypeNormal && r.source.matches(selected.provider) && selected.provider.DisableHealth && r.policy.StickyNoCooldownAttempts > 1 {
+			r.stickyPhase = stickyRetryActive
+		}
+	case candidateRoundRobin:
+		r.stickyPhase = stickyRetryEnded
+	case candidateStickyRetry:
+		// Keep the active allowance; selecting a target does not spend it.
+	}
+}
+
+// makeAttemptLeaseLocked applies global affinity/cursor updates and packages
+// their versions for Report. A new binding is returned to the caller so this
+// step does not mutate RequestSelection or recapture an existing source.
+func (s *Scheduler) makeAttemptLeaseLocked(snapshot Snapshot, key StickyKey, selected candidateSelection, source affinitySource, currentSnapshot bool, now time.Time) (AttemptLease, affinitySource) {
+	item := selected.provider
+	fromSticky := source.matches(item)
+	first := selected.reason == candidateFirst
+	if first && source.ProviderID == "" && currentSnapshot && key.SessionID != "" {
+		s.putAssignmentLocked(key, item, now)
+		source = migrationSource(s.assignments[key])
+	}
+	if fromSticky && currentSnapshot {
+		entry := s.assignments[key]
+		if entry != nil && entry.version == source.Version {
+			s.touchAssignmentLocked(entry, now)
+		}
+	}
+	migration := source.ProviderID != "" && !source.matches(item)
+	cursorKey := roundRobinKey{Model: key.Model, RequestType: key.RequestType, Priority: item.Priority}
+	cursor := s.cursors[cursorKey]
+	halfOpen := selected.healthLease.GlobalProbe || selected.healthLease.ChannelProbe
+	advanceCursor := first && !fromSticky && currentSnapshot
+	if advanceCursor && !halfOpen {
+		s.setCursorLocked(cursorKey, item.ID)
+	}
+	reason := SelectionRegular
+	if selected.reason == candidateStickyRetry {
+		reason = SelectionStickyRetry
+	}
+	return AttemptLease{
+		SnapshotRevision: snapshot.Revision(), Provider: item, Model: key.Model,
+		RequestType: key.RequestType, Generation: item.Generation,
+		FromSticky: fromSticky, SelectionReason: reason, HalfOpenProbe: halfOpen, HealthLease: selected.healthLease,
+		stickyKey: key, stickyMigration: migration,
+		stickySourceProviderID: source.ProviderID, stickySourceGeneration: source.Generation,
+		stickySourceVersion: source.Version, cursorKey: cursorKey, cursorVersion: cursor.Version,
+		advanceCursorOnSuccess: advanceCursor && halfOpen,
+	}, source
+}
+
+func (source affinitySource) matches(item *provider.CompiledProvider) bool {
+	return source.ProviderID != "" && item.ID == source.ProviderID && item.Generation == source.Generation
 }
 
 func migrationSource(entry *assignmentEntry) affinitySource {
