@@ -50,6 +50,14 @@
     const form = h('div', { class: 'profile-form' }, list, fields.name, h('div', { class: 'row-2' }, mf[0], mf[1]), h('div', { class: 'row-2' }, mf[2], mf[3]),
       h('p', { class: 'help', style: { margin: '4px 0 14px' } }, 'Subagent model, when set, forces every subagent, agent-team and workflow agent to one model; the teammate default only applies to teammates without an explicit model and is overridden by the subagent model.'),
       h('div', { class: 'row-2' }, mf[4], mf[5]), h('div', { class: 'row-2' }, fields.max_attempts, fields.sticky_no_cooldown_attempts));
+    function readPositiveInteger(value, defaultValue, control, field) {
+      const number = String(value).trim() === '' ? defaultValue : Number(value);
+      if (control.validity.badInput || !Number.isSafeInteger(number) || number < 1) {
+        field.setError('Enter an integer of at least 1.');
+        return null;
+      }
+      return number;
+    }
     return dialog({ title: isNew ? 'New profile' : 'Edit ' + profile.name, body: form, wide: true, focus: '#pf-name', actions: [
       { label: 'Cancel', value: null },
       { label: isNew ? 'Create profile' : 'Save profile', primary: true, onClick: async () => {
@@ -57,11 +65,9 @@
         let bad = false;
         if (!draft.name.trim()) { fields.name.setError('Give the profile a name.'); bad = true; }
         MODEL_FIELDS.filter(m => m[3]).forEach(([key, label]) => { if (!draft[key].trim()) { fields[key].setError(label + ' mapping is required.'); bad = true; } });
-        const attempts = String(draft.max_attempts).trim() === '' ? 3 : Number(draft.max_attempts);
-        if (attemptsInput.validity.badInput || !Number.isSafeInteger(attempts) || attempts < 1) { fields.max_attempts.setError('Enter an integer of at least 1.'); bad = true; }
-        const stickyAttempts = String(draft.sticky_no_cooldown_attempts).trim() === '' ? 1 : Number(draft.sticky_no_cooldown_attempts);
-        if (stickyAttemptsInput.validity.badInput || !Number.isSafeInteger(stickyAttempts) || stickyAttempts < 1) { fields.sticky_no_cooldown_attempts.setError('Enter an integer of at least 1.'); bad = true; }
-        if (bad) return false;
+        const attempts = readPositiveInteger(draft.max_attempts, 3, attemptsInput, fields.max_attempts);
+        const stickyAttempts = readPositiveInteger(draft.sticky_no_cooldown_attempts, 1, stickyAttemptsInput, fields.sticky_no_cooldown_attempts);
+        if (bad || attempts === null || stickyAttempts === null) return false;
         try {
           const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts, sticky_no_cooldown_attempts: stickyAttempts };
           if (isNew) return await api.post('/api/v1/harnesses/claude-code/profiles', body);
