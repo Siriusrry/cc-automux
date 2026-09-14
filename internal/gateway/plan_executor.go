@@ -212,7 +212,7 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			h.recordFailover(last, lease, attempt, incoming)
 			last = nil
 		}
-		failure, done := h.executeAttempt(w, incoming, prepared, lease, sticky.SessionID, attempt, selection)
+		failure, done := h.executeAttempt(w, incoming, prepared, lease, sticky.SessionID, selection)
 		if done {
 			return
 		}
@@ -256,7 +256,8 @@ func (h *Handler) finishLocalSelectionFailure(w http.ResponseWriter, base bodyfi
 	writeError(w, http.StatusBadGateway, "bad_gateway", message)
 }
 
-func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, prepared traffic.PreparedRequest, lease requestAttemptLease, sessionID string, attempt int, selection *scheduler.RequestSelection) (*capturedFailure, bool) {
+func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, prepared traffic.PreparedRequest, lease requestAttemptLease, sessionID string, selection *scheduler.RequestSelection) (*capturedFailure, bool) {
+	attempt := 0 // No call has been issued; preparation failures have no call number.
 	item := lease.Provider
 	if item == nil || incoming == nil || incoming.URL == nil {
 		return nil, true
@@ -264,7 +265,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	ctx := incoming.Context()
 	if requestCanceled(ctx) {
 		_ = prepared.BaseBody.Close()
-		h.reportClientCanceledWithAttempt(lease, sessionID, "", 0, attempt, contextError(ctx, nil))
+		h.reportClientCanceledWithAttempt(lease, sessionID, "", 0, selection.AttemptsUsed()+1, contextError(ctx, nil))
 		return nil, true
 	}
 	url, err := upstreamURL(item, incoming.URL)
@@ -299,7 +300,7 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 			closeErr = requestBody.Close()
 		}
 		cleanupErr := closeRequestAttempt(base, attemptBody, execution, true)
-		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), 0, attempt, errors.Join(contextError(ctx, nil), extra, closeErr, cleanupErr))
+		h.reportClientCanceledWithAttempt(lease, sessionID, url.String(), 0, selection.AttemptsUsed()+1, errors.Join(contextError(ctx, nil), extra, closeErr, cleanupErr))
 		return nil, true
 	}
 	if requestCanceled(ctx) {
@@ -368,8 +369,6 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 	if requestCanceled(ctx) {
 		return cancelAttempt(mutable.Body, requestBody, nil)
 	}
-	lease.started = true
-	h.record(Event{Kind: EventForward, Stream: prepared.Plan.Stream, TraceID: prepared.Plan.TraceID, ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
 	control := h.newUpstreamAttempt(ctx, prepared.Plan.Stream)
 	lease.control = control
 	defer func() {
@@ -378,7 +377,9 @@ func (h *Handler) executeAttempt(w http.ResponseWriter, incoming *http.Request, 
 		}
 	}()
 	request = request.WithContext(control.ctx)
-	selection.StartAttempt()
+	attempt = selection.StartAttempt()
+	lease.started = true
+	h.record(Event{Kind: EventForward, Stream: prepared.Plan.Stream, TraceID: prepared.Plan.TraceID, ProviderID: item.ID, ProviderName: item.Name, SessionID: sessionID, Model: lease.Model, RequestType: lease.RequestType, Attempt: attempt, UpstreamURL: url.String()})
 	response, requestErr := clientLease.Client().Do(request)
 	response, requestErr = control.receiveHeaders(response, requestErr)
 	requestCloseErr := requestBody.Close()

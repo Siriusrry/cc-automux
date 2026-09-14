@@ -227,7 +227,7 @@ func NewRequestSelection(policy AttemptPolicy) *RequestSelection {
 func (r *RequestSelection) AttemptsUsed() int { return r.attemptsUsed }
 
 // StartAttempt is called immediately before issuing the upstream HTTP call.
-func (r *RequestSelection) StartAttempt() { r.attemptsUsed++ }
+func (r *RequestSelection) StartAttempt() int { r.attemptsUsed++; return r.attemptsUsed }
 
 func (r *RequestSelection) HasBudget() bool {
 	return r != nil && r.attemptsUsed < r.policy.MaxAttempts
