@@ -228,15 +228,17 @@ func (t *HarnessMutation) setActiveProfileID(id string) error {
 }
 
 type Manager struct {
-	mu                   sync.Mutex
-	store                ConfigStore
-	runtimeContext       provider.RuntimeContext
-	scanRequirements     ScanRequirements
-	current              atomic.Pointer[Snapshot]
-	revision             uint64
-	harnessValidator     config.HarnessValidator
-	activeProfileInvalid bool
-	classifierAttempts   scheduler.AttemptPolicy
+	mu               sync.Mutex
+	store            ConfigStore
+	runtimeContext   provider.RuntimeContext
+	scanRequirements ScanRequirements
+	current          atomic.Pointer[Snapshot]
+	revision         uint64
+	harnessValidator config.HarnessValidator
+	// Mutation-locked diagnostic history, never a second activation record.
+	harnessInvalidationReason string
+	activeProfileInvalid      bool
+	classifierAttempts        scheduler.AttemptPolicy
 
 	preflight    func(current, next config.Config) error
 	restart      func() error
@@ -583,6 +585,7 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 			}
 		}
 		m.revision++
+		m.rememberHarnessInvalidation(currentConfig, next)
 		m.current.Store(nextSnapshot)
 		previousGuard = m.activeProfileInvalid
 		m.restartStatus = RestartStatus{State: "idle"}
@@ -711,6 +714,7 @@ func (m *Manager) RestartSucceeded() error {
 		return err
 	}
 	m.revision++
+	m.rememberHarnessInvalidation(m.current.Load().Config(), pending)
 	m.current.Store(nextSnapshot)
 	m.restartTriggered = false
 	m.restartStatus = RestartStatus{State: "idle"}
@@ -773,15 +777,31 @@ func (t *HarnessMutation) ReconcileActiveProfile() (config.HarnessValidation, er
 	if t == nil || t.manager == nil {
 		return config.HarnessValidation{}, errors.New("runtime harness mutation is not initialized")
 	}
-	if t.validation != nil && t.checkedRevision == t.manager.revision {
-		return *t.validation, nil
-	}
-	_, check, err := t.manager.applyValidatedLocked(t.Config(), true)
-	if err == nil {
+	if t.validation == nil || t.checkedRevision != t.manager.revision {
+		_, check, err := t.manager.applyValidatedLocked(t.Config(), true)
+		if err != nil {
+			return check, err
+		}
 		t.validation = &check
 		t.checkedRevision = t.manager.revision
 	}
-	return check, err
+	check := *t.validation
+	if check.State == "inactive" && check.Reason == "" {
+		check.Reason = t.manager.harnessInvalidationReason
+	}
+	return check, nil
+}
+
+// Remember a committed key removal even though candidate preparation has
+// already cleared the active ID. Ordinary inactive configurations create no
+// invalidation history; restoring a key alone does not reactivate a profile.
+func (m *Manager) rememberHarnessInvalidation(previous, next config.Config) {
+	if next.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		m.harnessInvalidationReason = ""
+	} else if previous.Harnesses.ClaudeCode.ActiveProfileID != "" &&
+		previous.Auth.GatewayKey != "" && next.Auth.GatewayKey == "" {
+		m.harnessInvalidationReason = config.HarnessReasonGatewayMissing
+	}
 }
 
 // RestartBlockedError preserves the same snapshot that made a harness check

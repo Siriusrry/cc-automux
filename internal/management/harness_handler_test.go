@@ -573,3 +573,90 @@ func TestApplyStatePersistenceErrorMapping(t *testing.T) {
 		t.Fatalf("response=%d %s", w.Code, w.Body)
 	}
 }
+
+func TestClearingGatewayKeyPreservesActivationInvalidationReason(t *testing.T) {
+	for _, activated := range []bool{false, true} {
+		name := "never_activated"
+		if activated {
+			name = "previously_activated"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newHarnessHandlerFixture(t, "gateway-key")
+			p := managerProfileForManagementTest("11111111-1111-4111-8111-111111111111", "Daily")
+			p.MaxAttempts = 8
+			if _, err := f.harness.CreateProfile(harnessconfig.ClaudeCodeAdapterID, p); err != nil {
+				t.Fatal(err)
+			}
+			if activated {
+				if _, err := f.harness.Activate(harnessconfig.ClaudeCodeAdapterID, p.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			putKey := func(key string) {
+				t.Helper()
+				response := harnessRequest(f.handler, http.MethodGet, "/api/v1/config", "")
+				var object map[string]any
+				if err := json.Unmarshal(response.Body.Bytes(), &object); err != nil {
+					t.Fatal(err)
+				}
+				object["auth"].(map[string]any)["gateway_key"] = key
+				delete(object["harnesses"].(map[string]any)["claude_code"].(map[string]any), "active_profile_id")
+				data, err := json.Marshal(object)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response = harnessRequest(f.handler, http.MethodPut, "/api/v1/config", string(data))
+				if response.Code != 200 {
+					t.Fatalf("save key=%d %s", response.Code, response.Body)
+				}
+			}
+			readStatus := func() harnessconfig.HarnessStatus {
+				t.Helper()
+				response := harnessRequest(f.handler, http.MethodGet, "/api/v1/harnesses/claude-code", "")
+				var status harnessconfig.HarnessStatus
+				if response.Code != 200 {
+					t.Fatalf("harness=%d %s", response.Code, response.Body)
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+					t.Fatal(err)
+				}
+				return status
+			}
+			putKey("")
+			// Query after the config transaction has already cleared the active ID.
+			for i := 0; i < 2; i++ {
+				status := readStatus()
+				reason := ""
+				if activated {
+					reason = config.HarnessReasonGatewayMissing
+				}
+				if status.ActiveProfileID != "" || status.NormalMaxAttempts != 3 || status.AttemptPolicySource != "default" || status.LastInvalidationReason != reason {
+					t.Fatalf("post-clear status=%#v", status)
+				}
+			}
+			response := harnessRequest(f.handler, http.MethodGet, "/api/v1/status", "")
+			var service struct {
+				GatewayConfigured bool `json:"gateway_configured"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &service); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != 200 || service.GatewayConfigured {
+				t.Fatalf("gateway status=%d %s", response.Code, response.Body)
+			}
+			putKey("gateway-key")
+			if activated {
+				if status := readStatus(); status.LastInvalidationReason != config.HarnessReasonGatewayMissing {
+					t.Fatalf("restoring key hid invalid activation: %#v", status)
+				}
+				if _, err := f.harness.Activate(harnessconfig.ClaudeCodeAdapterID, p.ID); err != nil {
+					t.Fatal(err)
+				}
+				status := readStatus()
+				if status.State != harnessconfig.StateInSync || status.LastInvalidationReason != "" || status.NormalMaxAttempts != 8 {
+					t.Fatalf("reactivation=%#v", status)
+				}
+			}
+		})
+	}
+}

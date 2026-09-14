@@ -26,7 +26,7 @@
     else if (harness && harness.state !== 'in_sync') {
       const detail = 'Normal requests are using ' + (harness.attempt_policy_source === 'profile' ? 'the active profile attempt limit of ' : 'the default attempt limit of ') + harness.normal_max_attempts + '. ';
       if (harness.state === 'state_error') out.push(banner('bad', 'Claude Code settings could not be checked', detail + (harness.last_invalidation_reason || ''), actions));
-      else if (['projection_mismatch', 'target_missing', 'target_invalid', 'target_unreadable'].includes(harness.last_invalidation_reason)) out.push(banner('warn', 'Profile activation is invalid', detail + (harness.last_invalidation_reason || ''), actions));
+      else if (['projection_mismatch', 'target_missing', 'target_invalid', 'target_unreadable', 'gateway_not_configured'].includes(harness.last_invalidation_reason)) out.push(banner('warn', 'Profile activation is invalid', detail + (harness.last_invalidation_reason || ''), actions));
       else out.push(banner('warn', 'No active profile', detail + (harness.last_invalidation_reason || 'Activate a profile to apply its settings.'), actions));
     }
     return out;

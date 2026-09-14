@@ -214,3 +214,31 @@ func TestRenameRetainsActiveBudget(t *testing.T) {
 		t.Fatalf("renamed=%#v %v", saved, err)
 	}
 }
+
+func TestFailedKeyRemovalDoesNotRecordInvalidation(t *testing.T) {
+	f := newHarnessFixture(t, "gateway-key")
+	if _, err := f.harness.Activate(ClaudeCodeAdapterID, testProfileOneID); err != nil {
+		t.Fatal(err)
+	}
+	store := &countingSaveStore{Store: f.store}
+	manager, err := runtimeconfig.NewManager(store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: f.harness.Validator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness, err := NewManager(manager, f.harness.Validator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.Status(ClaudeCodeAdapterID); err != nil {
+		t.Fatal(err)
+	}
+	before := manager.Snapshot()
+	store.fail = true
+	if _, err := manager.Update(func(cfg *config.Config) error { cfg.Auth.GatewayKey = ""; return nil }); err == nil {
+		t.Fatal("save should fail")
+	}
+	status, err := harness.Status(ClaudeCodeAdapterID)
+	if err != nil || status.State != StateInSync || status.LastInvalidationReason != "" || manager.Snapshot() != before {
+		t.Fatalf("failed save changed activation: %#v %v", status, err)
+	}
+}

@@ -56,7 +56,7 @@ const (
 	reasonPathConflict         = "protected_path_conflict"
 	reasonPathInvalid          = "path_invalid"
 	reasonProjectionInvalid    = "projection_invalid"
-	reasonGatewayMissing       = "gateway_not_configured"
+	reasonGatewayMissing       = config.HarnessReasonGatewayMissing
 	reasonConfigurationChanged = "configuration_changed"
 )
 

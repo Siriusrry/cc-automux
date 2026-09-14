@@ -131,6 +131,9 @@ type HarnessValidation struct {
 	ResolvedPath string
 }
 
+// HarnessReasonGatewayMissing identifies activation invalidated by a missing key.
+const HarnessReasonGatewayMissing = "gateway_not_configured"
+
 // HarnessValidator owns external-file verification without runtime mutations.
 type HarnessValidator interface {
 	Check(Config) (HarnessValidation, error)
