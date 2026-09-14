@@ -410,11 +410,18 @@ func TestHarnessHTTPActivationResponseIsStableJSON(t *testing.T) {
 func TestHarnessHTTPRestartReadStateAndActivationConflict(t *testing.T) {
 	fixture := newHarnessHandlerFixture(t, "gateway-key")
 	profileID := "11111111-1111-4111-8111-111111111111"
-	if _, err := fixture.harness.CreateProfile(harnessconfig.ClaudeCodeAdapterID, managerProfileForManagementTest(profileID, "Daily")); err != nil {
+	profile := managerProfileForManagementTest(profileID, "Daily")
+	profile.MaxAttempts = 8
+	if _, err := fixture.harness.CreateProfile(harnessconfig.ClaudeCodeAdapterID, profile); err != nil {
 		t.Fatal(err)
 	}
 
+	if _, err := fixture.harness.Activate(harnessconfig.ClaudeCodeAdapterID, profileID); err != nil {
+		t.Fatal(err)
+	}
+	before := fixture.runtime.Snapshot()
 	next := fixture.runtime.Config()
+	next.Harnesses.ClaudeCode.ActiveProfileID = ""
 	next.Service.LogMaxBytes++
 	if _, err := fixture.runtime.Apply(next); err != nil {
 		t.Fatalf("prepare restart = %v", err)
@@ -435,6 +442,9 @@ func TestHarnessHTTPRestartReadStateAndActivationConflict(t *testing.T) {
 		t.Fatalf("restart harness status = %#v", status)
 	}
 
+	if status.NormalMaxAttempts != 8 || status.AttemptPolicySource != "profile" || fixture.runtime.Snapshot() != before {
+		t.Fatalf("blocked check changed policy: %#v", status)
+	}
 	activation := harnessRequest(fixture.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles/"+profileID+"/activate", "{}")
 	if activation.Code != http.StatusConflict || !strings.Contains(activation.Body.String(), `"error":"restart_in_progress"`) {
 		t.Fatalf("restart activation = %d %s", activation.Code, activation.Body.String())

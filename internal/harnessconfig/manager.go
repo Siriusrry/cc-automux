@@ -285,7 +285,7 @@ func (m *Manager) Status(id string) (HarnessStatus, error) {
 		// A restart blocks writes, but a status read remains useful. It must not
 		// claim a verified active profile because the reconciliation could not
 		// complete under the mutation boundary.
-		var blocked *runtime.HarnessStateError
+		var blocked *runtime.RestartBlockedError
 		if errors.As(err, &blocked) {
 			cfg, attempts, source := blocked.State()
 			status = m.statusWithoutReconcile(id, adapter, cfg)

@@ -105,8 +105,7 @@ func (m *Manager) WithHarnessMutation(fn func(config.HarnessMutation) error) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.restartStatus.InProgress {
-		m.invalidatePolicyLocked()
-		return &HarnessStateError{snapshot: m.current.Load()}
+		return &RestartBlockedError{snapshot: m.current.Load()}
 	}
 	return fn(&HarnessMutation{manager: m})
 }
@@ -786,13 +785,13 @@ func (t *HarnessMutation) ReconcileActiveProfile() (config.HarnessValidation, er
 	return check, err
 }
 
-// HarnessStateError preserves the same snapshot that made a harness check
+// RestartBlockedError preserves the same snapshot that made a harness check
 // unavailable, so a later activation cannot be mixed into the error response.
-type HarnessStateError struct{ snapshot *Snapshot }
+type RestartBlockedError struct{ snapshot *Snapshot }
 
-func (e *HarnessStateError) Error() string { return ErrRestartInProgress.Error() }
-func (e *HarnessStateError) Unwrap() error { return ErrRestartInProgress }
-func (e *HarnessStateError) State() (config.Config, int, string) {
+func (e *RestartBlockedError) Error() string { return ErrRestartInProgress.Error() }
+func (e *RestartBlockedError) Unwrap() error { return ErrRestartInProgress }
+func (e *RestartBlockedError) State() (config.Config, int, string) {
 	attempts, source := e.snapshot.NormalAttemptStatus()
 	return e.snapshot.Config(), attempts, source
 }

@@ -24,7 +24,7 @@
     const actions = [h('a', { class: 'btn sm', href: '#/claude-code' }, 'Manage profiles')];
     if (harnessError) out.push(banner('bad', 'Profile status could not be read', [harnessError.detail || harnessError.message, ' The current attempt limit could not be confirmed.'], [h('button', { class: 'btn sm', type: 'button', onclick: retry }, 'Retry'), ...actions]));
     else if (harness && harness.state !== 'in_sync') {
-      const detail = 'Normal requests are using the default attempt limit of ' + harness.normal_max_attempts + '. ';
+      const detail = 'Normal requests are using ' + (harness.attempt_policy_source === 'profile' ? 'the active profile attempt limit of ' : 'the default attempt limit of ') + harness.normal_max_attempts + '. ';
       if (harness.state === 'state_error') out.push(banner('bad', 'Claude Code settings could not be checked', detail + (harness.last_invalidation_reason || ''), actions));
       else if (harness.last_invalidation_reason || harness.state !== 'inactive') out.push(banner('warn', 'Profile is no longer active', detail + (harness.last_invalidation_reason || ''), actions));
       else out.push(banner('warn', 'No active profile', detail + 'Activate a profile to apply its settings.', actions));
