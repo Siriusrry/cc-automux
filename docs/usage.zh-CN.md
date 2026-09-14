@@ -138,6 +138,19 @@ TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼
 | macOS | `~/Library/Application Support/cc-automux/config.json` |
 | Linux | `$XDG_CONFIG_HOME/cc-automux/config.json`，未设置时为 `~/.config/cc-automux/config.json` |
 
+最小配置结构如下，使用前替换示例 management key：
+
+```json
+{
+  "schema_version": 1,
+  "service": {"listen_addr": "127.0.0.1:8765", "log_max_bytes": 104857600},
+  "auth": {"gateway_key": "", "management_key": "replace-with-a-random-management-key"},
+  "auto_mode": {"mode": "disabled", "model": ""},
+  "harnesses": {"claude_code": {"path_mode": "default", "settings_path": "", "disable_telemetry": true, "profiles": []}},
+  "providers": []
+}
+```
+
 CC AutoMux 运行时，通过控制台修改设置。如果直接编辑配置文件，需要重启进程使其生效。运行独立本地实例时，可按前文示例用 `CC_AUTOMUX_CONFIG` 选择另一份配置。
 
 编辑配置文件前先备份，配置文件及其中的密钥不要进入源码版本控制。服务需要 management key，且只接受本机连接。

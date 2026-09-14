@@ -138,6 +138,19 @@ Default configuration paths:
 | macOS | `~/Library/Application Support/cc-automux/config.json` |
 | Linux | `$XDG_CONFIG_HOME/cc-automux/config.json`, or `~/.config/cc-automux/config.json` |
 
+A minimal configuration has this shape; replace the example management key before use:
+
+```json
+{
+  "schema_version": 1,
+  "service": {"listen_addr": "127.0.0.1:8765", "log_max_bytes": 104857600},
+  "auth": {"gateway_key": "", "management_key": "replace-with-a-random-management-key"},
+  "auto_mode": {"mode": "disabled", "model": ""},
+  "harnesses": {"claude_code": {"path_mode": "default", "settings_path": "", "disable_telemetry": true, "profiles": []}},
+  "providers": []
+}
+```
+
 Use the console to change settings while CC AutoMux is running. If you edit the configuration file directly, restart the process to load it. For a separate local instance, select another configuration with `CC_AUTOMUX_CONFIG` as shown above.
 
 Keep a backup before editing configuration files, and keep the files and their keys out of source control. The service requires a management key and accepts connections only from this computer.
