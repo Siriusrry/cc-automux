@@ -116,8 +116,8 @@
       const isNew = ctx.route.name === 'provider-new';
       const id = ctx.params.id;
       ctx.title(isNew ? 'New provider' : 'Provider');
-      const duplicateButton = isNew ? null : h('button', { class: 'btn', type: 'button', onclick: duplicate }, 'Duplicate');
-      ctx.actions([h('a', { class: 'btn quiet', href: '#/providers' }, icon('arrow-left'), 'All providers'), duplicateButton].filter(Boolean));
+      const duplicateButton = isNew ? null : h('button', { class: 'btn', type: 'button', onclick: duplicate }, icon('copy'), 'Duplicate');
+      ctx.actions([h('a', { class: 'btn quiet', href: '#/providers' }, icon('arrow-left'), 'All providers')]);
       const host = h('div', null, skeleton(6, 44));
       ctx.root.appendChild(host);
       let bar = null, disposed = false, duplicating = false;
@@ -261,14 +261,17 @@
             h('tbody', null, diag.sessions.map(s => h('tr', null, h('td', { class: 'sid nowrap', 'data-tip': s.session_id }, fmt.middle(s.session_id, 13)), h('td', { class: 'mono wrap-any' }, s.model), h('td', null, tag(s.request_type, s.request_type === 'classifier' ? 'iris' : '')), h('td', { class: 'nowrap' }, fmt.relative(s.last_used_at))))))) : h('p', { class: 'lede', style: { margin: 0 } }, 'No session is currently pinned to this provider.');
           const sessionCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('p', { class: 'eyebrow' }, 'Sticky bindings'), pill(String(diag.active_session_count), 'iris', 'plain')), sessions);
 
-          const dangerCard = h('div', { class: 'card danger-card' }, h('p', { class: 'eyebrow mist' }, 'Remove'), h('p', { class: 'lede' }, 'Deleting stops routing to this provider immediately. Sessions pinned to it are released and re-scheduled.'),
-            h('button', { class: 'btn danger', type: 'button', onclick: async () => {
+          const deleteButton = h('button', { class: 'btn danger', type: 'button', onclick: async () => {
               const ok = await confirm({ title: 'Delete ' + provider.name + '?', text: 'The provider and its patches are removed from the configuration. Health history is discarded.', confirmLabel: 'Delete provider', danger: true });
               if (!ok) return;
               try { await api.del('/api/v1/providers/' + id); toast(provider.name + ' deleted'); store.invalidate(); CCAM.router.clearGuard(); CCAM.router.go('/providers'); }
               catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
-            } }, icon('trash'), 'Delete provider'));
-          right = h('div', { class: 'stack' }, healthCard, channelCard, sessionCard, dangerCard);
+            } }, icon('trash'), 'Delete provider');
+          const actionsCard = h('div', { class: 'card pr-provider-actions' },
+            h('p', { class: 'eyebrow' }, 'Provider actions'),
+            h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Create a copy to use another API key.'), duplicateButton),
+            h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Remove this provider and release its session bindings.'), deleteButton));
+          right = h('div', { class: 'stack' }, healthCard, channelCard, sessionCard, actionsCard);
         }
         replace(host, isNew ? h('div', { class: 'grid-2' }, formCard, h('div', { class: 'stack' }, h('div', { class: 'note' }, h('b', null, 'What a provider is.'), ' One base URL, one key, the models it serves, a priority tier and an on/off switch. Special upstream quirks are handled by opt-in patches, not by provider types.'),
           h('div', { class: 'note' }, h('b', null, 'Scheduling.'), ' Requests for a model go to the highest-priority tier that has a healthy provider declaring that model. Equal priorities round-robin; a Claude Code session sticks to one provider until it cools down.'))) : h('div', { class: 'grid-2' }, formCard, right));
