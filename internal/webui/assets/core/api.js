@@ -26,13 +26,13 @@
 
   async function transport(method, path, body, opts) {
     const init = { method, cache: 'no-store', headers: Object.assign({ Accept: 'application/json' }, authHeaders(), opts && opts.headers), signal: opts && opts.signal };
-    if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = opts && opts.rawBody ? body : JSON.stringify(body); }
+    if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
     let res;
     try { res = await fetch(path, init); } catch (e) { throw new ApiError(0, 'network', 'Could not reach CC AutoMux'); }
     let json = null;
     const text = await res.text();
     if (text) { try { json = JSON.parse(text); } catch (e) { throw new ApiError(res.status >= 400 ? res.status : 502, 'invalid_response', 'The service returned an invalid JSON response.'); } }
-    return { status: res.status, json, text, headers: res.headers };
+    return { status: res.status, json, headers: res.headers };
   }
 
   async function request(method, path, body, opts) {
