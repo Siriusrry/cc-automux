@@ -204,11 +204,6 @@ func (h *Handler) forwardExecution(w http.ResponseWriter, incoming *http.Request
 			return
 		}
 		if last != nil {
-			if requestCanceled(incoming.Context()) {
-				h.recordCapturedFailure(last)
-				h.reportClientCanceledWithAttempt(lease, sticky.SessionID, "", 0, attempt, nil)
-				return
-			}
 			h.recordFailover(last, lease, attempt, incoming)
 			last = nil
 		}
