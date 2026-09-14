@@ -112,9 +112,8 @@ type ClientClaudeCodeConfig struct {
 
 // HarnessMutation is the narrow server-side transaction surface used by the
 // harness configuration service. Implementations hold the Runtime mutation
-// lock for the lifetime of the callback that receives this value. The methods
-// intentionally return only errors so the config package does not depend on
-// Runtime's result types.
+// lock for the lifetime of the callback that receives this value. Results use
+// file-independent config types without depending on Runtime implementation.
 type HarnessMutation interface {
 	Config() Config
 	UpdateHarness(func(*HarnessesConfig) error) error

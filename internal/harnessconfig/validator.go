@@ -2,9 +2,10 @@ package harnessconfig
 
 import (
 	"fmt"
-	"github.com/Siriusrry/cc-automux/internal/config"
 	"path/filepath"
 	"strings"
+
+	"github.com/Siriusrry/cc-automux/internal/config"
 )
 
 // Validator is immutable and stateless. It verifies a candidate's external

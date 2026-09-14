@@ -78,6 +78,18 @@ func TestCandidateValidationUsesOneReadWriteAndRevision(t *testing.T) {
 			if drift && manager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 {
 				t.Fatal("drift budget survived")
 			}
+			if !drift {
+				reads.reads = 0
+				store.saves = 0
+				before = manager.Snapshot().Revision()
+				if err := harness.DeleteProfile(ClaudeCodeAdapterID, testProfileTwoID); err != nil {
+					t.Fatal(err)
+				}
+				if reads.reads != 1 || store.saves != 1 || manager.Snapshot().Revision() != before+1 {
+					t.Fatalf("delete reads=%d writes=%d revisions=%d", reads.reads, store.saves, manager.Snapshot().Revision()-before)
+				}
+			}
+
 		})
 	}
 }

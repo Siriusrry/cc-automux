@@ -757,12 +757,16 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 		return ErrManagerNotInitialized
 	}
 	return m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		status, cfg, stateErr := m.reconciledOperationState(tx, id)
-		if stateErr != nil {
-			return stateErr
-		}
-		if status.State == StateInSync && status.ActiveProfileID == profileID {
-			return ErrActiveProfile
+		cfg := tx.Config()
+		if cfg.Harnesses.ClaudeCode.ActiveProfileID == profileID {
+			status, checked, stateErr := m.reconciledOperationState(tx, id)
+			if stateErr != nil {
+				return stateErr
+			}
+			if status.State == StateInSync {
+				return ErrActiveProfile
+			}
+			cfg = checked
 		}
 		found := false
 		for _, profile := range cfg.Harnesses.ClaudeCode.Profiles {
