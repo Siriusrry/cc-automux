@@ -159,7 +159,7 @@ func TestGatewayRequestPatchFailureTerminatesWithoutFailover(t *testing.T) {
 		t.Fatalf("reports = %#v", reports)
 	}
 	got := events.snapshot()
-	if len(got) != 1 || got[0].Kind != EventFailure {
+	if len(got) != 1 || got[0].Kind != EventFailure || got[0].Attempt != 0 {
 		t.Fatalf("events = %#v", got)
 	}
 	if got[0].PatchID != patchID || got[0].PatchStage != string(patch.StageRequest) || got[0].ProviderID != first.ID {

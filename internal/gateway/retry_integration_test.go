@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,7 @@ type retryFixture struct {
 	nanos    atomic.Int64
 	mu       sync.Mutex
 	calls    []string
+	problems []string
 }
 
 func newRetryFixture(t *testing.T, budget int, targets []retryTarget, reply func(string, http.ResponseWriter, *http.Request)) *retryFixture {
@@ -42,7 +44,9 @@ func newRetryFixture(t *testing.T, budget int, targets []retryTarget, reply func
 		label := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		data, _ := io.ReadAll(r.Body)
 		if string(data) != `{"model":"m","stream":false}` {
-			t.Errorf("replayed request changed: %s", data)
+			f.mu.Lock()
+			f.problems = append(f.problems, "replayed request changed")
+			f.mu.Unlock()
 		}
 		f.mu.Lock()
 		f.calls = append(f.calls, label)
@@ -55,7 +59,14 @@ func newRetryFixture(t *testing.T, budget int, targets []retryTarget, reply func
 		w.WriteHeader(status)
 		fmt.Fprint(w, label)
 	}))
-	t.Cleanup(upstream.Close)
+	t.Cleanup(func() {
+		upstream.Close()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if len(f.problems) > 0 {
+			t.Errorf("upstream observations: %v", f.problems)
+		}
+	})
 	f.snapshot = &fakeSnapshot{revision: 1, gatewayKey: "gateway", attemptPolicy: scheduler.AttemptPolicy{MaxAttempts: budget}}
 	for i, target := range targets {
 		label := string(rune('A' + i))
@@ -184,7 +195,9 @@ func TestRecoveredHighTierKeepsLowBindingUntilSuccess(t *testing.T) {
 			f = newRetryFixture(t, tc.budget, []retryTarget{{10, false, tc.status}, {0, false, 200}}, func(label string, w http.ResponseWriter, r *http.Request) {
 				bindings := f.selector.Assignments("")
 				if len(bindings) != 1 || bindings[0].ProviderID != f.snapshot.providers[1].ID {
-					t.Errorf("selection moved binding: %#v", bindings)
+					f.mu.Lock()
+					f.problems = append(f.problems, "selection moved binding")
+					f.mu.Unlock()
 				}
 				w.WriteHeader(tc.status)
 				fmt.Fprint(w, label)
@@ -318,14 +331,20 @@ func TestRecoveredTargetIncompleteSuccessDoesNotMigrate(t *testing.T) {
 	})
 	seedLowBinding(t, f)
 	f.nanos.Add(int64(time.Minute))
-	func() {
-		defer func() {
-			if failure := recover(); failure != nil && failure != http.ErrAbortHandler {
-				panic(failure)
-			}
-		}()
-		f.serve("session")
-	}()
+	server := httptest.NewServer(f.handler)
+	defer server.Close()
+	request, _ := http.NewRequest(http.MethodPost, server.URL+MessagesPath, strings.NewReader(`{"model":"m","stream":false}`))
+	request.Header.Set("Authorization", "Bearer gateway")
+	request.Header.Set("X-Claude-Code-Session-Id", "session")
+	response, err := server.Client().Do(request)
+	if err == nil {
+		_, err = io.ReadAll(response.Body)
+		response.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected interrupted response")
+	}
+	waitGatewayEvents(t, f.events, 2)
 	bindings := f.selector.Assignments("")
 	if len(bindings) != 1 || bindings[0].ProviderID != f.snapshot.providers[1].ID {
 		t.Fatalf("incomplete response migrated: %#v", bindings)
@@ -341,15 +360,18 @@ func TestRecoveredTargetIncompleteSuccessDoesNotMigrate(t *testing.T) {
 func TestEnablingHighTargetPreservesExistingLowBindingOnFailure(t *testing.T) {
 	f := newRetryFixture(t, 5, []retryTarget{{10, true, 503}, {0, false, 200}}, nil)
 	a := f.snapshot.providers[0]
-	a.Enabled = false
-	f.selector.Reconcile(f.snapshot)
+	disabled := &fakeSnapshot{revision: 2, gatewayKey: "gateway", attemptPolicy: f.snapshot.attemptPolicy, providers: append([]*provider.CompiledProvider(nil), f.snapshot.providers...)}
+	disabled.providers[0] = a.Clone()
+	disabled.providers[0].Enabled = false
+	f.snapshot = disabled
+	f.selector.Reconcile(disabled)
 	key := scheduler.StickyKey{SessionID: "session", Model: "m", RequestType: traffic.RequestTypeNormal}
 	lease, err := f.selector.Acquire(f.snapshot, key, scheduler.NewRequestSelection(scheduler.DefaultAttemptPolicy()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.selector.Report(lease, scheduler.Outcome{Class: scheduler.FailureNone})
-	next := &fakeSnapshot{revision: 2, gatewayKey: "gateway", attemptPolicy: f.snapshot.attemptPolicy, providers: append([]*provider.CompiledProvider(nil), f.snapshot.providers...)}
+	next := &fakeSnapshot{revision: 3, gatewayKey: "gateway", attemptPolicy: f.snapshot.attemptPolicy, providers: append([]*provider.CompiledProvider(nil), f.snapshot.providers...)}
 	next.providers[0] = a.Clone()
 	next.providers[0].Enabled = true
 	f.snapshot = next
@@ -364,5 +386,68 @@ func TestEnablingHighTargetPreservesExistingLowBindingOnFailure(t *testing.T) {
 	f.mu.Unlock()
 	if got != "AAAAA" {
 		t.Fatalf("calls=%s", got)
+	}
+}
+
+func TestOtherModelHighProviderDoesNotBlock(t *testing.T) {
+	f := newRetryFixture(t, 3, []retryTarget{{10, true, 503}, {0, true, 200}}, nil)
+	next := &fakeSnapshot{revision: 2, gatewayKey: "gateway", attemptPolicy: f.snapshot.attemptPolicy, providers: append([]*provider.CompiledProvider(nil), f.snapshot.providers...)}
+	original := next.providers[0]
+	next.providers[0] = compileTestProvider(t, original.ID, original.Name, original.BaseURL.String(), original.APIKey, "other", false)
+	next.providers[0].Priority = 10
+	f.snapshot = next
+	f.selector.Reconcile(next)
+	response := f.serve("")
+	if response.Code != 200 {
+		t.Fatalf("status=%d", response.Code)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if strings.Join(f.calls, "") != "B" {
+		t.Fatalf("calls=%v", f.calls)
+	}
+}
+
+func TestLowBindingSurvivesMixedHighTierFailures(t *testing.T) {
+	f := newRetryFixture(t, 9, []retryTarget{{10, false, 503}, {0, false, 200}, {10, false, 503}}, nil)
+	seedLowBinding(t, f)
+	next := &fakeSnapshot{revision: 2, gatewayKey: "gateway", attemptPolicy: f.snapshot.attemptPolicy, providers: append([]*provider.CompiledProvider(nil), f.snapshot.providers...)}
+	next.providers[0] = next.providers[0].Clone()
+	next.providers[0].DisableHealth = true
+	f.snapshot = next
+	f.selector.Reconcile(next)
+	f.nanos.Add(int64(time.Minute))
+	f.serve("session")
+	bindings := f.selector.Assignments("")
+	if len(bindings) != 1 || bindings[0].ProviderID != next.providers[1].ID {
+		t.Fatalf("bindings=%#v", bindings)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := strings.Join(f.calls, ""); got != "ACAAAAAAA" {
+		t.Fatalf("calls=%s", got)
+	}
+}
+
+func TestConfirmedSuccessMigrationSurvivesClientCancellation(t *testing.T) {
+	f := newRetryFixture(t, 3, []retryTarget{{10, false, 200}, {0, false, 200}}, func(_ string, w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, "event: message_stop\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	seedLowBinding(t, f)
+	f.nanos.Add(int64(time.Minute))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := gatewayRequest(http.MethodPost, MessagesPath, "Bearer gateway", `{"model":"m","stream":false}`).WithContext(ctx)
+	request.Header.Set("X-Claude-Code-Session-Id", "session")
+	writer := &fixedWriteRecorder{header: make(http.Header), onWrite: cancel}
+	f.handler.ServeHTTP(writer, request)
+	events := waitGatewayEvents(t, f.events, 3)
+	bindings := f.selector.Assignments("")
+	if len(bindings) != 1 || bindings[0].ProviderID != f.snapshot.providers[0].ID || events[1].Kind != EventSuccess || events[2].Kind != EventCanceled {
+		t.Fatalf("bindings=%#v events=%#v", bindings, events)
 	}
 }

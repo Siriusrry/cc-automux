@@ -143,3 +143,62 @@ func TestActivationRejectsDriftAtFinalCandidateCheck(t *testing.T) {
 		t.Fatal("unverified activation published")
 	}
 }
+
+func TestRestoredFileLiftsFailedClearGuard(t *testing.T) {
+	f := newHarnessFixture(t, "gateway-key")
+	p := f.profiles[0]
+	p.MaxAttempts = 8
+	if _, err := f.harness.UpdateProfile(ClaudeCodeAdapterID, p.ID, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.harness.Activate(ClaudeCodeAdapterID, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(f.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &countingSaveStore{Store: f.store}
+	manager, err := runtimeconfig.NewManager(store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: f.harness.Validator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness, _ := NewManager(manager, f.harness.Validator)
+	if _, err := harness.Status(ClaudeCodeAdapterID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.target, []byte(`{"env":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
+	status, err := harness.Status(ClaudeCodeAdapterID)
+	if err != nil || status.State != StateError || status.NormalMaxAttempts != 3 {
+		t.Fatalf("failed clear=%#v %v", status, err)
+	}
+	if err := os.WriteFile(f.target, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Clearing failed, so the original ID still exists. Restoring the file may
+	// reverify it even while persistence is still unavailable.
+	status, err = harness.Status(ClaudeCodeAdapterID)
+	if err != nil || status.State != StateInSync || status.NormalMaxAttempts != 8 || status.ActiveProfileID != p.ID {
+		t.Fatalf("restored=%#v %v", status, err)
+	}
+}
+
+func TestRenameRetainsActiveBudget(t *testing.T) {
+	f := newHarnessFixture(t, "gateway-key")
+	p := f.profiles[0]
+	p.MaxAttempts = 8
+	if _, err := f.harness.UpdateProfile(ClaudeCodeAdapterID, p.ID, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.harness.Activate(ClaudeCodeAdapterID, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.Name = "Renamed"
+	saved, err := f.harness.UpdateProfile(ClaudeCodeAdapterID, p.ID, p)
+	if err != nil || !saved.Active || saved.MaxAttempts != 8 || f.runtime.Snapshot().NormalAttemptPolicy().MaxAttempts != 8 {
+		t.Fatalf("renamed=%#v %v", saved, err)
+	}
+}

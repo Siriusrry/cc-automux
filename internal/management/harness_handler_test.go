@@ -541,3 +541,35 @@ func TestProfileErrorsExposeField(t *testing.T) {
 		}
 	}
 }
+
+func TestFullConfigurationHTTPBudgetEditAppliesImmediately(t *testing.T) {
+	f := newHarnessHandlerFixture(t, "gateway-key")
+	p := managerProfileForManagementTest("11111111-1111-4111-8111-111111111111", "Daily")
+	p.MaxAttempts = 8
+	if _, err := f.harness.CreateProfile(harnessconfig.ClaudeCodeAdapterID, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.harness.Activate(harnessconfig.ClaudeCodeAdapterID, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	old := f.runtime.Snapshot()
+	cfg := f.runtime.Config()
+	cfg.Harnesses.ClaudeCode.Profiles[0].MaxAttempts = 2
+	raw, _ := json.Marshal(cfg)
+	var object map[string]any
+	json.Unmarshal(raw, &object)
+	delete(object["harnesses"].(map[string]any)["claude_code"].(map[string]any), "active_profile_id")
+	raw, _ = json.Marshal(object)
+	response := harnessRequest(f.handler, http.MethodPut, "/api/v1/config", string(raw))
+	if response.Code != 200 || f.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID != p.ID || f.runtime.Snapshot().NormalAttemptPolicy().MaxAttempts != 2 || old.NormalAttemptPolicy().MaxAttempts != 8 {
+		t.Fatalf("budget PUT=%d %s", response.Code, response.Body)
+	}
+}
+
+func TestApplyStatePersistenceErrorMapping(t *testing.T) {
+	w := httptest.NewRecorder()
+	(&Handler{}).writeApplyError(w, config.ErrActiveProfileStateFailed)
+	if w.Code != 500 || !strings.Contains(w.Body.String(), `"error":"active_profile_state_failed"`) {
+		t.Fatalf("response=%d %s", w.Code, w.Body)
+	}
+}
