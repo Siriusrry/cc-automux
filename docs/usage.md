@@ -105,9 +105,9 @@ The default target is the current user's `.claude/settings.json`; you can select
 
 Each profile saves **Max attempts per request**, the total upstream calls allowed for a normal request. The default is 3; 1 allows a single call. The active profile applies globally to all new normal requests. Saving its attempt limit applies immediately without rewriting Claude Code settings; requests already in progress keep their captured limit. Classifier requests remain limited to one call.
 
-Saving an inactive profile does not activate it. **Active** means the managed file contents were verified; changing them outside CC AutoMux clears that state on the next check. Open or return to Overview or Claude Code to refresh it. No active profile, or a failed verification, uses the default limit of 3 and shows a warning on Overview. Changing the gateway address/key or the active profile's model mappings can require reactivation.
+Saving an inactive profile does not activate it. **Active** means the managed file contents were verified; changing them outside CC AutoMux clears that state on the next check. Open or return to Overview or Claude Code to refresh it. No active profile, or a failed verification, uses the default limit of 3 and shows a warning on Overview. Changing the gateway address/key or the active profile's model mappings can require reactivation. If a restart temporarily blocks verification, the check error is shown while the current attempt limit is retained.
 
-The profile API field is `max_attempts`, an integer from 1 to 9007199254740991. Omission defaults to 3, including on profile replacement; explicit zero and null are rejected. Harness status returns the effective `normal_max_attempts` and `attempt_policy_source` (`profile` or `default`).
+The profile API field is `max_attempts`, an integer from 1 to 9007199254740991. Omission defaults to 3, including on profile replacement; explicit zero and null are rejected. Harness status returns the effective `normal_max_attempts` and `attempt_policy_source` (`profile` or `default`). Profile validation errors include `field` so the console can show the error beside the corresponding input.
 
 **Disable Claude Code telemetry** controls the four fields shown beside the switch. Its value is written when a profile is activated.
 

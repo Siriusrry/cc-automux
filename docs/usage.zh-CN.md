@@ -105,9 +105,9 @@ TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼
 
 每个 Profile 保存“单请求尝试上限”（**Max attempts per request**），表示普通请求最多发起的上游调用总次数。默认 3，设置 1 即只调用一次。全局激活 Profile 决定所有新普通请求的上限；保存其上限后立即生效，不重写 Claude Code 设置。正在处理的请求保持开始时的预算，分类器请求仍只调用一次。
 
-保存非激活 Profile 不等于激活。**Active** 表示已核对受管字段；外部修改导致不一致时，下次检查会清空激活状态。打开或返回 Overview、Claude Code 页面会重新检查。无激活 Profile 或核验失效时采用默认 3，Overview 显示明确警告。修改网关地址、密钥或当前 Profile 的模型映射后可能需要重新激活。
+保存非激活 Profile 不等于激活。**Active** 表示已核对受管字段；外部修改导致不一致时，下次检查会清空激活状态。打开或返回 Overview、Claude Code 页面会重新检查。无激活 Profile 或核验失效时采用默认 3，Overview 显示明确警告。修改网关地址、密钥或当前 Profile 的模型映射后可能需要重新激活。重启暂时阻挡核验时会显示检查错误，但保留当前尝试上限。
 
-Profile API 字段为 `max_attempts`，接受 1 到 9007199254740991 的整数。省略时默认 3，完整替换 Profile 时同样如此；显式 0 和 null 会被拒绝。Harness 状态返回实际 `normal_max_attempts` 和 `attempt_policy_source`（`profile` 或 `default`）。
+Profile API 字段为 `max_attempts`，接受 1 到 9007199254740991 的整数。省略时默认 3，完整替换 Profile 时同样如此；显式 0 和 null 会被拒绝。Harness 状态返回实际 `normal_max_attempts` 和 `attempt_policy_source`（`profile` 或 `default`）。Profile 校验错误携带 `field`，界面据此在对应输入框旁显示错误。
 
 **Disable Claude Code telemetry** 控制开关旁展示的四个字段，激活 Profile 时写入。
 
