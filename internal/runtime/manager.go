@@ -193,8 +193,10 @@ func (t *HarnessMutation) NormalAttemptStatus() (int, string) {
 	return t.manager.current.Load().NormalAttemptStatus()
 }
 
-func (m *Manager) normalAttempts(cfg config.Config) NormalAttemptPolicy {
-	if !m.activeProfileInvalid && cfg.Harnesses.ClaudeCode.ActiveProfileID != "" {
+// normalAttempts derives the effective normal budget for cfg. invalid is the
+// activation guard that will be in force once cfg is published.
+func (m *Manager) normalAttempts(cfg config.Config, invalid bool) NormalAttemptPolicy {
+	if !invalid && cfg.Harnesses.ClaudeCode.ActiveProfileID != "" {
 		for _, p := range cfg.Harnesses.ClaudeCode.Profiles {
 			if p.ID == cfg.Harnesses.ClaudeCode.ActiveProfileID {
 				return NormalAttemptPolicy{Policy: scheduler.AttemptPolicy{MaxAttempts: p.Normalize().MaxAttempts}, Source: AttemptPolicyProfile}
@@ -540,8 +542,10 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 	currentSnapshot := m.current.Load()
 	currentConfig := currentSnapshot.Config()
 	checked := forceCheck || !reflect.DeepEqual(currentConfig.Harnesses, next.Harnesses)
+	// guard is the activation guard that takes effect only if this transaction
+	// commits; the manager field is untouched on every failure path.
+	guard := m.activeProfileInvalid
 	invalidated := false
-	previousGuard := m.activeProfileInvalid
 	if checked {
 		var err error
 		check, err = m.checkHarness(next)
@@ -553,13 +557,12 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 			if invalidated {
 				next.Harnesses.ClaudeCode.ActiveProfileID = ""
 			}
-			m.activeProfileInvalid = invalidated
+			guard = invalidated
 		}
 	}
-	defer func() { m.activeProfileInvalid = previousGuard }()
-	normal := m.normalAttempts(next)
+	normal := m.normalAttempts(next, guard)
 	if reflect.DeepEqual(currentConfig, next) && currentSnapshot.normalAttempts == normal {
-		previousGuard = m.activeProfileInvalid
+		m.activeProfileInvalid = guard
 		return ApplyResult{
 			Revision:   currentSnapshot.Revision(),
 			Applied:    false,
@@ -576,9 +579,9 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 		if !reflect.DeepEqual(currentConfig, next) {
 			if err := m.store.Save(next); err != nil {
 				if invalidated {
-					m.activeProfileInvalid = previousGuard
+					// The stale activation must not keep serving its budget even
+					// though the cleared ID could not be persisted.
 					m.invalidatePolicyLocked()
-					previousGuard = m.activeProfileInvalid
 					return ApplyResult{}, check, fmt.Errorf("%w: %v", config.ErrActiveProfileStateFailed, err)
 				}
 				return ApplyResult{}, check, fmt.Errorf("persist active configuration: %w", err)
@@ -587,7 +590,7 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 		m.revision++
 		m.rememberHarnessInvalidation(currentConfig, next)
 		m.current.Store(nextSnapshot)
-		previousGuard = m.activeProfileInvalid
+		m.activeProfileInvalid = guard
 		m.restartStatus = RestartStatus{State: "idle"}
 		return ApplyResult{
 			Revision:   m.revision,
@@ -703,7 +706,7 @@ func (m *Manager) RestartSucceeded() error {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
-	normal := m.normalAttempts(pending)
+	normal := m.normalAttempts(pending, m.activeProfileInvalid)
 	nextSnapshot, err := newSnapshotWithAuto(m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
 	if err != nil {
 		_ = m.restartFailedLocked(err)
