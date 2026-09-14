@@ -43,7 +43,8 @@
       const f = field({ label: label, optional: !required, for: 'pf-' + key, control: input({ id: 'pf-' + key, value: draft[key], list: 'cc-models', placeholder: required ? 'model name' : 'leave unset', oninput: (e) => { draft[key] = e.target.value; } }), help: h('code', null, env) });
       fields[key] = f; return f;
     });
-    fields.max_attempts = field({ label: 'Max attempts per request', for: 'pf-max-attempts', control: input({ id: 'pf-max-attempts', type: 'number', min: 1, max: Number.MAX_SAFE_INTEGER, step: 1, value: draft.max_attempts, oninput: e => { draft.max_attempts = e.target.value; } }), help: 'Total upstream calls allowed for each normal request. Default: 3. A value of 1 returns after one call.' });
+    const attemptsInput = input({ id: 'pf-max-attempts', type: 'number', attrs: { min: 1, max: 9007199254740991 }, value: draft.max_attempts, oninput: e => { draft.max_attempts = e.target.value; } });
+    fields.max_attempts = field({ label: 'Max attempts per request', for: 'pf-max-attempts', control: attemptsInput, help: 'Total upstream calls allowed for each normal request. Default: 3. A value of 1 returns after one call.' });
     const form = h('div', { class: 'profile-form' }, list, fields.name, h('div', { class: 'row-2' }, mf[0], mf[1]), h('div', { class: 'row-2' }, mf[2], mf[3]),
       h('p', { class: 'help', style: { margin: '4px 0 14px' } }, 'Subagent model, when set, forces every subagent, agent-team and workflow agent to one model; the teammate default only applies to teammates without an explicit model and is overridden by the subagent model.'),
       h('div', { class: 'row-2' }, mf[4], mf[5]), fields.max_attempts);
@@ -55,7 +56,7 @@
         if (!draft.name.trim()) { fields.name.setError('Give the profile a name.'); bad = true; }
         MODEL_FIELDS.filter(m => m[3]).forEach(([key, label]) => { if (!draft[key].trim()) { fields[key].setError(label + ' mapping is required.'); bad = true; } });
         const attempts = String(draft.max_attempts).trim() === '' ? 3 : Number(draft.max_attempts);
-        if (!Number.isSafeInteger(attempts) || attempts < 1) { fields.max_attempts.setError('Enter an integer from 1 to 9007199254740991.'); bad = true; }
+        if (attemptsInput.validity.badInput || !Number.isSafeInteger(attempts) || attempts < 1) { fields.max_attempts.setError('Enter an integer from 1 to 9007199254740991.'); bad = true; }
         if (bad) return false;
         try {
           const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts };
