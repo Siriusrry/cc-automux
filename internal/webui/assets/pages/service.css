@@ -17,6 +17,6 @@
 .sv-json { position: relative; }
 .sv-json .code { max-height: 460px; }
 .sv-json-acts { display: flex; gap: 8px; align-items: center; }
-.sv-keyrow { display: flex; gap: 8px; align-items: flex-start; }
+.sv-keyrow { display: flex; gap: 8px; align-items: center; }
 .sv-keyrow .in-wrap { flex: 1; }
 @media (max-width: 900px) { .sv-host { grid-template-columns: minmax(0, 1fr); } }

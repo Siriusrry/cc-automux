@@ -120,7 +120,8 @@ a:hover { text-decoration: underline; }
   padding: 22px; box-shadow: var(--shadow);
 }
 .card.tight { padding: 0; overflow: hidden; }
-.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.card-head > .eyebrow { margin-bottom: 0; }
 .card-head .actions { display: flex; gap: 8px; align-items: center; flex: none; }
 .card h2 { font-family: var(--font-display); font-weight: 700; font-size: 17px; letter-spacing: -0.01em; margin: 0; display: flex; align-items: center; gap: 10px; }
 .card h2 .dot { width: 10px; height: 10px; }
@@ -151,10 +152,10 @@ a:hover { text-decoration: underline; }
   display: flex; align-items: flex-start; gap: 12px; padding: 13px 16px; border-radius: var(--r-md);
   border: 1px solid var(--line); background: var(--card); box-shadow: var(--shadow-sm); font-size: 13px; color: var(--mist);
 }
-.banner svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+.banner > svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
 .banner .b-body { flex: 1; min-width: 0; }
 .banner .b-title { font-weight: 700; color: var(--paper); margin-bottom: 2px; }
-.banner .b-actions { display: flex; gap: 8px; flex: none; align-items: center; }
+.banner .b-actions { display: flex; gap: 8px; flex: none; align-items: center; align-self: center; }
 .banner.warn { border-color: rgba(201, 118, 13, 0.35); background: var(--amber-soft); }
 .banner.warn svg, .banner.warn .b-title { color: var(--amber); }
 .banner.bad { border-color: rgba(236, 91, 80, 0.4); background: var(--coral-soft); }

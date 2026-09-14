@@ -3,7 +3,7 @@
 .cc-state .reason { font-size: 12.5px; color: var(--mist); }
 .cc-path { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--mist); margin-top: 8px; }
 .cc-path code { font-family: var(--mono); font-size: 12px; background: var(--raise); padding: 3px 8px; border-radius: 7px; color: var(--paper); overflow-wrap: anywhere; }
-.cc-path-row { display: flex; gap: 10px; align-items: flex-start; }
+.cc-path-row { display: flex; gap: 10px; align-items: center; }
 .cc-path-row .in { flex: 1; }
 .cc-managed { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; font-family: var(--mono); font-size: 11.5px; color: var(--mist); }
 .cc-managed span b { color: var(--paper); font-weight: 600; }
