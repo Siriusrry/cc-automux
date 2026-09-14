@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const CCAM = window.CCAM;
-  const { h, icon, replace, clear, tag, seg, input, field } = CCAM.ui;
+  const { h, icon, replace, clear, tag, seg, input, field, tip } = CCAM.ui;
 
   const STAGE_LABEL = { request: 'request', response: 'response' };
 
@@ -86,9 +86,16 @@
   }
 
   function authHeaderSeg(opts) {
-    const option = (value, text) => ({ value, label: h('span', { class: 'auth-option-label' }, text), title: text });
-    return seg({ class: 'auth-header', ariaLabel: 'Authentication header', value: opts.useXApiKey ? 'x-api-key' : 'bearer',
+    const option = (value, text) => ({ value, label: h('span', { class: 'auth-option-label' }, text) });
+    const control = seg({ class: 'auth-header', ariaLabel: 'Authentication header', value: opts.useXApiKey ? 'x-api-key' : 'bearer',
       options: [option('bearer', 'Authorization: Bearer'), option('x-api-key', 'x-api-key')], onchange: (v) => opts.onchange(v === 'x-api-key') });
+    // The full name is the button's accessible name already; the hover text only
+    // appears once a narrow column has actually truncated the label.
+    Array.from(control.children).forEach(button => {
+      const label = button.querySelector('.auth-option-label');
+      tip(button, () => label.scrollWidth > label.clientWidth ? label.textContent : '');
+    });
+    return control;
   }
 
   // ---- hover summaries ----
