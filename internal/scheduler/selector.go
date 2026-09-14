@@ -212,7 +212,7 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 			for _, item := range group {
 				stickyRetry := pass == -1
 				if stickyRetry {
-					if request.stickyPhase != stickyRetryActive || request.stickyAttemptsUsed == 0 ||
+					if request.stickyPhase != stickyRetryActive ||
 						item.ID != request.source.ProviderID || item.Generation != request.source.Generation || !item.DisableHealth {
 						continue
 					}
