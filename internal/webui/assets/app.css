@@ -247,6 +247,12 @@ textarea.in { resize: vertical; min-height: 96px; line-height: 1.5; }
 .seg.icons button { padding: 6px 9px; }
 .seg.icons svg { width: 15px; height: 15px; }
 .seg.quiet button[aria-checked="true"] { background: var(--card); color: var(--paper); box-shadow: var(--shadow-sm); }
+.auth-header { container-type: inline-size; }
+.auth-header .seg { flex-wrap: wrap; }
+@container (max-width: 300px) {
+  .auth-header .seg { border-radius: var(--r-md); }
+  .auth-header .seg button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+}
 
 /* Switch */
 .sw { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--paper); user-select: none; }
