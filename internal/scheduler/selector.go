@@ -221,11 +221,6 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 					// An occupied half-open probe blocks lower tiers without taking
 					// another lease or waiting for its owner.
 					blocked = blocked || !cooling
-					if cooling && assigned != nil && item.ID == assigned.assignment.ProviderID {
-						s.markPendingEntryLocked(assigned)
-						s.removeAssignmentLocked(assigned)
-						assigned = nil
-					}
 					continue
 				}
 				if pass == 1 {
@@ -312,11 +307,9 @@ func (s *Scheduler) Report(lease AttemptLease, outcome Outcome) (HealthUpdate, u
 		s.migrateAssignmentLocked(lease)
 	}
 	if !lease.Provider.DisableHealth && update.GlobalEnteredCooldown {
-		s.markPendingMigrationLocked(lease)
 		s.removeProviderAssignmentsLocked(lease.Provider.ID, lease.Generation)
 		s.clearProviderCursorsLocked(lease.Provider.ID)
 	} else if !lease.Provider.DisableHealth && update.ChannelEnteredCooldown {
-		s.markPendingMigrationLocked(lease)
 		s.removeChannelAssignmentsLocked(lease.Provider.ID, lease.Generation, lease.Model, lease.RequestType)
 		s.clearChannelCursorLocked(lease.Provider.ID, lease.Model, lease.RequestType)
 	}
@@ -391,26 +384,6 @@ func (s *Scheduler) migrateAssignmentLocked(lease AttemptLease) {
 	}
 	index[lease.stickyKey] = entry
 	delete(s.pending, lease.stickyKey)
-}
-
-func (s *Scheduler) markPendingMigrationLocked(lease AttemptLease) {
-	if lease.Provider == nil || lease.stickyKey.SessionID == "" {
-		return
-	}
-	entry := s.assignments[lease.stickyKey]
-	if entry == nil || entry.assignment.ProviderID != lease.Provider.ID || entry.assignment.Generation != lease.Generation {
-		return
-	}
-	if s.pending == nil {
-		s.pending = make(map[StickyKey]pendingMigration)
-	}
-	s.pending[lease.stickyKey] = pendingMigration{
-		ProviderID: entry.assignment.ProviderID,
-		Generation: entry.assignment.Generation,
-		CreatedAt:  entry.assignment.CreatedAt,
-		LastUsedAt: entry.assignment.LastUsedAt,
-		Version:    entry.version,
-	}
 }
 
 func (s *Scheduler) markPendingEntryLocked(entry *assignmentEntry) {

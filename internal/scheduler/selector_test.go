@@ -841,9 +841,10 @@ func TestCooldownRemovesAssignmentsButPreservesPendingMigrationForEverySession(t
 		t.Fatalf("s2 initial lease = %#v, %v", s2, err)
 	}
 
-	// S2 observes a channel cooldown before S1 reports the global cooldown.
-	// Both source versions must remain available for their migrations.
-	health.decisions[s2.HealthLease.Key] = HealthDecision{GlobalState: GlobalHealthy, ChannelState: ChannelCooldown}
+	// A reported channel cooldown removes both source bindings and preserves
+	// their migration versions before the later global cooldown.
+	health.updates[s2.HealthLease.Key] = HealthUpdate{ChannelEnteredCooldown: true, ChannelState: ChannelCooldown}
+	selector.Report(s2, Outcome{Class: FailureChannelImmediate})
 	selection1.StartAttempt()
 	s2Fallback, err := selector.Acquire(snapshot, normalKey("s2", "m"), selection1)
 	if err != nil || s2Fallback.Provider.ID != providerB {
