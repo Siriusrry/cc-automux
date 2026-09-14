@@ -52,6 +52,7 @@ type Options struct {
 	// snapshot; it never constructs replacement runtime state.
 	RuntimeContext          provider.RuntimeContext
 	ScanRequirements        ScanRequirements
+	HarnessValidator        config.HarnessValidator
 	ClassifierAttemptPolicy scheduler.AttemptPolicy
 	// Preflight runs after full schema/provider compilation but before the
 	// pending file is written. Nil uses a loopback listener probe when the
@@ -76,22 +77,15 @@ type ConfigStore interface {
 	RemovePending() error
 }
 
-// HarnessConfigRuntime is the read/transaction boundary used by the harness
-// configuration service. It intentionally exposes only the transaction form;
-// callers must use the transaction-scoped methods on config.HarnessMutation
-// and cannot accidentally acquire the Runtime lock a second time.
-type HarnessConfigRuntime interface {
-	Config() config.Config
-	WithHarnessMutation(func(config.HarnessMutation) error) error
-}
-
 // HarnessMutation is the transaction-scoped, server-side configuration
 // boundary used by harnessconfig. The enclosing Manager.WithHarnessMutation
 // call holds the same mutex used by all other configuration writes for the
 // entire callback, including any external harness file I/O performed by the
 // callback. Methods on this value must only be called from that callback.
 type HarnessMutation struct {
-	manager *Manager
+	manager         *Manager
+	validation      *config.HarnessValidation
+	checkedRevision uint64
 }
 
 var _ config.HarnessMutation = (*HarnessMutation)(nil)
@@ -147,7 +141,11 @@ func (t *HarnessMutation) UpdateHarness(mutator func(*config.HarnessesConfig) er
 	if err != nil {
 		return err
 	}
-	_, err = t.manager.applyLocked(prepared)
+	_, check, err := t.manager.applyValidatedLocked(prepared, true)
+	if err == nil {
+		t.validation = &check
+		t.checkedRevision = t.manager.revision
+	}
 	return err
 }
 
@@ -163,21 +161,15 @@ func (t *HarnessMutation) SetActiveProfileID(id string) error {
 	if t == nil || t.manager == nil {
 		return errors.New("runtime harness mutation is not initialized")
 	}
-	previous := t.manager.activeProfileInvalid
-	if !previous && t.manager.current.Load().config.Harnesses.ClaudeCode.ActiveProfileID == id {
-		return nil
-	}
-	t.manager.activeProfileInvalid = false
-	if err := t.setActiveProfileID(id); err != nil {
-		t.manager.activeProfileInvalid = previous
-		return err
-	}
-	return nil
+	return t.setActiveProfileID(id)
 }
 
 // InvalidateActiveProfile revokes an untrusted policy before attempting to
 // persist the inactive ID. A failed write must not restore the revoked policy.
 func (t *HarnessMutation) InvalidateActiveProfile() error {
+	if t == nil || t.manager == nil {
+		return errors.New("runtime harness mutation is not initialized")
+	}
 	t.manager.invalidatePolicyLocked()
 	return t.ClearActiveProfileID()
 }
@@ -197,6 +189,9 @@ func (m *Manager) invalidatePolicyLocked() {
 }
 
 func (t *HarnessMutation) NormalAttemptStatus() (int, string) {
+	if t == nil || t.manager == nil {
+		return 0, ""
+	}
 	return t.manager.current.Load().NormalAttemptStatus()
 }
 
@@ -223,7 +218,11 @@ func (t *HarnessMutation) setActiveProfileID(id string) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.manager.applyLocked(next)
+	_, check, err := t.manager.applyValidatedLocked(next, true)
+	if err == nil {
+		t.validation = &check
+		t.checkedRevision = t.manager.revision
+	}
 	return err
 }
 
@@ -234,7 +233,7 @@ type Manager struct {
 	scanRequirements     ScanRequirements
 	current              atomic.Pointer[Snapshot]
 	revision             uint64
-	harnessReconciler    func(config.HarnessMutation) error
+	harnessValidator     config.HarnessValidator
 	activeProfileInvalid bool
 	classifierAttempts   scheduler.AttemptPolicy
 
@@ -289,6 +288,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	startedAt := now()
 	m := &Manager{
 		store:                store,
+		harnessValidator:     options.HarnessValidator,
 		runtimeContext:       context,
 		scanRequirements:     options.ScanRequirements,
 		revision:             1,
@@ -514,70 +514,91 @@ func (m *Manager) Config() config.Config {
 }
 
 func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
+	result, _, err := m.applyValidatedLocked(next, false)
+	return result, err
+}
+
+func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (ApplyResult, config.HarnessValidation, error) {
+	var check config.HarnessValidation
 	if m.restartStatus.InProgress {
-		return ApplyResult{}, ErrRestartInProgress
+		return ApplyResult{}, check, ErrRestartInProgress
 	}
 	next = next.Normalize()
 	if err := next.Validate(); err != nil {
-		return ApplyResult{}, err
-	}
-	current := m.current.Load().Config()
-	if m.harnessReconciler != nil && current.Harnesses.ClaudeCode.ActiveProfileID != "" &&
-		next.Harnesses.ClaudeCode.ActiveProfileID == current.Harnesses.ClaudeCode.ActiveProfileID &&
-		!reflect.DeepEqual(current.Harnesses, next.Normalize().Harnesses) {
-		if err := m.harnessReconciler(&HarnessMutation{manager: m}); err != nil {
-			return ApplyResult{}, err
-		}
-		if m.activeProfileInvalid || m.current.Load().config.Harnesses.ClaudeCode.ActiveProfileID == "" {
-			next.Harnesses.ClaudeCode.ActiveProfileID = ""
-		}
+		return ApplyResult{}, check, err
 	}
 	catalog, err := provider.CompileCatalog(next.Providers, m.runtimeContext)
 	if err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, check, err
 	}
 	autoMode, err := compileAutoMode(next.AutoMode, m.runtimeContext)
 	if err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, check, err
 	}
 	currentSnapshot := m.current.Load()
 	currentConfig := currentSnapshot.Config()
+	checked := forceCheck || !reflect.DeepEqual(currentConfig.Harnesses, next.Harnesses)
+	invalidated := false
+	previousGuard := m.activeProfileInvalid
+	if checked {
+		var err error
+		check, err = m.checkHarness(next)
+		if err != nil {
+			return ApplyResult{}, check, err
+		}
+		if next.Harnesses.ClaudeCode.ActiveProfileID != "" {
+			invalidated = check.State != "in_sync"
+			if invalidated {
+				next.Harnesses.ClaudeCode.ActiveProfileID = ""
+			}
+			m.activeProfileInvalid = invalidated
+		}
+	}
+	defer func() { m.activeProfileInvalid = previousGuard }()
 	attempts, source := m.normalAttempts(next)
 	if reflect.DeepEqual(currentConfig, next) && currentSnapshot.attempts == attempts && currentSnapshot.attemptPolicySource == source {
+		previousGuard = m.activeProfileInvalid
 		return ApplyResult{
 			Revision:   currentSnapshot.Revision(),
 			Applied:    false,
 			ListenAddr: currentConfig.Service.ListenAddr,
-		}, nil
+		}, check, nil
 	}
 
 	restartRequired := serviceRestartRequired(currentConfig.Service, next.Service)
 	if !restartRequired {
 		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, attempts, m.classifierAttempts, m.now())
 		if err != nil {
-			return ApplyResult{}, err
+			return ApplyResult{}, check, err
 		}
 		nextSnapshot.attemptPolicySource = source
 		if !reflect.DeepEqual(currentConfig, next) {
 			if err := m.store.Save(next); err != nil {
-				return ApplyResult{}, fmt.Errorf("persist active configuration: %w", err)
+				if invalidated {
+					m.activeProfileInvalid = previousGuard
+					m.invalidatePolicyLocked()
+					previousGuard = m.activeProfileInvalid
+					return ApplyResult{}, check, fmt.Errorf("%w: %v", config.ErrActiveProfileStateFailed, err)
+				}
+				return ApplyResult{}, check, fmt.Errorf("persist active configuration: %w", err)
 			}
 		}
 		m.revision++
 		m.current.Store(nextSnapshot)
+		previousGuard = m.activeProfileInvalid
 		m.restartStatus = RestartStatus{State: "idle"}
 		return ApplyResult{
 			Revision:   m.revision,
 			Applied:    true,
 			ListenAddr: next.Service.ListenAddr,
-		}, nil
+		}, check, nil
 	}
 
 	if err := m.preflight(currentConfig, next); err != nil {
-		return ApplyResult{}, &PreflightError{Err: err}
+		return ApplyResult{}, check, &PreflightError{Err: err}
 	}
 	if err := m.store.SavePending(next); err != nil {
-		return ApplyResult{}, fmt.Errorf("persist pending configuration: %w", err)
+		return ApplyResult{}, check, fmt.Errorf("persist pending configuration: %w", err)
 	}
 	m.restartTriggered = false
 	requestedAt := m.now().UTC()
@@ -593,7 +614,7 @@ func (m *Manager) applyLocked(next config.Config) (ApplyResult, error) {
 		RestartRequired: true,
 		Restarting:      true,
 		ListenAddr:      next.Service.ListenAddr,
-	}, nil
+	}, check, nil
 }
 
 // PrepareRestart reserves the pending transaction and returns a starter that
@@ -740,12 +761,29 @@ func defaultPreflight(current, next config.Config) error {
 	return listener.Close()
 }
 
-// SetHarnessReconciler installs the existing harness verification at the config
-// transaction boundary. The callback receives the already-held mutation lock.
-func (m *Manager) SetHarnessReconciler(check func(config.HarnessMutation) error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.harnessReconciler = check
+func (m *Manager) checkHarness(cfg config.Config) (config.HarnessValidation, error) {
+	if m.harnessValidator != nil {
+		return m.harnessValidator.Check(cfg)
+	}
+	if cfg.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		return config.HarnessValidation{}, fmt.Errorf("%w: validator is required", config.ErrActiveProfileStateFailed)
+	}
+	return config.HarnessValidation{State: "inactive"}, nil
+}
+
+func (t *HarnessMutation) ReconcileActiveProfile() (config.HarnessValidation, error) {
+	if t == nil || t.manager == nil {
+		return config.HarnessValidation{}, errors.New("runtime harness mutation is not initialized")
+	}
+	if t.validation != nil && t.checkedRevision == t.manager.revision {
+		return *t.validation, nil
+	}
+	_, check, err := t.manager.applyValidatedLocked(t.Config(), true)
+	if err == nil {
+		t.validation = &check
+		t.checkedRevision = t.manager.revision
+	}
+	return check, err
 }
 
 // HarnessStateError preserves the same snapshot that made a harness check

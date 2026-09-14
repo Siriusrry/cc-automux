@@ -48,6 +48,9 @@ func newRuntimeManager(t *testing.T, options Options) (*Manager, *config.Store, 
 	if options.RuntimeContext.Registry.Empty() {
 		options.RuntimeContext = testRuntimeContext(t)
 	}
+	if options.HarnessValidator == nil {
+		options.HarnessValidator = testHarnessValidator{}
+	}
 	manager, err := NewManager(store, cfg, options)
 	if err != nil {
 		t.Fatal(err)
@@ -715,4 +718,16 @@ func runtimeClassifierAlias(t *testing.T, compiled *provider.CompiledProvider, s
 		t.Fatal(err)
 	}
 	return alias
+}
+
+// Runtime tests inject file-independent verification; integration tests use the
+// production validator with real temporary settings files.
+type testHarnessValidator struct{}
+
+func (testHarnessValidator) Check(cfg config.Config) (config.HarnessValidation, error) {
+	state := "inactive"
+	if cfg.Harnesses.ClaudeCode.ActiveProfileID != "" {
+		state = "in_sync"
+	}
+	return config.HarnessValidation{State: state}, nil
 }

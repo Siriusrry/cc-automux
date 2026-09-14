@@ -48,13 +48,6 @@ func newHarnessHandlerFixture(t *testing.T, gatewayKey string) harnessHandlerFix
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
-		RuntimeContext: runtimeContext,
-		Preflight:      func(config.Config, config.Config) error { return nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	home := filepath.Join(root, "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
@@ -64,7 +57,19 @@ func newHarnessHandlerFixture(t *testing.T, gatewayKey string) harnessHandlerFix
 	if err != nil {
 		t.Fatal(err)
 	}
-	harness, err := harnessconfig.NewManager(runtimeManager, registry)
+	validator, err := harnessconfig.NewValidator(registry, nil, []string{configPath, config.PendingPath(configPath)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
+		HarnessValidator: validator,
+		RuntimeContext:   runtimeContext,
+		Preflight:        func(config.Config, config.Config) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness, err := harnessconfig.NewManager(runtimeManager, validator)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -130,15 +130,14 @@ func TestStartupVerifiesSavedBudgetWithoutRewritingConfig(t *testing.T) {
 				t.Fatal(err)
 			}
 			raw, _ := os.ReadFile(f.store.Path())
-			manager, err := runtimeconfig.NewManager(f.store, cfg, runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext()})
+			manager, err := runtimeconfig.NewManager(f.store, cfg, runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: f.harness.Validator})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if manager.Snapshot().NormalAttemptPolicy().MaxAttempts != 3 {
 				t.Fatal("unverified startup budget active")
 			}
-			registry, _ := NewRegistry(f.adapter)
-			harness, err := NewManager(manager, registry)
+			harness, err := NewManager(manager, f.harness.Validator)
 			if err != nil {
 				t.Fatal(err)
 			}

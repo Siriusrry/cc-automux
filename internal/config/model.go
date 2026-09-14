@@ -122,7 +122,22 @@ type HarnessMutation interface {
 	SetActiveProfileID(string) error
 	InvalidateActiveProfile() error
 	NormalAttemptStatus() (int, string)
+	ReconcileActiveProfile() (HarnessValidation, error)
 }
+
+// HarnessValidation describes a read-only check of the supplied configuration.
+type HarnessValidation struct {
+	State        string
+	Reason       string
+	ResolvedPath string
+}
+
+// HarnessValidator owns external-file verification without runtime mutations.
+type HarnessValidator interface {
+	Check(Config) (HarnessValidation, error)
+}
+
+var ErrActiveProfileStateFailed = errors.New("active profile state persistence failed")
 
 // ClaudeCodeConfig is the persistent, file-independent portion of the Claude
 // Code harness configuration. External settings.json semantics belong to the

@@ -68,13 +68,6 @@ func newHarnessFixture(t *testing.T, gatewayKey string, files ...FileOps) harnes
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
-		RuntimeContext: context,
-		Preflight:      func(config.Config, config.Config) error { return nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	home := filepath.Join(root, "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
@@ -84,7 +77,19 @@ func newHarnessFixture(t *testing.T, gatewayKey string, files ...FileOps) harnes
 	if err != nil {
 		t.Fatal(err)
 	}
-	harness, err := NewManager(runtimeManager, adapterRegistry, managerOptionsForFixture(files))
+	validator, err := NewValidator(adapterRegistry, managerFilesForFixture(files), []string{configPath, config.PendingPath(configPath)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
+		HarnessValidator: validator,
+		RuntimeContext:   context,
+		Preflight:        func(config.Config, config.Config) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness, err := NewManager(runtimeManager, validator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,11 +112,11 @@ func newHarnessFixture(t *testing.T, gatewayKey string, files ...FileOps) harnes
 	}
 }
 
-func managerOptionsForFixture(files []FileOps) ManagerOptions {
+func managerFilesForFixture(files []FileOps) *FileStore {
 	if len(files) == 0 || files[0] == nil {
-		return ManagerOptions{}
+		return nil
 	}
-	return ManagerOptions{FileStore: NewFileStore(FileStoreOptions{FS: files[0]})}
+	return NewFileStore(FileStoreOptions{FS: files[0]})
 }
 
 func writeSettingsFixture(t *testing.T, path string, data []byte) {
@@ -376,7 +381,15 @@ func TestManagerHomeResolutionFailureClearsActiveState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	brokenManager, err := NewManager(fixture.runtime, brokenRegistry)
+	validator, err := NewValidator(brokenRegistry, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokenRuntime, err := runtimeconfig.NewManager(fixture.store, fixture.runtime.Config(), runtimeconfig.Options{RuntimeContext: fixture.runtime.RuntimeContext(), HarnessValidator: validator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokenManager, err := NewManager(brokenRuntime, validator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +400,7 @@ func TestManagerHomeResolutionFailureClearsActiveState(t *testing.T) {
 	if status.State != StateInvalid || status.ActiveProfileID != "" || status.LastInvalidationReason != reasonPathInvalid {
 		t.Fatalf("home resolution failure status = %#v", status)
 	}
-	if got := fixture.runtime.Config().Harnesses.ClaudeCode.ActiveProfileID; got != "" {
+	if got := brokenRuntime.Config().Harnesses.ClaudeCode.ActiveProfileID; got != "" {
 		t.Fatalf("home resolution failure left active ID %q", got)
 	}
 }
@@ -462,20 +475,25 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
-		RuntimeContext: context,
-		Preflight:      func(config.Config, config.Config) error { return nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	home := filepath.Join(root, "home")
 	adapter := NewClaudeCodeAdapterWithHomeResolver(func() (string, error) { return home, nil })
 	adapterRegistry, err := NewRegistry(adapter)
 	if err != nil {
 		t.Fatal(err)
 	}
-	harness, err := NewManager(runtimeManager, adapterRegistry)
+	validator, err := NewValidator(adapterRegistry, nil, []string{configPath, config.PendingPath(configPath)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
+		HarnessValidator: validator,
+		RuntimeContext:   context,
+		Preflight:        func(config.Config, config.Config) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness, err := NewManager(runtimeManager, validator)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,8 +7,6 @@ import (
 	"github.com/Siriusrry/cc-automux/internal/config"
 )
 
-var _ HarnessConfigRuntime = (*Manager)(nil)
-
 func TestHarnessRuntimePersistsActiveIDAndReconcilesClientUpdates(t *testing.T) {
 	manager, store, _ := newRuntimeManager(t, Options{})
 	profile := config.Profile{

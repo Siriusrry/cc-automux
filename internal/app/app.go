@@ -115,6 +115,18 @@ func New(options Options) (*App, error) {
 		return nil, err
 	}
 
+	var harnessRegistry harnessconfig.AdapterRegistry = options.HarnessRegistry
+	if harnessRegistry == nil {
+		adapter := harnessconfig.NewClaudeCodeAdapter(harnessconfig.ClaudeCodeAdapterOptions{HomeDir: options.HarnessHomeDir})
+		harnessRegistry, err = harnessconfig.NewRegistry(adapter)
+		if err != nil {
+			return nil, fmt.Errorf("initialize harness registry: %w", err)
+		}
+	}
+	harnessValidator, validatorErr := harnessconfig.NewValidator(harnessRegistry, options.HarnessFileStore, []string{path, config.PendingPath(path)})
+	if validatorErr != nil {
+		return nil, validatorErr
+	}
 	logDir := options.LogDir
 	if logDir == "" {
 		logDir, err = config.LogDir()
@@ -146,6 +158,7 @@ func New(options Options) (*App, error) {
 	managerOptions := runtime.Options{
 		RuntimeContext:          runtimeContext,
 		ScanRequirements:        scanRequirements,
+		HarnessValidator:        harnessValidator,
 		ClassifierAttemptPolicy: scheduler.DefaultClassifierAttemptPolicy(),
 		RestartDelay:            options.RestartDelay,
 		Now:                     options.Now,
@@ -221,20 +234,7 @@ func New(options Options) (*App, error) {
 		app.logServiceEvent(slog.LevelWarn, "pending_rejected", slog.String("error", startup.Warning().Error()))
 	}
 	app.manager = manager
-	var harnessRegistry harnessconfig.AdapterRegistry = options.HarnessRegistry
-	if harnessRegistry == nil {
-		adapter := harnessconfig.NewClaudeCodeAdapter(harnessconfig.ClaudeCodeAdapterOptions{HomeDir: options.HarnessHomeDir})
-		harnessRegistry, err = harnessconfig.NewRegistry(adapter)
-		if err != nil {
-			closeResources(app.logs, app.listener)
-			return nil, fmt.Errorf("initialize harness registry: %w", err)
-		}
-	}
-	harnessManager, harnessErr := harnessconfig.NewManager(manager, harnessRegistry, harnessconfig.ManagerOptions{
-		Registry:       harnessRegistry,
-		FileStore:      options.HarnessFileStore,
-		ProtectedPaths: []string{path, config.PendingPath(path)},
-	})
+	harnessManager, harnessErr := harnessconfig.NewManager(manager, harnessValidator)
 	if harnessErr != nil {
 		closeResources(app.logs, app.listener)
 		return nil, fmt.Errorf("initialize harness manager: %w", harnessErr)

@@ -4,10 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
@@ -18,16 +16,8 @@ import (
 // Runtime implementations must keep the mutation lock held for the complete
 // callback, including the external target-file operation performed by Manager.
 type RuntimeBoundary interface {
-	SetHarnessReconciler(func(config.HarnessMutation) error)
 	Config() config.Config
 	WithHarnessMutation(func(config.HarnessMutation) error) error
-}
-
-// ProtectedPathProvider lets a Runtime expose its active and pending
-// configuration paths without making path metadata part of the generic
-// mutation interface.
-type ProtectedPathProvider interface {
-	ProtectedConfigPaths() []string
 }
 
 var (
@@ -37,7 +27,7 @@ var (
 	ErrActiveProfile            = errors.New("harnessconfig: profile is active")
 	ErrHarnessConfigConflict    = errors.New("harnessconfig: target configuration conflict")
 	ErrHarnessConfigIOFailed    = errors.New("harnessconfig: target configuration I/O failed")
-	ErrActiveProfileStateFailed = errors.New("harnessconfig: active profile state persistence failed")
+	ErrActiveProfileStateFailed = config.ErrActiveProfileStateFailed
 	ErrManagerNotInitialized    = errors.New("harnessconfig: manager is not initialized")
 )
 
@@ -136,71 +126,24 @@ type HarnessUpdatePatch struct {
 	DisableTelemetry *bool
 }
 
-// ManagerOptions supplies construction-time seams for Manager.
-type ManagerOptions struct {
-	Registry       AdapterRegistry
-	FileStore      *FileStore
-	ProtectedPaths []string
-}
-
-// Manager owns harness semantics and active reconciliation. It does not own a
-// second runtime snapshot or any data-plane state.
+// Manager owns harness operations; its validator is shared with Runtime and
+// holds no activation, policy, or mutation state.
 type Manager struct {
+	*Validator
 	runtime    RuntimeBoundary
-	registry   AdapterRegistry
-	files      *FileStore
-	protected  []string
 	mu         sync.Mutex
 	lastReason map[string]string
 }
 
-// NewManager constructs a harness manager. The registry is normally supplied
-// by the application composition root; a nil registry uses the default
-// Claude Code-only registry for focused callers.
-func NewManager(runtimeBoundary RuntimeBoundary, registry AdapterRegistry, options ...ManagerOptions) (*Manager, error) {
-	if isNilRuntime(runtimeBoundary) {
+func NewManager(runtimeBoundary RuntimeBoundary, validator *Validator) (*Manager, error) {
+	if isNilRuntime(runtimeBoundary) || validator == nil {
 		return nil, ErrManagerNotInitialized
 	}
-	if registry == nil {
-		registry = DefaultRegistry()
-	}
-	if _, ok := registry.Lookup(ClaudeCodeAdapterID); !ok {
-		return nil, fmt.Errorf("%w: %q", ErrHarnessNotFound, ClaudeCodeAdapterID)
-	}
-	var option ManagerOptions
-	if len(options) > 0 {
-		option = options[0]
-	}
-	files := option.FileStore
-	if files == nil {
-		files = NewFileStore()
-	}
-	protected := append([]string(nil), option.ProtectedPaths...)
-	if provider, ok := runtimeBoundary.(ProtectedPathProvider); ok {
-		protected = append(protected, provider.ProtectedConfigPaths()...)
-	}
-	protected = normalizeProtectedPaths(protected)
-	manager := &Manager{
-		runtime:    runtimeBoundary,
-		registry:   registry,
-		files:      files,
-		protected:  protected,
-		lastReason: make(map[string]string),
-	}
-	runtimeBoundary.SetHarnessReconciler(func(tx config.HarnessMutation) error {
-		adapter, _ := manager.lookup(ClaudeCodeAdapterID)
-		status := manager.reconcileInMutation(tx, ClaudeCodeAdapterID, adapter, tx.Config())
-		if status.State == StateError {
-			return ErrActiveProfileStateFailed
-		}
-		return nil
-	})
-	return manager, nil
+	return &Manager{Validator: validator, runtime: runtimeBoundary, lastReason: make(map[string]string)}, nil
 }
 
-// New is a short constructor alias.
-func New(runtimeBoundary RuntimeBoundary, registry AdapterRegistry, options ...ManagerOptions) (*Manager, error) {
-	return NewManager(runtimeBoundary, registry, options...)
+func New(runtimeBoundary RuntimeBoundary, validator *Validator) (*Manager, error) {
+	return NewManager(runtimeBoundary, validator)
 }
 
 func isNilRuntime(value RuntimeBoundary) bool {
@@ -214,27 +157,6 @@ func isNilRuntime(value RuntimeBoundary) bool {
 	default:
 		return false
 	}
-}
-
-func normalizeProtectedPaths(paths []string) []string {
-	seen := make(map[string]struct{}, len(paths))
-	result := make([]string, 0, len(paths))
-	for _, path := range paths {
-		if path == "" || !filepath.IsAbs(path) {
-			continue
-		}
-		path = filepath.Clean(path)
-		key := path
-		if filepath.Separator == '\\' {
-			key = strings.ToLower(key)
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		result = append(result, path)
-	}
-	return result
 }
 
 // Discover returns adapter capabilities in deterministic ID order.
@@ -280,34 +202,6 @@ func (m *Manager) lookup(id string) (Adapter, error) {
 	return adapter, nil
 }
 
-func (m *Manager) protectedPathConflict(target string) bool {
-	if m == nil {
-		return false
-	}
-	backup := BackupPath(target)
-	for _, protected := range m.protected {
-		if samePath(target, protected) || samePath(backup, protected) {
-			return true
-		}
-	}
-	return samePath(target, backup)
-}
-
-func (m *Manager) pathFor(cfg config.Config, adapter Adapter) (string, error) {
-	cc := cfg.Harnesses.ClaudeCode.Normalize()
-	path, err := adapter.ResolvePath(PathConfig{PathMode: cc.PathMode, SettingsPath: cc.SettingsPath})
-	if err != nil {
-		return "", err
-	}
-	if path == "" || !filepath.IsAbs(path) {
-		return "", fmt.Errorf("%w: resolved path must be absolute", ErrInvalidTargetPath)
-	}
-	if m.protectedPathConflict(path) {
-		return "", ErrPathConflict
-	}
-	return path, nil
-}
-
 func baseStatus(id string, cfg config.Config, resolved string) HarnessStatus {
 	cc := cfg.Harnesses.ClaudeCode.Normalize()
 	return HarnessStatus{
@@ -321,15 +215,6 @@ func baseStatus(id string, cfg config.Config, resolved string) HarnessStatus {
 		ProfileCount:           len(cc.Profiles),
 		LastInvalidationReason: stateReasonEmpty,
 	}
-}
-
-func (m *Manager) profileFor(cfg config.Config, id string) (config.Profile, bool) {
-	for _, profile := range cfg.Harnesses.ClaudeCode.Profiles {
-		if profile.ID == id {
-			return profile, true
-		}
-	}
-	return config.Profile{}, false
 }
 
 func activationInput(cfg config.Config, profile config.Profile) ActivationInput {
@@ -393,7 +278,7 @@ func (m *Manager) Status(id string) (HarnessStatus, error) {
 
 	var status HarnessStatus
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		status = m.reconcileInMutation(tx, id, adapter, tx.Config())
+		status = m.reconcileInMutation(tx, id)
 		return nil
 	})
 	if err != nil {
@@ -448,77 +333,24 @@ func (m *Manager) statusWithoutReconcile(id string, adapter Adapter, cfg config.
 	return baseStatus(id, cfg, resolved)
 }
 
-func (m *Manager) reconcileInMutation(tx config.HarnessMutation, id string, adapter Adapter, cfg config.Config) (status HarnessStatus) {
-	defer func() { status.NormalMaxAttempts, status.AttemptPolicySource = tx.NormalAttemptStatus() }()
-	cfg = cfg.Normalize()
-	resolved, pathErr := m.pathFor(cfg, adapter)
-	status = baseStatus(id, cfg, resolved)
-	activeID := cfg.Harnesses.ClaudeCode.ActiveProfileID
-	status.ActiveProfileID = activeID
-	if pathErr != nil {
-		state, reason := classifyPathError(pathErr)
-		status.State = state
-		status.LastInvalidationReason = reason
-		return m.invalidateInMutation(tx, status, reason)
+func (m *Manager) reconcileInMutation(tx config.HarnessMutation, id string) HarnessStatus {
+	check, err := tx.ReconcileActiveProfile()
+	status := baseStatus(id, tx.Config(), check.ResolvedPath)
+	status.State = HarnessState(check.State)
+	status.LastInvalidationReason = check.Reason
+	if err != nil {
+		status.State = StateError
+		status.LastInvalidationReason = reasonStatePersistence
 	}
-
-	if activeID == "" {
-		status.State = StateInactive
+	if status.State == StateInSync {
+		status.ActiveProfileID = tx.Config().Harnesses.ClaudeCode.ActiveProfileID
+		m.recordReason(id, "")
+	} else if check.Reason != "" {
+		m.recordReason(id, check.Reason)
+	} else {
 		status.LastInvalidationReason = m.rememberedReason(id)
-		return status
 	}
-	status.ActiveProfileID = activeID
-	profile, ok := m.profileFor(cfg, activeID)
-	if !ok {
-		status.State = StateInvalid
-		return m.invalidateInMutation(tx, status, reasonActiveProfileMissing)
-	}
-
-	projection, projectionErr := adapter.BuildManagedProjection(activationInput(cfg, profile))
-	if projectionErr != nil {
-		state, reason := classifyProjectionError(projectionErr)
-		status.State = state
-		return m.invalidateInMutation(tx, status, reason)
-	}
-	target, readErr := m.files.Read(resolved)
-	if readErr != nil {
-		state, reason := classifyReadError(readErr)
-		status.State = state
-		return m.invalidateInMutation(tx, status, reason)
-	}
-	if verifyErr := adapter.Verify(target, projection); verifyErr != nil {
-		state, reason := classifyVerifyError(verifyErr)
-		status.State = state
-		return m.invalidateInMutation(tx, status, reason)
-	}
-
-	if err := tx.SetActiveProfileID(activeID); err != nil {
-		status.State = StateError
-		return m.invalidateInMutation(tx, status, reasonStatePersistence)
-	}
-	status.State = StateInSync
-	status.LastInvalidationReason = ""
-	m.recordReason(id, "")
-	return status
-}
-
-func (m *Manager) invalidateInMutation(tx config.HarnessMutation, status HarnessStatus, reason string) HarnessStatus {
-	status.LastInvalidationReason = reason
-	m.recordReason(status.ID, reason)
-	if status.ActiveProfileID == "" {
-		return status
-	}
-	status.ActiveProfileID = ""
-	if tx == nil {
-		status.State = StateError
-		status.LastInvalidationReason = reasonStatePersistence
-		return status
-	}
-	if err := tx.InvalidateActiveProfile(); err != nil {
-		status.State = StateError
-		status.LastInvalidationReason = reasonStatePersistence
-		return status
-	}
+	status.NormalMaxAttempts, status.AttemptPolicySource = tx.NormalAttemptStatus()
 	return status
 }
 
@@ -615,7 +447,7 @@ func (m *Manager) Activate(id, profileID string) (ActivationResult, error) {
 			return activationInputError(projectionErr)
 		}
 
-		currentStatus := m.reconcileInMutation(tx, id, adapter, cfg)
+		currentStatus := m.reconcileInMutation(tx, id)
 		if currentStatus.State == StateError {
 			return fmt.Errorf("%w: %s", ErrActiveProfileStateFailed, currentStatus.LastInvalidationReason)
 		}
@@ -718,8 +550,8 @@ func isFileConflict(err error) bool {
 	return false
 }
 
-func (m *Manager) reconciledOperationState(tx config.HarnessMutation, id string, adapter Adapter, cfg config.Config) (HarnessStatus, config.Config, error) {
-	status := m.reconcileInMutation(tx, id, adapter, cfg)
+func (m *Manager) reconciledOperationState(tx config.HarnessMutation, id string) (HarnessStatus, config.Config, error) {
+	status := m.reconcileInMutation(tx, id)
 	if status.State == StateError {
 		return status, tx.Config(), fmt.Errorf("%w: %s", ErrActiveProfileStateFailed, status.LastInvalidationReason)
 	}
@@ -729,7 +561,7 @@ func (m *Manager) reconciledOperationState(tx config.HarnessMutation, id string,
 // Profiles returns all persisted profiles with the active bit derived from a
 // fresh reconciliation. The returned slice is always non-nil.
 func (m *Manager) Profiles(id string) ([]ProfileView, error) {
-	adapter, err := m.lookup(id)
+	_, err := m.lookup(id)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +570,7 @@ func (m *Manager) Profiles(id string) ([]ProfileView, error) {
 	}
 	var result []ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
+		status, cfg, stateErr := m.reconciledOperationState(tx, id)
 		if stateErr != nil {
 			return stateErr
 		}
@@ -761,7 +593,7 @@ func (m *Manager) Profiles(id string) ([]ProfileView, error) {
 
 // GetProfile returns one profile after the required status reconciliation.
 func (m *Manager) GetProfile(id, profileID string) (ProfileView, error) {
-	adapter, err := m.lookup(id)
+	_, err := m.lookup(id)
 	if err != nil {
 		return ProfileView{}, err
 	}
@@ -770,7 +602,7 @@ func (m *Manager) GetProfile(id, profileID string) (ProfileView, error) {
 	}
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
+		status, cfg, stateErr := m.reconciledOperationState(tx, id)
 		if stateErr != nil {
 			return stateErr
 		}
@@ -794,7 +626,7 @@ func (m *Manager) GetProfile(id, profileID string) (ProfileView, error) {
 // CreateProfile persists a new profile. An omitted ID is filled with a random
 // v4 UUID before the schema validation transaction.
 func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView, error) {
-	adapter, err := m.lookup(id)
+	_, err := m.lookup(id)
 	if err != nil {
 		return ProfileView{}, err
 	}
@@ -809,10 +641,7 @@ func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView,
 	}
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
-		if stateErr != nil {
-			return stateErr
-		}
+		cfg := tx.Config()
 		beforeActiveID := cfg.Harnesses.ClaudeCode.ActiveProfileID
 		for _, existing := range cfg.Harnesses.ClaudeCode.Profiles {
 			if existing.ID == profile.ID {
@@ -831,7 +660,7 @@ func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView,
 		if beforeActiveID != "" && tx.Config().Harnesses.ClaudeCode.ActiveProfileID == "" {
 			m.recordReason(id, reasonConfigurationChanged)
 		}
-		status, cfg, stateErr = m.reconciledOperationState(tx, id, adapter, tx.Config())
+		status, cfg, stateErr := m.reconciledOperationState(tx, id)
 		if stateErr != nil {
 			return stateErr
 		}
@@ -854,7 +683,7 @@ func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView,
 
 // UpdateProfile replaces a profile while preserving its immutable ID.
 func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (ProfileView, error) {
-	adapter, err := m.lookup(id)
+	_, err := m.lookup(id)
 	if err != nil {
 		return ProfileView{}, err
 	}
@@ -867,10 +696,7 @@ func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (P
 	profile.ID = profileID
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
-		if stateErr != nil {
-			return stateErr
-		}
+		cfg := tx.Config()
 		beforeActiveID := cfg.Harnesses.ClaudeCode.ActiveProfileID
 		found := false
 		for _, existing := range cfg.Harnesses.ClaudeCode.Profiles {
@@ -899,7 +725,7 @@ func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (P
 		if beforeActiveID != "" && tx.Config().Harnesses.ClaudeCode.ActiveProfileID == "" {
 			m.recordReason(id, reasonConfigurationChanged)
 		}
-		status, cfg, stateErr = m.reconciledOperationState(tx, id, adapter, tx.Config())
+		status, cfg, stateErr := m.reconciledOperationState(tx, id)
 		if stateErr != nil {
 			return stateErr
 		}
@@ -923,7 +749,7 @@ func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (P
 // DeleteProfile removes a non-active profile. A profile that is stale-active
 // is first reconciled; a verified active profile remains protected.
 func (m *Manager) DeleteProfile(id, profileID string) error {
-	adapter, err := m.lookup(id)
+	_, err := m.lookup(id)
 	if err != nil {
 		return err
 	}
@@ -931,7 +757,7 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 		return ErrManagerNotInitialized
 	}
 	return m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		status, cfg, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
+		status, cfg, stateErr := m.reconciledOperationState(tx, id)
 		if stateErr != nil {
 			return stateErr
 		}
@@ -963,7 +789,7 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 // UpdatePatch applies only the supplied harness-level fields while retaining
 // all omitted values from the same transaction snapshot.
 func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStatus, error) {
-	adapter, err := m.lookup(id)
+	_, err := m.lookup(id)
 	if err != nil {
 		return HarnessStatus{}, err
 	}
@@ -972,10 +798,6 @@ func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStat
 	}
 	var result HarnessStatus
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
-		_, _, stateErr := m.reconciledOperationState(tx, id, adapter, tx.Config())
-		if stateErr != nil {
-			return stateErr
-		}
 		beforeActiveID := tx.Config().Harnesses.ClaudeCode.ActiveProfileID
 		if err := tx.UpdateHarness(func(h *config.HarnessesConfig) error {
 			if update.PathMode != nil {
@@ -994,7 +816,7 @@ func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStat
 		if beforeActiveID != "" && tx.Config().Harnesses.ClaudeCode.ActiveProfileID == "" {
 			m.recordReason(id, reasonConfigurationChanged)
 		}
-		result = m.reconcileInMutation(tx, id, adapter, tx.Config())
+		result = m.reconcileInMutation(tx, id)
 		return nil
 	})
 	if err != nil {

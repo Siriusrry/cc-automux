@@ -727,6 +727,10 @@ func (h *Handler) writeSemanticError(w http.ResponseWriter, err error) {
 }
 
 func (h *Handler) writeApplyError(w http.ResponseWriter, err error) {
+	if errors.Is(err, config.ErrActiveProfileStateFailed) {
+		writeError(w, http.StatusInternalServerError, "active_profile_state_failed", "active profile state could not be persisted")
+		return
+	}
 	if errors.Is(err, runtime.ErrConfigChanged) {
 		writeError(w, http.StatusPreconditionFailed, "configuration_changed", "Configuration changed. Reload it before saving.")
 		return
