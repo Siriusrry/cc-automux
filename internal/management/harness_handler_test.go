@@ -521,3 +521,23 @@ func TestProfileAttemptBudgetHTTP(t *testing.T) {
 		t.Fatalf("status: %#v", status)
 	}
 }
+
+func TestProfileErrorsExposeField(t *testing.T) {
+	f := newHarnessHandlerFixture(t, "gateway-key")
+	for _, tc := range []struct {
+		key    string
+		value  any
+		status int
+		field  string
+	}{{"haiku_model", "", 422, "harnesses.claude_code.profiles[0].haiku_model"}, {"max_attempts", 0, 400, "max_attempts"}} {
+		p := validHarnessProfile("11111111-1111-4111-8111-111111111111", "Daily")
+		p[tc.key] = tc.value
+		body, _ := json.Marshal(p)
+		response := harnessRequest(f.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles", string(body))
+		var result errorResponse
+		json.Unmarshal(response.Body.Bytes(), &result)
+		if response.Code != tc.status || result.Field != tc.field {
+			t.Fatalf("response=%d %s", response.Code, response.Body)
+		}
+	}
+}

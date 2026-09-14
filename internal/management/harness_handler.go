@@ -202,6 +202,11 @@ func (h *Handler) handleProfileActivation(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) writeHarnessDecodeError(w http.ResponseWriter, err error) {
+	var fieldErr *profileFieldError
+	if errors.As(err, &fieldErr) {
+		writeFieldError(w, http.StatusBadRequest, "invalid_json", fieldErr.Err.Error(), fieldErr.Field)
+		return
+	}
 	if errors.Is(err, config.ErrActiveProfileReadOnly) {
 		writeError(w, http.StatusConflict, "active_profile_read_only", "active profile state is server-managed")
 		return
@@ -246,9 +251,9 @@ func (h *Handler) writeHarnessError(w http.ResponseWriter, err error) {
 		var validationErr *config.ValidationError
 		switch {
 		case errors.As(err, &conflictErr):
-			writeError(w, http.StatusConflict, "conflict", conflictErr.Error())
+			writeFieldError(w, http.StatusConflict, "conflict", conflictErr.Message, conflictErr.Field)
 		case errors.As(err, &validationErr):
-			writeError(w, http.StatusUnprocessableEntity, "validation_failed", validationErr.Error())
+			writeFieldError(w, http.StatusUnprocessableEntity, "validation_failed", validationErr.Message, validationErr.Field)
 		default:
 			writeError(w, http.StatusInternalServerError, "internal_error", "harness operation failed")
 		}

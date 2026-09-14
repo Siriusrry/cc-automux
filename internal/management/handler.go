@@ -718,9 +718,14 @@ func (h *Handler) writeDecodeError(w http.ResponseWriter, err error) {
 }
 
 func (h *Handler) writeSemanticError(w http.ResponseWriter, err error) {
+	var validationErr *config.ValidationError
+	if errors.As(err, &validationErr) {
+		writeFieldError(w, http.StatusUnprocessableEntity, "validation_failed", validationErr.Message, validationErr.Field)
+		return
+	}
 	var conflictErr *config.ConflictError
 	if errors.As(err, &conflictErr) {
-		writeError(w, http.StatusConflict, "conflict", conflictErr.Error())
+		writeFieldError(w, http.StatusConflict, "conflict", conflictErr.Message, conflictErr.Field)
 		return
 	}
 	writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
@@ -745,12 +750,16 @@ func (h *Handler) writeApplyError(w http.ResponseWriter, err error) {
 	}
 	var conflictErr *config.ConflictError
 	if errors.As(err, &conflictErr) {
-		writeError(w, http.StatusConflict, "conflict", conflictErr.Error())
+		writeFieldError(w, http.StatusConflict, "conflict", conflictErr.Message, conflictErr.Field)
 		return
 	}
 	var validationErr *config.ValidationError
 	if errors.As(err, &validationErr) || errors.Is(err, patch.ErrUnknownPatch) || errors.Is(err, patch.ErrDuplicatePatch) || errors.Is(err, patch.ErrPatchConflict) || errors.Is(err, patch.ErrPatchNotApplicable) || errors.Is(err, patch.ErrInvalidDefinition) {
-		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+		if validationErr != nil {
+			writeFieldError(w, http.StatusUnprocessableEntity, "validation_failed", validationErr.Message, validationErr.Field)
+		} else {
+			writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+		}
 		return
 	}
 	var preflightErr *runtime.PreflightError
@@ -793,6 +802,11 @@ func methodNotAllowed(w http.ResponseWriter, methods ...string) {
 type errorResponse struct {
 	Error   string `json:"error"`
 	Message string `json:"message,omitempty"`
+	Field   string `json:"field,omitempty"`
+}
+
+func writeFieldError(w http.ResponseWriter, status int, code, message, field string) {
+	writeJSON(w, status, errorResponse{Error: code, Message: message, Field: field})
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

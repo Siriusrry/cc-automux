@@ -170,6 +170,14 @@ func decodeHarnessUpdate(data []byte) (harnessconfig.HarnessUpdatePatch, error) 
 	return patch, nil
 }
 
+type profileFieldError struct {
+	Field string
+	Err   error
+}
+
+func (e *profileFieldError) Error() string { return e.Err.Error() }
+func (e *profileFieldError) Unwrap() error { return e.Err }
+
 var profileAllowed = map[string]struct{}{
 	"id": {}, "name": {}, "haiku_model": {}, "sonnet_model": {},
 	"opus_model": {}, "fable_model": {}, "subagent_model": {},
@@ -196,17 +204,17 @@ func decodeProfile(data []byte) (config.Profile, error) {
 	} {
 		if raw, present := object[key]; present {
 			if jsonNull(raw) {
-				return config.Profile{}, fmt.Errorf("%w: %s must not be null", harnessconfig.ErrInvalidJSON, key)
+				return config.Profile{}, &profileFieldError{Field: key, Err: fmt.Errorf("%w: %s must not be null", harnessconfig.ErrInvalidJSON, key)}
 			}
 			if err := json.Unmarshal(raw, destination); err != nil {
-				return config.Profile{}, fmt.Errorf("%w: %s must be a string", harnessconfig.ErrInvalidJSON, key)
+				return config.Profile{}, &profileFieldError{Field: key, Err: fmt.Errorf("%w: %s must be a string", harnessconfig.ErrInvalidJSON, key)}
 			}
 		}
 	}
 	if raw, present := object["max_attempts"]; present {
 		value, err := config.DecodeMaxAttempts(raw)
 		if err != nil {
-			return config.Profile{}, fmt.Errorf("%w: %v", harnessconfig.ErrInvalidJSON, err)
+			return config.Profile{}, &profileFieldError{Field: "max_attempts", Err: fmt.Errorf("%w: %v", harnessconfig.ErrInvalidJSON, err)}
 		}
 		profile.MaxAttempts = value
 	}

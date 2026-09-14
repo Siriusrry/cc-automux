@@ -64,7 +64,7 @@
           return await api.put('/api/v1/harnesses/claude-code/profiles/' + profile.id, Object.assign({ id: profile.id }, body));
         } catch (e) {
           if (e.status === 409 && /name/.test(e.message)) fields.name.setError('Another profile already uses this name.');
-          else if (e.field && fields[e.field.replace(/^profile\./, '')]) fields[e.field.replace(/^profile\./, '')].setError(e.detail);
+          else if (e.field && fields[e.field.replace(/^(?:profile\.|harnesses\.claude_code\.profiles\[\d+\]\.)/, '')]) fields[e.field.replace(/^(?:profile\.|harnesses\.claude_code\.profiles\[\d+\]\.)/, '')].setError(e.detail);
           else fields.name.setError(e.detail || e.message);
           return false;
         }

@@ -4,13 +4,13 @@
   const CCAM = (window.CCAM = window.CCAM || {});
 
   class ApiError extends Error {
-    constructor(status, code, message) {
+    constructor(status, code, message, field) {
       super(message || code || ('HTTP ' + status));
       this.name = 'ApiError';
       this.status = status;
       this.code = code || (status === 0 ? 'network' : 'http_' + status);
       const split = CCAM.ui ? CCAM.ui.splitFieldError(message) : { field: null, message };
-      this.field = split.field;
+      this.field = field || split.field;
       this.detail = split.message;
     }
     get isNetwork() { return this.status === 0; }
@@ -44,7 +44,7 @@
     }
     if (res.status >= 400) {
       const err = (res.json && res.json.error) || ('http_' + res.status);
-      throw new ApiError(res.status, err, (res.json && res.json.message) || err);
+      throw new ApiError(res.status, err, (res.json && res.json.message) || err, res.json && res.json.field);
     }
     if (res.status === 204) return null;
     if (opts && opts.response) return res;
