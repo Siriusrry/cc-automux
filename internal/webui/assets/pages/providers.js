@@ -267,7 +267,7 @@
               try { await api.del('/api/v1/providers/' + id); toast(provider.name + ' deleted'); store.invalidate(); CCAM.router.clearGuard(); CCAM.router.go('/providers'); }
               catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
             } }, icon('trash'), 'Delete provider');
-          const actionsCard = h('div', { class: 'card pr-provider-actions' },
+          const actionsCard = h('div', { class: 'card' },
             h('p', { class: 'eyebrow' }, 'Provider actions'),
             h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Create a copy of this provider.'), duplicateButton),
             h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Remove this provider and release its session bindings.'), deleteButton));
