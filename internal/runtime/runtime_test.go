@@ -731,3 +731,27 @@ func (testHarnessValidator) Check(cfg config.Config) (config.HarnessValidation, 
 	}
 	return config.HarnessValidation{State: state}, nil
 }
+
+func TestSnapshotConstructionRequiresPolicySource(t *testing.T) {
+	cfg := runtimeConfig()
+	context := testRuntimeContext(t)
+	catalog, err := provider.CompileCatalog(cfg.Providers, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []AttemptPolicySource{AttemptPolicyDefault, AttemptPolicyProfile, "", "invalid"} {
+		snapshot, err := newSnapshot(1, cfg, catalog, context, ScanRequirements{}, NormalAttemptPolicy{Policy: scheduler.DefaultAttemptPolicy(), Source: source}, scheduler.DefaultClassifierAttemptPolicy(), time.Now())
+		valid := source == AttemptPolicyDefault || source == AttemptPolicyProfile
+		if valid {
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, got := snapshot.NormalAttemptStatus()
+			if got != string(source) {
+				t.Fatalf("source=%s", got)
+			}
+		} else if err == nil {
+			t.Fatalf("invalid source %q accepted", source)
+		}
+	}
+}

@@ -46,18 +46,34 @@ func CompileAutoMode(auto config.AutoModeConfig, context provider.RuntimeContext
 	return compileAutoMode(auto, context)
 }
 
+type AttemptPolicySource string
+
+const (
+	AttemptPolicyDefault AttemptPolicySource = "default"
+	AttemptPolicyProfile AttemptPolicySource = "profile"
+)
+
+// NormalAttemptPolicy keeps the effective value and its origin inseparable.
+type NormalAttemptPolicy struct {
+	Policy scheduler.AttemptPolicy
+	Source AttemptPolicySource
+}
+
+func defaultNormalAttemptPolicy() NormalAttemptPolicy {
+	return NormalAttemptPolicy{Policy: scheduler.DefaultAttemptPolicy(), Source: AttemptPolicyDefault}
+}
+
 // Snapshot is one immutable, fully compiled runtime state.
 type Snapshot struct {
-	revision            uint64
-	config              config.Config
-	catalog             *provider.Catalog
-	autoMode            CompiledAutoMode
-	runtimeContext      provider.RuntimeContext
-	attempts            scheduler.AttemptPolicy
-	attemptPolicySource string
-	classifierAttempts  scheduler.AttemptPolicy
-	requestScan         *bodyfile.CompiledScanSpec
-	created             time.Time
+	revision           uint64
+	config             config.Config
+	catalog            *provider.Catalog
+	autoMode           CompiledAutoMode
+	runtimeContext     provider.RuntimeContext
+	normalAttempts     NormalAttemptPolicy
+	classifierAttempts scheduler.AttemptPolicy
+	requestScan        *bodyfile.CompiledScanSpec
+	created            time.Time
 }
 
 // CompiledAutoMode is the immutable runtime representation of Auto Mode.  It
@@ -89,15 +105,21 @@ func cloneFixedTarget(target *provider.CompiledFixedTarget) *provider.CompiledFi
 // callers that construct snapshots in tests. Runtime Manager uses
 // newSnapshotWithAuto after compiling the candidate so publication cannot
 // hide a fixed-target compilation error.
-func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, runtimeContext provider.RuntimeContext, requirements ScanRequirements, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
+func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, runtimeContext provider.RuntimeContext, requirements ScanRequirements, normal NormalAttemptPolicy, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
 	autoMode, err := compileAutoMode(cfg.AutoMode, runtimeContext)
 	if err != nil {
 		return nil, err
 	}
-	return newSnapshotWithAuto(revision, cfg, catalog, autoMode, runtimeContext, requirements, attempts, classifierAttempts, now)
+	return newSnapshotWithAuto(revision, cfg, catalog, autoMode, runtimeContext, requirements, normal, classifierAttempts, now)
 }
 
-func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.Catalog, autoMode CompiledAutoMode, runtimeContext provider.RuntimeContext, requirements ScanRequirements, attempts, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
+func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.Catalog, autoMode CompiledAutoMode, runtimeContext provider.RuntimeContext, requirements ScanRequirements, normal NormalAttemptPolicy, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
+	if err := normal.Policy.Validate(); err != nil {
+		return nil, err
+	}
+	if normal.Source != AttemptPolicyDefault && normal.Source != AttemptPolicyProfile {
+		return nil, fmt.Errorf("invalid normal attempt policy source %q", normal.Source)
+	}
 	requestScan, err := compileRequestScan(catalog, autoMode, requirements)
 	if err != nil {
 		return nil, err
@@ -108,7 +130,7 @@ func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.C
 		catalog:            catalog,
 		autoMode:           autoMode.Clone(),
 		runtimeContext:     runtimeContext,
-		attempts:           attempts,
+		normalAttempts:     normal,
 		classifierAttempts: classifierAttempts,
 		requestScan:        requestScan,
 		created:            now,
@@ -141,7 +163,7 @@ func (s *Snapshot) NormalAttemptPolicy() scheduler.AttemptPolicy {
 	if s == nil {
 		return scheduler.AttemptPolicy{}
 	}
-	return s.attempts
+	return s.normalAttempts.Policy
 }
 
 func (s *Snapshot) ClassifierAttemptPolicy() scheduler.AttemptPolicy {
@@ -212,7 +234,7 @@ func (s *Snapshot) AttemptPolicy() scheduler.AttemptPolicy {
 	if s == nil {
 		return scheduler.AttemptPolicy{}
 	}
-	return s.attempts
+	return s.normalAttempts.Policy
 }
 
 func (s *Snapshot) Catalog() *provider.Catalog {
@@ -248,5 +270,8 @@ func (s *Snapshot) CreatedAt() time.Time {
 
 // NormalAttemptStatus describes the strategy in this immutable snapshot.
 func (s *Snapshot) NormalAttemptStatus() (int, string) {
-	return s.attempts.MaxAttempts, s.attemptPolicySource
+	if s == nil {
+		return 0, ""
+	}
+	return s.normalAttempts.Policy.MaxAttempts, string(s.normalAttempts.Source)
 }

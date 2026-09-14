@@ -176,13 +176,12 @@ func (t *HarnessMutation) InvalidateActiveProfile() error {
 func (m *Manager) invalidatePolicyLocked() {
 	m.activeProfileInvalid = true
 	current := m.current.Load()
-	if current.attempts != scheduler.DefaultAttemptPolicy() || current.attemptPolicySource != "default" {
+	if current.normalAttempts != defaultNormalAttemptPolicy() {
 		next := *current
 		m.revision++
 		next.revision = m.revision
 		next.created = m.now()
-		next.attempts = scheduler.DefaultAttemptPolicy()
-		next.attemptPolicySource = "default"
+		next.normalAttempts = defaultNormalAttemptPolicy()
 		m.current.Store(&next)
 	}
 }
@@ -194,15 +193,15 @@ func (t *HarnessMutation) NormalAttemptStatus() (int, string) {
 	return t.manager.current.Load().NormalAttemptStatus()
 }
 
-func (m *Manager) normalAttempts(cfg config.Config) (scheduler.AttemptPolicy, string) {
+func (m *Manager) normalAttempts(cfg config.Config) NormalAttemptPolicy {
 	if !m.activeProfileInvalid && cfg.Harnesses.ClaudeCode.ActiveProfileID != "" {
 		for _, p := range cfg.Harnesses.ClaudeCode.Profiles {
 			if p.ID == cfg.Harnesses.ClaudeCode.ActiveProfileID {
-				return scheduler.AttemptPolicy{MaxAttempts: p.Normalize().MaxAttempts}, "profile"
+				return NormalAttemptPolicy{Policy: scheduler.AttemptPolicy{MaxAttempts: p.Normalize().MaxAttempts}, Source: AttemptPolicyProfile}
 			}
 		}
 	}
-	return scheduler.DefaultAttemptPolicy(), "default"
+	return defaultNormalAttemptPolicy()
 }
 
 func (t *HarnessMutation) setActiveProfileID(id string) error {
@@ -316,11 +315,10 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	initialSnapshot, err := newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.scanRequirements, scheduler.DefaultAttemptPolicy(), m.classifierAttempts, startedAt)
+	initialSnapshot, err := newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.scanRequirements, defaultNormalAttemptPolicy(), m.classifierAttempts, startedAt)
 	if err != nil {
 		return nil, err
 	}
-	initialSnapshot.attemptPolicySource = "default"
 	m.current.Store(initialSnapshot)
 	return m, nil
 }
@@ -554,8 +552,8 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 		}
 	}
 	defer func() { m.activeProfileInvalid = previousGuard }()
-	attempts, source := m.normalAttempts(next)
-	if reflect.DeepEqual(currentConfig, next) && currentSnapshot.attempts == attempts && currentSnapshot.attemptPolicySource == source {
+	normal := m.normalAttempts(next)
+	if reflect.DeepEqual(currentConfig, next) && currentSnapshot.normalAttempts == normal {
 		previousGuard = m.activeProfileInvalid
 		return ApplyResult{
 			Revision:   currentSnapshot.Revision(),
@@ -566,11 +564,10 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 
 	restartRequired := serviceRestartRequired(currentConfig.Service, next.Service)
 	if !restartRequired {
-		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, attempts, m.classifierAttempts, m.now())
+		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
 		if err != nil {
 			return ApplyResult{}, check, err
 		}
-		nextSnapshot.attemptPolicySource = source
 		if !reflect.DeepEqual(currentConfig, next) {
 			if err := m.store.Save(next); err != nil {
 				if invalidated {
@@ -700,13 +697,12 @@ func (m *Manager) RestartSucceeded() error {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
-	attempts, source := m.normalAttempts(pending)
-	nextSnapshot, err := newSnapshotWithAuto(m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, attempts, m.classifierAttempts, m.now())
+	normal := m.normalAttempts(pending)
+	nextSnapshot, err := newSnapshotWithAuto(m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
 	if err != nil {
 		_ = m.restartFailedLocked(err)
 		return err
 	}
-	nextSnapshot.attemptPolicySource = source
 	if err := m.store.PromotePending(); err != nil {
 		_ = m.restartFailedLocked(err)
 		return err
