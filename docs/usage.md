@@ -75,7 +75,7 @@ The overview uses `/management`; other pages use `/management#/providers`, `/man
 | Page | Purpose |
 |---|---|
 | Overview | Runtime status, provider counts, routing map, and configuration warnings. |
-| Providers | Add/edit/remove upstreams, declare models, set priorities and patches, and inspect health and sessions. |
+| Providers | Add, edit, copy or remove upstreams; set models, priorities and patches; inspect health and sessions. |
 | Auto Mode | Select Off, Provider pool, or Fixed provider for classifier requests. |
 | Claude Code | Select the settings path, configure telemetry, and create/edit/activate model-mapping profiles. |
 | Logs | Search retained history, follow live records, expand errors, and load older records. |
@@ -87,7 +87,11 @@ Forms with a save bar require **Save changes**; **Revert** discards the draft. I
 
 Provider requests use the Anthropic Messages API. Enter the base URL; CC AutoMux appends `/v1/messages`. Do not append that endpoint yourself. Model names are case-sensitive and matched exactly.
 
-Higher numeric priorities are tried first. New sessions round-robin within the highest available priority; sessions with a valid `X-Claude-Code-Session-Id` stay on a provider for the same model and request type. Only when every higher-tier candidate is cooling down can a lower tier serve the request. Eligible failures can trigger further attempts within the current tier, including repeated calls to the same provider. Disabling health cooldown keeps a statically eligible provider available, so a higher-tier provider with this setting continues to block lower tiers. An occupied half-open probe does not permit bypassing the tier. Existing session bindings move to a replacement only after it succeeds; diagnostics remain available.
+Set higher priorities for the providers you prefer. CC AutoMux uses the highest available tier, shares new sessions across providers at the same priority, and keeps an existing session on its provider when possible. A failed request can try again within its attempt limit; a replacement takes over the session after it succeeds.
+
+Turn off **Health cooldown** only when you want a provider to keep receiving requests despite failures. It remains available for routing, so a higher-priority provider with cooldown off will continue to take precedence over lower-priority providers. Its errors are still recorded for inspection.
+
+If you use multiple keys for the same upstream, open an existing provider and choose **Duplicate** in the **Provider actions** card. The copy receives a new name automatically, and its detail page opens so you can change the name and API key. The saved settings are copied; editing the copy does not change the original. An enabled provider produces an enabled copy that can receive requests immediately.
 
 TLS uses system roots by default. A custom CA file and skipping certificate verification are mutually exclusive. Compatibility patches are selected explicitly and run in the chosen order; provider names and URLs do not enable them automatically.
 
@@ -103,11 +107,15 @@ Fixed classifier targets can use Anthropic Messages, OpenAI Responses, or OpenAI
 
 The default target is the current user's `.claude/settings.json`; you can select an absolute custom path. Activation updates only the managed gateway, model, and telemetry fields and preserves other values. Before the first modification of an existing file, CC AutoMux creates a sibling `.cc-automux.bak`; an existing backup is never overwritten. Creating a new settings file does not create a backup.
 
-Each profile saves **Max attempts per request**, the total upstream calls allowed for a normal request. The default is 3; 1 allows a single call. The active profile applies globally to all new normal requests. Saving its attempt limit applies immediately without rewriting Claude Code settings; requests already in progress keep their captured limit. Classifier requests remain limited to one call.
+Use **Max attempts per request** in a profile to choose how many upstream calls a normal request may make. Increase it when another attempt is likely to recover from a temporary failure; lower it when you prefer to return an error sooner.
 
-Saving an inactive profile does not activate it. **Active** means the managed file contents were verified; changing them outside CC AutoMux clears that state on the next check. Open or return to Overview or Claude Code to refresh it. No active profile, or a failed verification, uses the default limit of 3 and shows a warning on Overview. Changing the gateway address/key or the active profile's model mappings can require reactivation. If a restart temporarily blocks verification, the check error is shown while the current attempt limit is retained. Clearing the gateway key after activation shows **Gateway key is not set**, followed by **Profile activation is invalid**.
+For a provider with **Health cooldown** off, **Sticky attempts before failover** gives an existing session more chances on its current provider before normal routing continues. This can help with occasional 429 or 503 responses that recover quickly and avoid switching away from a useful session cache. These calls still count toward the total attempt limit. Higher-priority providers take precedence, and the gateway stops once the request succeeds or cannot be retried.
 
-The profile API field is `max_attempts`, an integer from 1 to 9007199254740991. Omission defaults to 3, including on profile replacement; explicit zero and null are rejected. Harness status returns the effective `normal_max_attempts` and `attempt_policy_source` (`profile` or `default`). Profile validation errors include `field` so the console can show the error beside the corresponding input.
+Activate a profile to apply its settings to new normal requests. Changing the active profile's attempt settings takes effect immediately without rewriting Claude Code's settings file; requests already running keep their previous limits. Classifier requests remain limited to one call.
+
+Saving an inactive profile does not activate it. **Active** means the selected Claude Code settings match the profile. If you change those settings outside CC AutoMux, open Overview or Claude Code to check the connection, then reactivate the profile if prompted. Without a valid active profile, normal requests use the default three attempts and no extra sticky attempts; Overview shows a warning.
+
+Changes to the gateway address, key or model mappings may require reactivation. During a restart, wait for the check to become available again; the current attempt settings are retained. If you clear the gateway key, set it again and reactivate the profile before reconnecting Claude Code.
 
 **Disable Claude Code telemetry** controls the four fields shown beside the switch. Its value is written when a profile is activated.
 
@@ -115,11 +123,13 @@ The profile API field is `max_attempts`, an integer from 1 to 9007199254740991. 
 
 The process writes structured JSON Lines to one active log and one archive. Use **Logs** for retained history and live events. Filters apply to both. Scrolling up pauses following while new records buffer; return to the bottom to resume. A dropped-record or full-buffer notice asks you to reload the view.
 
-Long fields are initially bounded. **Show complete** loads the retained full record; if rotation has removed it, the page says so. A logging-health warning means writes are failing even if the gateway is still serving.
+**retry** marks another attempt granted to the existing sticky provider. Use the attempt number and trace filter to follow a request across its records.
+
+Long errors are shortened initially. **Show complete** loads the retained full record; if rotation has removed it, the page says so. A logging-health warning means writes are failing even if the gateway is still serving.
 
 Changing the listener port or log size limit restarts the process and interrupts in-flight requests. The console waits for the new configuration. A port change opens the new console address and requires a new sign-in. Rotating only the management key keeps this console signed in with the new key; other sessions must sign in again.
 
-## Configuration and management API
+## Configuration files
 
 Default configuration paths:
 
@@ -128,39 +138,16 @@ Default configuration paths:
 | macOS | `~/Library/Application Support/cc-automux/config.json` |
 | Linux | `$XDG_CONFIG_HOME/cc-automux/config.json`, or `~/.config/cc-automux/config.json` |
 
-`CC_AUTOMUX_CONFIG` overrides the file using an absolute path. Running instances apply changes through the console or management API; editing the disk file requires a process restart.
+Use the console to change settings while CC AutoMux is running. If you edit the configuration file directly, restart the process to load it. For a separate local instance, select another configuration with `CC_AUTOMUX_CONFIG` as shown above.
 
-A minimal configuration has this shape; replace the example management key before use:
-
-```json
-{
-  "schema_version": 1,
-  "service": {"listen_addr": "127.0.0.1:8765", "log_max_bytes": 104857600},
-  "auth": {"gateway_key": "", "management_key": "replace-with-a-random-management-key"},
-  "auto_mode": {"mode": "disabled", "model": ""},
-  "harnesses": {"claude_code": {"path_mode": "default", "settings_path": "", "disable_telemetry": true, "profiles": []}},
-  "providers": []
-}
-```
-
-The service requires a management key and only binds `127.0.0.1`. Unix configuration files use mode `0600`. Keep configuration files and keys out of source control.
-
-Authenticated management requests use `Authorization: Bearer <management key>`:
-
-- `GET /api/v1/status`: runtime, restart, and logging health.
-- `GET/PUT /api/v1/config`: complete configuration read/replacement.
-- `/api/v1/providers` and `/api/v1/providers/{id}`: provider CRUD.
-- `/api/v1/harnesses/claude-code` and its `/profiles` resources: settings and profiles.
-- `GET /api/v1/logs`, `/api/v1/logs/stream`, `/api/v1/logs/record?ref=…`: history, SSE, and complete records.
-
-Config GET includes server-owned `active_profile_id`; remove it when constructing a config PUT. Preserve fields you are not changing. Send the GET response's ETag in `If-Match` to reject a stale replacement with `412 configuration_changed`. A successful PUT returns `200` for applied settings or `202` for a pending restart.
+Keep a backup before editing configuration files, and keep the files and their keys out of source control. The service requires a management key and accepts connections only from this computer.
 
 ## Troubleshooting
 
 - **Console unreachable:** run the installed `status.sh` printed by the installer and check the configured port and startup errors. macOS writes early errors to `~/Library/Logs/cc-automux/bootstrap.log`; Linux uses `journalctl --user -u cc-automux.service`.
 - **Sign-in rejected / 401:** use the management key for the console and the gateway key for Claude Code. A rotated management key invalidates other sessions.
 - **Model unavailable:** check the exact requested model, enabled providers, and their health. Open Providers for the upstream's original error and diagnostics.
-- **Gateway timeout / 504:** the provider did not respond within the gateway’s time limit. The gateway has switched providers or stopped the attempt; check Provider health and the request log.
+- **Gateway timeout / 504:** the provider did not respond within the gateway’s time limit. The gateway has tried again or stopped the request; check Provider health and the request log.
 - **Auto mode fails:** check the classifier model, upstream URL, key, protocol, and compatibility patches; inspect the original error in the console.
 - **Save conflict / 412:** keep a copy of the draft if needed, then load current values and reapply the intended change.
 - **Profile is out of sync:** inspect the selected path and reactivate the intended profile. On write failure the page reports an error instead of declaring it active.

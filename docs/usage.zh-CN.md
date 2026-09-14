@@ -75,7 +75,7 @@ claude
 | 页面 | 用途 |
 |---|---|
 | Overview | 运行状态、Provider 数量、路由图和配置告警。 |
-| Providers | 增删改上游，设置模型、优先级和补丁，查看健康与会话诊断。 |
+| Providers | 添加、编辑、复制或删除上游，设置模型、优先级和补丁，查看健康与会话诊断。 |
 | Auto Mode | 为分类器选择 Off、Provider pool 或 Fixed provider。 |
 | Claude Code | 选择配置路径、遥测设置，创建、编辑并激活模型映射 Profile。 |
 | Logs | 筛选历史、跟随实时日志、展开错误和加载更早记录。 |
@@ -87,7 +87,11 @@ claude
 
 Provider 请求采用 Anthropic Messages API。填写基础 URL，CC AutoMux 会追加 `/v1/messages`，不要重复填写该 endpoint。模型按大小写敏感的完整名称匹配。
 
-优先级数值越大越优先；新会话在最高可用同级 Provider 中轮询。有合法 `X-Claude-Code-Session-Id` 的会话，对相同模型和请求类型保持粘性。只有高层所有相关候选都处于冷却时才使用低层。允许继续尝试的错误会在当前层内轮转，同一 Provider 可以重复调用。关闭健康冷却的 Provider 只要静态资格有效，就继续参与并阻挡低层；高层半开探测被占用也不允许绕到低层。已有会话绑定仅在替代目标成功后迁移，健康诊断仍保留。
+为更偏好的 Provider 设置更高优先级。CC AutoMux 使用最高可用层，在同级 Provider 间分配新会话，并尽可能让已有会话继续使用原 Provider。请求失败后可以在尝试上限内继续调用；替代 Provider 成功后才接管会话。
+
+希望 Provider 即使出错也继续接收请求时，可以关闭 **Health cooldown**。它仍然参与调度，因此高优先级 Provider 关闭冷却后，会继续优先于低优先级 Provider；错误仍会记录，方便排查。
+
+同一个上游有多个 key 时，打开已有 Provider，在 **Provider actions** 卡片中点击 **Duplicate**。副本会自动命名并打开详情页，修改名称和 API key 即可。复制使用已保存的设置，修改副本不影响原 Provider。已启用的 Provider 会产生同样已启用、可立即接收请求的副本。
 
 TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼容补丁必须显式选择并按配置顺序执行，不会因 Provider 名称或 URL 自动启用。
 
@@ -103,11 +107,15 @@ TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼
 
 默认目标是当前用户的 `.claude/settings.json`，也可选择自定义绝对路径。激活只更新受管的网关、模型和遥测字段，保留其他值。首次修改已有文件前建立同目录 `.cc-automux.bak`，已有备份不覆盖；首次创建配置文件不生成备份。
 
-每个 Profile 保存“单请求尝试上限”（**Max attempts per request**），表示普通请求最多发起的上游调用总次数。默认 3，设置 1 即只调用一次。全局激活 Profile 决定所有新普通请求的上限；保存其上限后立即生效，不重写 Claude Code 设置。正在处理的请求保持开始时的预算，分类器请求仍只调用一次。
+在 Profile 的“单请求尝试上限”（**Max attempts per request**）中，设置普通请求最多尝试几次上游。如果临时故障通常能通过再次尝试恢复，可以调高；如果希望更快返回错误，可以调低。
 
-保存非激活 Profile 不等于激活。**Active** 表示已核对受管字段；外部修改导致不一致时，下次检查会清空激活状态。打开或返回 Overview、Claude Code 页面会重新检查。无激活 Profile 或核验失效时采用默认 3，Overview 显示明确警告。修改网关地址、密钥或当前 Profile 的模型映射后可能需要重新激活。重启暂时阻挡核验时会显示检查错误，但保留当前尝试上限。已激活后清空网关密钥，首页依次显示“网关密钥未设置”和“激活已失效”两条横幅。
+对于关闭 **Health cooldown** 的 Provider，**Sticky attempts before failover** 可以让已有会话在原 Provider 上多尝试几次，再恢复常规调度。它适合偶发 429、503 但很快恢复的服务，有助于减少切换、保留会话缓存带来的收益。这些调用仍计入总尝试上限；更高优先级的 Provider 仍优先，请求成功或无法继续重试时立即结束。
 
-Profile API 字段为 `max_attempts`，接受 1 到 9007199254740991 的整数。省略时默认 3，完整替换 Profile 时同样如此；显式 0 和 null 会被拒绝。Harness 状态返回实际 `normal_max_attempts` 和 `attempt_policy_source`（`profile` 或 `default`）。Profile 校验错误携带 `field`，界面据此在对应输入框旁显示错误。
+激活 Profile 后，设置会应用于新的普通请求。修改已激活 Profile 的尝试设置立即生效，不会重写 Claude Code 配置文件；正在处理的请求保留原上限。分类器请求仍只调用一次。
+
+保存未激活的 Profile 不等于激活。**Active** 表示所选 Claude Code 配置与 Profile 一致。如果在 CC AutoMux 之外修改了该配置，请打开 Overview 或 Claude Code 检查连接，并按提示重新激活。没有有效激活 Profile 时，普通请求默认最多尝试三次，不额外增加原粘性 Provider 的尝试；Overview 会显示警告。
+
+修改网关地址、密钥或模型映射后，可能需要重新激活。重启期间暂时无法检查时，等待服务恢复即可，当前尝试设置仍会保留。清空网关密钥后，需要重新设置密钥并激活 Profile，再连接 Claude Code。
 
 **Disable Claude Code telemetry** 控制开关旁展示的四个字段，激活 Profile 时写入。
 
@@ -115,11 +123,13 @@ Profile API 字段为 `max_attempts`，接受 1 到 9007199254740991 的整数�
 
 进程以 JSON Lines 写入一个活动日志文件和一个归档文件。通过 **Logs** 查看历史与实时记录，筛选同时作用于两者。向上滚动时暂停跟随并暂存新增记录；返回底部恢复。出现丢弃或缓冲区已满提示时重新加载视图。
 
-长字段默认有界显示。**Show complete** 获取完整记录；记录已被轮转移除时界面会明确说明。日志健康告警表示写入失败，即使网关本身仍在服务。
+**retry** 表示为已有粘性 Provider 增加的再次尝试。结合尝试序号和 trace 筛选，可以查看同一请求的相关记录。
+
+长错误默认缩短显示。**Show complete** 获取完整记录；记录已被轮转移除时界面会明确说明。日志健康告警表示写入失败，即使网关本身仍在服务。
 
 修改监听端口或日志容量会重启进程并中断在途请求。控制台等待新配置生效；改端口后自动打开新地址，需要重新登录。只轮换 management key 时，当前控制台切换到新密钥，其他会话需重新登录。
 
-## 配置与管理 API
+## 配置文件
 
 默认配置路径：
 
@@ -128,39 +138,16 @@ Profile API 字段为 `max_attempts`，接受 1 到 9007199254740991 的整数�
 | macOS | `~/Library/Application Support/cc-automux/config.json` |
 | Linux | `$XDG_CONFIG_HOME/cc-automux/config.json`，未设置时为 `~/.config/cc-automux/config.json` |
 
-`CC_AUTOMUX_CONFIG` 可通过绝对路径覆盖配置位置。运行时通过控制台或管理 API 应用变更；直接编辑磁盘配置需要重启进程。
+CC AutoMux 运行时，通过控制台修改设置。如果直接编辑配置文件，需要重启进程使其生效。运行独立本地实例时，可按前文示例用 `CC_AUTOMUX_CONFIG` 选择另一份配置。
 
-最小配置结构如下，使用前替换示例 management key：
-
-```json
-{
-  "schema_version": 1,
-  "service": {"listen_addr": "127.0.0.1:8765", "log_max_bytes": 104857600},
-  "auth": {"gateway_key": "", "management_key": "replace-with-a-random-management-key"},
-  "auto_mode": {"mode": "disabled", "model": ""},
-  "harnesses": {"claude_code": {"path_mode": "default", "settings_path": "", "disable_telemetry": true, "profiles": []}},
-  "providers": []
-}
-```
-
-服务必须配置 management key，只能绑定 `127.0.0.1`。Unix 配置文件权限为 `0600`。配置文件和密钥不要进入源码版本控制。
-
-管理请求使用 `Authorization: Bearer <management key>`：
-
-- `GET /api/v1/status`：运行、重启和日志健康状态。
-- `GET/PUT /api/v1/config`：完整配置读取与替换。
-- `/api/v1/providers`、`/api/v1/providers/{id}`：Provider CRUD。
-- `/api/v1/harnesses/claude-code` 及其 `/profiles` 资源：设置与 Profile。
-- `GET /api/v1/logs`、`/api/v1/logs/stream`、`/api/v1/logs/record?ref=…`：历史、SSE 和完整记录。
-
-Config GET 包含服务端只读 `active_profile_id`，构造 PUT 时须移除，并保留不打算修改的字段。把 GET 返回的 ETag 作为 `If-Match` 发送，可让过期替换返回 `412 configuration_changed`。成功 PUT 返回 `200` 表示已应用，`202` 表示等待重启生效。
+编辑配置文件前先备份，配置文件及其中的密钥不要进入源码版本控制。服务需要 management key，且只接受本机连接。
 
 ## 排障
 
 - **控制台打不开**：运行安装器显示的 `status.sh`，检查实际端口和启动错误。macOS 早期错误位于 `~/Library/Logs/cc-automux/bootstrap.log`；Linux 使用 `journalctl --user -u cc-automux.service`。
 - **登录失败或 401**：控制台使用 management key，Claude Code 使用 gateway key。Management key 轮换会使其他会话失效。
 - **模型不可用**：检查准确模型名、Provider 是否启用及健康状态，在 Providers 查看上游原始错误。
-- **网关超时或 504**：Provider 未在网关时限内响应，网关已切换 Provider 或终止尝试；请查看 Provider 健康和请求日志。
+- **网关超时或 504**：Provider 未在网关时限内响应，网关已再次尝试或终止请求；请查看 Provider 健康和请求日志。
 - **Auto mode 失败**：检查分类器模型、上游地址、密钥和协议，以及对应的兼容补丁；查看控制台中的原始错误。
 - **保存冲突或 412**：必要时先保留草稿，再重新加载当前配置并应用需要的改动。
 - **Profile 不同步**：检查目标路径并重新激活；写入失败会报错，不会假报 Active。
