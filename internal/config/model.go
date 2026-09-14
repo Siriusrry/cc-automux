@@ -514,6 +514,8 @@ func (current Config) ActiveProfileInputsEqual(next Config) bool {
 	if left.PathMode != right.PathMode || left.SettingsPath != right.SettingsPath || left.DisableTelemetry != right.DisableTelemetry {
 		return false
 	}
+	// Names are display-only and max_attempts controls only gateway execution.
+	// Neither changes the managed client settings or invalidates activation.
 	leftProfile, leftOK := findProfile(left.Profiles, activeID)
 	rightProfile, rightOK := findProfile(right.Profiles, activeID)
 	return leftOK && rightOK &&
