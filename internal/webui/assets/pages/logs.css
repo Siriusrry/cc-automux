@@ -72,7 +72,7 @@
 .lg .kind.failure { color: var(--coral); background: var(--coral-soft); } .lg .kind.failover { color: var(--amber); background: var(--amber-soft); }
 .lg .kind.service, .lg .kind.canceled { color: var(--mist); background: var(--raise); }
 .lg .body { min-width: 0; }
-.lg .sum { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; line-height: 1.5; color: var(--paper); }
+.lg .sum { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; line-height: 1.5; color: var(--paper); }
 .lg .sum .p { font-weight: 700; }
 .lg .sum .m { color: var(--mist); }
 .lg .sum .rt { font-size: 10.5px; color: var(--iris); background: var(--iris-soft); padding: 1px 6px; border-radius: 5px; letter-spacing: 0.04em; }
