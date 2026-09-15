@@ -168,8 +168,6 @@
         const parts = [];
         if (r.msg === 'service') { parts.push(h('span', { class: 'p' }, r.event || 'service')); if (r.listen_addr) parts.push(h('span', { class: 'm' }, r.listen_addr)); }
         else {
-          if (r.trace_id) parts.push(h('button', { type: 'button', class: 'rt lg-trace', 'data-tip': 'Show logs for this request\nTrace ID: ' + r.trace_id, 'aria-label': 'Show logs for this request',
-            onclick: (e) => { e.stopPropagation(); state.filter.trace_id = [r.trace_id]; reload(); } }, 'Related'));
           if (r.provider_name) parts.push(h('span', { class: 'p' }, r.provider_name));
           if (r.model) parts.push(h('span', { class: 'm' }, r.model));
           if (r.request_type) parts.push(h('span', { class: 'rt ' + r.request_type, 'data-tip': RT_TIP[r.request_type] || '' }, r.request_type));
@@ -191,6 +189,8 @@
           h('span', { class: 'kind ' + kind, 'data-tip': r.msg === 'service' ? (EVENT_TIP[r.event] || 'Service event.') : (KIND_TIP[r.kind] || '') }, r.msg === 'service' ? 'service' : r.kind),
           h('div', { class: 'body' }, summary(r), errText ? h('div', { class: 'err' }, errText) : null),
           icon('chevron-right', 'exp'));
+        if (r.trace_id && state.filter.trace_id.length === 0) el.appendChild(h('button', { type: 'button', class: 'lg-trace lg-hover-action', 'aria-label': 'Trace this request',
+          onclick: e => { e.stopPropagation(); state.filter.trace_id = [r.trace_id]; reload(); } }, 'Trace this request'));
         const toggle = () => {
           const open = el.classList.toggle('open'); el.setAttribute('aria-expanded', String(open));
           const existing = el.querySelector('.lg-detail');

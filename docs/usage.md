@@ -123,7 +123,7 @@ Changes to the gateway address, key or model mappings may require reactivation. 
 
 The process writes structured JSON Lines to one active log and one archive. Use **Logs** for retained history and live events. Filters apply to both. Scrolling up pauses following while new records buffer; return to the bottom to resume. A dropped-record or full-buffer notice asks you to reload the view.
 
-**retry** marks another attempt granted to the existing sticky provider. Use the attempt number and trace filter to follow a request across its records.
+**retry** marks another attempt granted to the existing sticky provider. To follow a request across its records, hover over or focus a log row and select **Trace this request**. Clear the trace filter to return to the broader log view.
 
 Long errors are shortened initially. **Show complete** loads the retained full record; if rotation has removed it, the page says so. A logging-health warning means writes are failing even if the gateway is still serving.
 
