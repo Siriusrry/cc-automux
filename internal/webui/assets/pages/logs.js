@@ -186,7 +186,7 @@
         const kind = r.msg === 'service' ? 'service' : (r.kind || 'gateway');
         const errText = r.raw_error || r.error || '';
         const el = h('div', { class: 'lg', dataset: { kind, key: keyOf(r) }, role: 'button', tabindex: '0', 'aria-expanded': 'false' },
-          h('span', { class: 'ts', 'data-tip': r.time + (r.seq !== undefined ? '\nseq ' + r.seq : '') }, fmt.timeShort(r.time)),
+          h('span', { class: 'ts', 'data-tip': r.time + (r.seq !== undefined ? '\nseq ' + r.seq : '') }, fmt.clock(r.time)),
           h('span', { class: 'lvl ' + r.level }, r.level),
           h('span', { class: 'kind ' + kind, 'data-tip': r.msg === 'service' ? (EVENT_TIP[r.event] || 'Service event.') : (KIND_TIP[r.kind] || '') }, r.msg === 'service' ? 'service' : r.kind),
           h('div', { class: 'body' }, summary(r), errText ? h('div', { class: 'err' }, errText) : null),

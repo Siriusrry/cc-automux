@@ -16,10 +16,6 @@
 
   function parse(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? null : d; }
 
-  function timeShort(iso) {
-    const d = parse(iso); if (!d) return '—';
-    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + pad(d.getMilliseconds(), 3);
-  }
   function clock(iso) {
     const d = parse(iso); if (!d) return '—';
     return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
@@ -104,5 +100,5 @@
     return x[0] - y[0] || x[1] - y[1] || a.seq - b.seq;
   }
 
-  CCAM.fmt = { compareRecords, pad, duration, timeShort, clock, dateTime, relative, untilShort, bytes, bytesToMB, mbToBytes, mask, middle, host, plural, cap, words, pretty, priorityLabel, randomKey, uuid };
+  CCAM.fmt = { compareRecords, pad, duration, clock, dateTime, relative, untilShort, bytes, bytesToMB, mbToBytes, mask, middle, host, plural, cap, words, pretty, priorityLabel, randomKey, uuid };
 })();
