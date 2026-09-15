@@ -168,14 +168,14 @@
         const parts = [];
         if (r.msg === 'service') { parts.push(h('span', { class: 'p' }, r.event || 'service')); if (r.listen_addr) parts.push(h('span', { class: 'm' }, r.listen_addr)); }
         else {
+          if (r.trace_id) parts.push(h('button', { type: 'button', class: 'rt lg-trace', 'data-tip': 'Show logs for this request\nTrace ID: ' + r.trace_id, 'aria-label': 'Show logs for this request',
+            onclick: (e) => { e.stopPropagation(); state.filter.trace_id = [r.trace_id]; reload(); } }, 'Related'));
           if (r.provider_name) parts.push(h('span', { class: 'p' }, r.provider_name));
           if (r.model) parts.push(h('span', { class: 'm' }, r.model));
           if (r.request_type) parts.push(h('span', { class: 'rt ' + r.request_type, 'data-tip': RT_TIP[r.request_type] || '' }, r.request_type));
           if (typeof r.stream === 'boolean') parts.push(h('span', { class: 'rt' }, r.stream ? 'stream' : 'non-stream'));
           if (r.http_status) parts.push(h('span', { class: 'hs' + (r.http_status >= 400 ? ' bad' : '') }, 'HTTP ' + r.http_status));
           if (r.attempt) parts.push(h('span', { class: 'm' }, 'attempt ' + r.attempt));
-          if (r.trace_id) parts.push(h('button', { type: 'button', class: 'rt lg-trace', 'data-tip': 'Show logs for this request\nTrace ID: ' + r.trace_id, 'aria-label': 'Show logs for this request',
-            onclick: (e) => { e.stopPropagation(); state.filter.trace_id = [r.trace_id]; reload(); } }, icon('filter'), 'Request'));
           if (r.kind === 'retry' && r.next_provider_name) parts.push(h('span', { class: 'arrow' }, 'Retry ' + r.next_provider_name + ' (attempt ' + r.next_attempt + ')'));
           if (r.kind === 'failover' && r.next_provider_name) parts.push(h('span', { class: 'arrow' }, '→ ' + r.next_provider_name + ' (attempt ' + r.next_attempt + ')'));
           if (r.patch_id) parts.push(h('span', { class: 'm' }, 'patch ' + r.patch_id + '/' + r.patch_stage));

@@ -76,8 +76,7 @@
 .lg .sum .m { color: var(--mist); }
 .lg .sum .rt { font-size: 10.5px; color: var(--iris); background: var(--iris-soft); padding: 1px 6px; border-radius: 5px; letter-spacing: 0.04em; }
 .lg .sum .rt.normal { color: var(--mist); background: var(--raise); }
-.lg .sum .lg-trace { appearance: none; border: 0; box-shadow: none; font-family: inherit; line-height: inherit; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
-.lg .sum .lg-trace svg { width: 11px; height: 11px; flex: none; }
+.lg .sum .lg-trace { appearance: none; border: 0; box-shadow: none; font-family: inherit; line-height: inherit; cursor: pointer; }
 .lg .sum .lg-trace:hover { background: var(--iris-line); }
 .lg .sum .lg-trace:focus-visible { outline: 2px solid var(--iris); outline-offset: 2px; }
 .lg .sum .hs { color: var(--mist); }
