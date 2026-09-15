@@ -144,9 +144,9 @@ func sseErrorClass(raw string) scheduler.FailureClass {
 	switch event.Error.Type {
 	case "authentication_error", "permission_error":
 		return scheduler.FailureGlobalImmediate
-	case "not_found_error":
+	case "not_found_error", "billing_error":
 		return scheduler.FailureChannelImmediate
-	case "invalid_request_error", "request_too_large", "billing_error", "conflict_error":
+	case "invalid_request_error", "request_too_large", "conflict_error":
 		return scheduler.FailureNeutral
 	default:
 		return scheduler.FailureChannelTransient

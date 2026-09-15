@@ -79,7 +79,7 @@ func ClassifyHTTPStatus(status int) FailureClass {
 		return FailureNone
 	case status == 401 || status == 403 || status == 405 || (status >= 300 && status < 400):
 		return FailureGlobalImmediate
-	case status == 404:
+	case status == 402 || status == 404:
 		return FailureChannelImmediate
 	case status == 408 || status == 425 || status == 429 || status >= 500:
 		return FailureChannelTransient

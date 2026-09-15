@@ -21,7 +21,8 @@ func TestSSEObserverChunksAndFirstResult(t *testing.T) {
 	}{
 		{"event: message_stop\n\nevent: error\ndata: {}\n\n", "completed", scheduler.FailureNone},
 		{"event: error\r\ndata: {\r\ndata: \"error\":{\"type\":\"authentication_error\"}}\r\n\r\nevent: message_stop\n\n", "stream_error_event", scheduler.FailureGlobalImmediate},
-		{"event: error\ndata: {\"error\":{\"type\":\"billing_error\"}}\n\n", "stream_error_event", scheduler.FailureNeutral},
+		{"event: error\ndata: {\"error\":{\"type\":\"billing_error\"}}\n\n", "stream_error_event", scheduler.FailureChannelImmediate},
+		{"event: error\ndata: {\"error\":{\"type\":\"invalid_request_error\"}}\n\n", "stream_error_event", scheduler.FailureNeutral},
 		{"event: error\ndata: broken\n\n", "stream_error_event", scheduler.FailureChannelTransient},
 		{"event: error\ndata: {\"error\":{\"type\":\"not_found_error\"}}\n\n", "stream_error_event", scheduler.FailureChannelImmediate},
 	} {
