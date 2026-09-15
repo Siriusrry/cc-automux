@@ -53,7 +53,8 @@
 .lg-older .btn { font-family: var(--font); }
 .lg-end { text-align: center; padding: 10px; font-size: 11.5px; color: var(--mist-2); font-family: var(--font); border-bottom: 1px solid var(--line); }
 
-.lg { display: grid; grid-template-columns: 8ch 58px 78px minmax(0, 1fr) 28px; gap: 12px; align-items: start; padding: 8px 16px 8px 14px; border-bottom: 1px solid var(--line); box-shadow: inset 3px 0 0 transparent; cursor: pointer; }
+.lg-rows { display: grid; grid-template-columns: max-content max-content max-content minmax(0, 1fr) 28px; column-gap: 12px; }
+.lg { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 12px; align-items: start; padding: 8px 16px 8px 14px; border-bottom: 1px solid var(--line); box-shadow: inset 3px 0 0 transparent; cursor: pointer; }
 .lg:hover { background: rgba(127, 127, 160, 0.06); }
 .lg.open { background: rgba(127, 127, 160, 0.07); }
 .lg[data-kind="forward"] { box-shadow: inset 3px 0 0 var(--iris-line); }
@@ -71,7 +72,7 @@
 .lg .kind.failure { color: var(--coral); background: var(--coral-soft); } .lg .kind.failover { color: var(--amber); background: var(--amber-soft); }
 .lg .kind.service, .lg .kind.canceled { color: var(--mist); background: var(--raise); }
 .lg .body { min-width: 0; }
-.lg .sum { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; line-height: 1.5; color: var(--paper); }
+.lg .sum { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; line-height: 1.5; color: var(--paper); }
 .lg .sum .p { font-weight: 700; }
 .lg .sum .m { color: var(--mist); }
 .lg .sum .rt { font-size: 10.5px; color: var(--iris); background: var(--iris-soft); padding: 1px 6px; border-radius: 5px; letter-spacing: 0.04em; }
@@ -99,7 +100,8 @@
 .stream .empty .mascot { width: 68px; height: 44px; }
 
 @media (max-width: 900px) {
-  .lg { grid-template-columns: 8ch minmax(0, 1fr) 24px; gap: 8px 10px; padding: 8px 12px 8px 10px; }
+  .lg-rows { grid-template-columns: max-content minmax(0, 1fr) 24px; }
+  .lg { gap: 8px 12px; padding: 8px 12px 8px 10px; }
   .lg .lvl { grid-column: 1; grid-row: 2; }
   .lg .kind { grid-column: 2; grid-row: 2; }
   .lg .body { grid-column: 2; grid-row: 1; }
