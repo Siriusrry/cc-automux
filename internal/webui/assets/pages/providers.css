@@ -49,7 +49,9 @@
 .hl-sub { font-size: 12.5px; color: var(--mist); }
 .pr-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .pr-action-row + .pr-action-row { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
-.pr-action-row .lede { flex: 1 1 190px; margin: 0; }
+.pr-action-row > :first-child { flex: 1 1 190px; }
+.pr-action-row .lede { margin: 0; }
+.pr-action-row .help { display: block; margin-top: 6px; color: var(--mist-2); font-size: 12px; }
 .pr-action-row .btn { flex: none; }
 .sid { font-family: var(--mono); font-size: 12px; }
 

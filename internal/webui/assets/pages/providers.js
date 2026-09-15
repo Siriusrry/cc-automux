@@ -116,21 +116,28 @@
       const isNew = ctx.route.name === 'provider-new';
       const id = ctx.params.id;
       ctx.title(isNew ? 'New provider' : 'Provider');
-      const duplicateButton = isNew ? null : h('button', { class: 'btn', type: 'button', onclick: duplicate }, icon('copy'), 'Duplicate');
+      const duplicateHelp = isNew ? null : h('span', { class: 'help', id: 'p-duplicate-help', role: 'status', hidden: true }, 'Save or revert changes before duplicating.');
+      const duplicateButton = isNew ? null : h('button', { class: 'btn', type: 'button', 'aria-describedby': 'p-duplicate-help', onclick: duplicate }, icon('copy'), 'Duplicate');
       ctx.actions([h('a', { class: 'btn quiet', href: '#/providers' }, icon('arrow-left'), 'All providers')]);
       const host = h('div', null, skeleton(6, 44));
       ctx.root.appendChild(host);
-      let bar = null, disposed = false, duplicating = false;
+      let bar = null, disposed = false, duplicating = false, draftDirty = false;
+
+      function syncDuplicate() {
+        if (isNew || disposed) return;
+        duplicateButton.disabled = duplicating || draftDirty;
+        duplicateHelp.hidden = !draftDirty;
+      }
 
       async function duplicate() {
-        if (disposed || isNew || duplicating) return;
+        if (disposed || isNew || duplicating || draftDirty) return;
         duplicating = true;
-        duplicateButton.disabled = true;
+        syncDuplicate();
         let posting = false;
         try {
           for (let attempt = 0; attempt < 2; attempt++) {
             const list = await api.get('/api/v1/providers');
-            if (disposed) return;
+            if (disposed || draftDirty) return;
             const source = list.find(p => p.id === id);
             if (!source) {
               toast('Could not duplicate provider: it no longer exists.', 'bad');
@@ -171,7 +178,7 @@
           }
         } finally {
           duplicating = false;
-          if (!disposed) duplicateButton.disabled = false;
+          syncDuplicate();
         }
       }
 
@@ -199,7 +206,7 @@
         if (bar) bar.destroy();
         bar = savebar({ onSave: save, onRevert: () => { if (isNew) CCAM.router.go('/providers'); else load(); } });
         const dirty = () => JSON.stringify(draft) !== baseline;
-        const check = () => { bar.show(isNew ? true : dirty()); Object.values(fields).forEach(f => f.setError && f.setError('')); bar.setError(''); };
+        const check = () => { draftDirty = dirty(); syncDuplicate(); bar.show(isNew ? true : draftDirty); Object.values(fields).forEach(f => f.setError && f.setError('')); bar.setError(''); };
         CCAM.router.setGuard(async () => { if (!dirty() && !isNew) return true; if (isNew && JSON.stringify(draft) === JSON.stringify(blankProvider())) return true; return confirm({ title: 'Discard changes?', text: 'This provider has unsaved changes.', confirmLabel: 'Discard', danger: true }); });
 
         // --- form ---
@@ -269,7 +276,7 @@
             } }, icon('trash'), 'Delete provider');
           const actionsCard = h('div', { class: 'card' },
             h('p', { class: 'eyebrow' }, 'Provider actions'),
-            h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Create a copy of this provider.'), duplicateButton),
+            h('div', { class: 'pr-action-row' }, h('div', null, h('p', { class: 'lede' }, 'Create a copy of this provider.'), duplicateHelp), duplicateButton),
             h('div', { class: 'pr-action-row' }, h('p', { class: 'lede' }, 'Remove this provider and release its session bindings.'), deleteButton));
           right = h('div', { class: 'stack' }, healthCard, channelCard, sessionCard, actionsCard);
         }

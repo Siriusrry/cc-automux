@@ -91,7 +91,7 @@ Set higher priorities for the providers you prefer. CC AutoMux uses the highest 
 
 Turn off **Health cooldown** only when you want a provider to keep receiving requests despite failures. It remains available for routing, so a higher-priority provider with cooldown off will continue to take precedence over lower-priority providers. Its errors are still recorded for inspection.
 
-If you use multiple keys for the same upstream, open an existing provider and choose **Duplicate** in the **Provider actions** card. The copy receives a new name automatically, and its detail page opens so you can change the name and API key. The saved settings are copied; editing the copy does not change the original. An enabled provider produces an enabled copy that can receive requests immediately.
+If you use multiple keys for the same upstream, open an existing provider and choose **Duplicate** in the **Provider actions** card. Save or revert any unsaved changes first. The copy receives a new name automatically, and its detail page opens so you can change the name and API key. The saved settings are copied; editing the copy does not change the original. An enabled provider produces an enabled copy that can receive requests immediately.
 
 TLS uses system roots by default. A custom CA file and skipping certificate verification are mutually exclusive. Compatibility patches are selected explicitly and run in the chosen order; provider names and URLs do not enable them automatically.
 

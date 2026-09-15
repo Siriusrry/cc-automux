@@ -91,7 +91,7 @@ Provider 请求采用 Anthropic Messages API。填写基础 URL，CC AutoMux 会
 
 希望 Provider 即使出错也继续接收请求时，可以关闭 **Health cooldown**。它仍然参与调度，因此高优先级 Provider 关闭冷却后，会继续优先于低优先级 Provider；错误仍会记录，方便排查。
 
-同一个上游有多个 key 时，打开已有 Provider，在 **Provider actions** 卡片中点击 **Duplicate**。副本会自动命名并打开详情页，修改名称和 API key 即可。复制使用已保存的设置，修改副本不影响原 Provider。已启用的 Provider 会产生同样已启用、可立即接收请求的副本。
+同一个上游有多个 key 时，打开已有 Provider，在 **Provider actions** 卡片中点击 **Duplicate**。有未保存修改时，先保存或撤销。副本会自动命名并打开详情页，修改名称和 API key 即可。复制使用已保存的设置，修改副本不影响原 Provider。已启用的 Provider 会产生同样已启用、可立即接收请求的副本。
 
 TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼容补丁必须显式选择并按配置顺序执行，不会因 Provider 名称或 URL 自动启用。
 
