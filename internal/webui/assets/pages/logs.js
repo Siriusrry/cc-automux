@@ -203,7 +203,7 @@
       }
       function detail(r) {
         const rowsKv = Object.keys(r).filter(k => !KNOWN.includes(k)).map(k => [k, typeof r[k] === 'object' ? JSON.stringify(r[k]) : String(r[k])]);
-        rowsKv.unshift(['time', r.time], ['seq', String(r.seq)]);
+        rowsKv.unshift(['time', String(r.time || '—').replace('T', ' ').replace(/Z$/, '')], ['seq', String(r.seq)]);
         const box = h('div', { class: 'lg-detail' }, kv(rowsKv, { compact: true }));
         if (r.truncated) {
           const names = Object.keys(r.truncated);
