@@ -77,8 +77,12 @@
 .lg .sum .m { color: var(--mist); }
 .lg .sum .rt { font-size: 10.5px; color: var(--iris); background: var(--iris-soft); padding: 1px 6px; border-radius: 5px; letter-spacing: 0.04em; }
 .lg .sum .rt.normal { color: var(--mist); background: var(--raise); }
-.lg .lg-hover-action { display: none; position: absolute; top: 8px; right: 44px; z-index: 1; margin: 0; appearance: none; border: 0; box-shadow: none; font-family: var(--mono); font-size: 11.5px; font-weight: 600; line-height: 20px; padding: 0 8px; border-radius: 6px; letter-spacing: 0.04em; white-space: nowrap; color: color-mix(in srgb, var(--paper) 25%, var(--mist)); background: var(--raise); cursor: pointer; }
-.lg:hover .lg-hover-action, .lg:focus-within .lg-hover-action { display: inline-flex; }
+/* The row is a subgrid: its columns come from the shared tracks on .lg-rows. Revealing this overlay must not
+   add or remove a box inside the row, because an out-of-flow child changes nothing for the container and
+   WebKit then relayouts the row alone, where it sizes its own columns and drifts out of alignment with
+   every other row until the container is laid out again. Keep the button laid out and toggle paint only. */
+.lg .lg-hover-action { display: inline-flex; visibility: hidden; position: absolute; top: 8px; right: 44px; z-index: 1; margin: 0; appearance: none; border: 0; box-shadow: none; font-family: var(--mono); font-size: 11.5px; font-weight: 600; line-height: 20px; padding: 0 8px; border-radius: 6px; letter-spacing: 0.04em; white-space: nowrap; color: color-mix(in srgb, var(--paper) 25%, var(--mist)); background: var(--raise); cursor: pointer; }
+.lg:hover .lg-hover-action, .lg:focus-within .lg-hover-action { visibility: visible; }
 .lg .lg-hover-action:focus-visible { outline: 2px solid var(--iris); outline-offset: 2px; }
 .lg .sum .hs { color: var(--mist); }
 .lg .sum .hs.bad { color: var(--coral); font-weight: 700; }
