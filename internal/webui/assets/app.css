@@ -68,13 +68,15 @@ a:hover { text-decoration: underline; }
 .main { min-width: 0; padding: 30px 40px 140px 28px; }
 .main-in { max-width: 1080px; }
 
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
+.page-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px 20px; margin-bottom: 24px; }
+.page-heading { min-width: 0; overflow-wrap: anywhere; }
 .page-head h1 { font-family: var(--font-display); font-weight: 700; font-size: 22px; letter-spacing: -0.02em; margin: 0; line-height: 1.2; }
 .page-head .sub { color: var(--mist); font-size: 13.5px; margin-top: 5px; }
 .page-head .sub b { color: var(--paper); font-weight: 600; }
-.page-head .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.page-head .actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.page-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 
-.status-chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.status-chips { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
 
 /* ---------- Chips & pills ---------- */
 .chip {
@@ -451,7 +453,8 @@ details.disc .disc-body { margin-top: 12px; }
   .savebar { left: 0; padding: 16px 18px; }
   .row-2, .row-3 { grid-template-columns: minmax(0, 1fr); }
   .row-card .rc-meta { display: none; }
-  .page-head { margin-bottom: 18px; }
+  .page-head { margin-bottom: 18px; grid-template-columns: minmax(0, 1fr); }
+  .page-head .actions { justify-self: end; }
   .main-in > .status-chips { display: none; }
 }
 @media (max-width: 560px) {

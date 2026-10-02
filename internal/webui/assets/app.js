@@ -67,7 +67,7 @@
     const actionsEl = h('div', { class: 'page-actions' });
     const pageHost = h('div', { id: 'page' });
     const main = h('main', { class: 'main' }, h('div', { class: 'main-in' },
-      h('div', { class: 'page-head' }, h('div', null, titleEl, subEl), h('div', { class: 'actions' }, chips, actionsEl)),
+      h('div', { class: 'page-head' }, h('div', { class: 'page-heading' }, titleEl, subEl), h('div', { class: 'actions' }, chips, actionsEl)),
       pageHost));
     root.appendChild(h('div', { class: 'app' }, side, main));
     shell = { navLinks, pageHost, titleEl, subEl, actionsEl, chips };

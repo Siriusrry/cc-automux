@@ -158,7 +158,7 @@
           h('div', { class: 'card-head' }, h('div', null, h('p', { class: 'eyebrow' }, 'Model mapping profiles'), h('p', { class: 'lede', style: { margin: 0 } }, 'Claude Code only knows Haiku, Sonnet, Opus and Fable. A profile maps each to a model your providers serve; the gateway then routes by that name.')), pill(fmt.plural(profiles.length, 'profile'), 'mist', 'plain')),
           banners, rows);
 
-        if (!host.querySelector('.cc-stack')) replace(host, h('div', { class: 'stack cc-stack' }, settingsCard, h('div', { class: 'cc-profiles' })));
+        if (!host.querySelector('.cc-stack')) replace(host, h('div', { class: 'stack cc-stack' }, h('div', { class: 'cc-profiles' }), settingsCard));
         replace(host.querySelector('.cc-profiles'), profilesCard);
       }
 
