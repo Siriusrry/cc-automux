@@ -89,15 +89,15 @@
       const host = h('div', null, skeleton(4, 60));
       ctx.root.appendChild(host);
       let disposed = false, generation = 0;
-      let pathDraft = null, pathBaseline = null;
+      let pathDraft = null, pathBaseline = null, pathSaving = false;
       const pathDirty = () => pathDraft && !store.same(pathDraft, pathBaseline);
-      CCAM.router.setGuard(async () => pathDirty() ? confirm({ title: 'Discard changes?', text: 'The settings path has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
+      CCAM.router.setGuard(async () => pathSaving ? false : pathDirty() ? confirm({ title: 'Discard changes?', text: 'The settings path has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
 
       async function load(quiet) {
         const gen = ++generation;
         try {
           const [harness, profiles, providers] = await Promise.all([store.harness(), store.profiles(), store.providers()]);
-          if (disposed || gen !== generation) return;
+          if (disposed || gen !== generation || pathSaving) return;
           if (!pathDirty()) {
             pathBaseline = { mode: harness.path_mode, value: harness.settings_path || '' };
             pathDraft = Object.assign({}, pathBaseline);
@@ -122,22 +122,35 @@
         // ---- settings file card ----
         let pathMode = pathDraft.mode, pathValue = pathDraft.value;
         const pathIn = input({ id: 'cc-path', value: pathValue, placeholder: '/absolute/path/to/settings.json', oninput: (e) => { pathValue = pathDraft.value = e.target.value; applyBtn.hidden = !pathDirty(); } });
-        const applyBtn = h('button', { class: 'btn primary', type: 'button', hidden: !pathDirty(), onclick: async () => {
-          try {
-            await api.put('/api/v1/harnesses/claude-code', { path_mode: pathMode, settings_path: pathMode === 'custom' ? pathValue : '' });
-            pathBaseline = null; pathDraft = null; toast('Settings path updated'); store.invalidate(); load();
-          } catch (e) { pathField.setError(e.detail || e.message); }
-        } }, 'Apply path');
-        const pathRow = h('div', { class: 'cc-path-row', hidden: pathMode !== 'custom' }, pathIn, applyBtn);
+        const applyBtn = h('button', { class: 'btn primary', type: 'button', hidden: !pathDirty(), onclick: savePath }, 'Apply path');
+        const pathRow = h('div', { class: 'cc-path-row' }, pathIn, applyBtn);
         const pathSeg = seg({ ariaLabel: 'Settings path', value: pathMode, options: [{ value: 'default', label: 'Default location' }, { value: 'custom', label: 'Custom path' }], onchange: (v) => {
-          pathMode = pathDraft.mode = v; if (v === 'default') pathDraft.value = pathValue = ''; pathRow.hidden = v !== 'custom';
-          const changed = pathDirty();
-          applyBtn.hidden = !changed;
-          if (v === 'default' && changed) { pathRow.hidden = false; pathIn.hidden = true; } else pathIn.hidden = false;
+          pathMode = pathDraft.mode = v; pathIn.hidden = v !== 'custom';
+          applyBtn.hidden = !pathDirty();
         } });
-        if (pathMode === 'default' && pathDirty()) { pathRow.hidden = false; pathIn.hidden = true; }
+        pathIn.hidden = pathMode !== 'custom';
         const pathField = field({ label: 'Settings file', control: [pathSeg, h('div', { style: { height: '10px' } }), pathRow],
           help: h('div', { class: 'cc-path' }, 'Resolves to ', h('code', null, harness.resolved_settings_path)) });
+        let verifyPath = null;
+        async function savePath() {
+          if (disposed || (pathSaving && !verifyPath)) return;
+          pathSaving = true; pathSeg.inert = true; pathIn.disabled = true; applyBtn.disabled = true;
+          const body = { path_mode: pathMode, settings_path: pathMode === 'custom' ? pathValue : pathBaseline.value };
+          try {
+            const saved = await (verifyPath ? verifyPath() : store.confirmedWrite(() => api.put('/api/v1/harnesses/claude-code', body), () => store.harness(), value => value.path_mode === body.path_mode && value.settings_path === body.settings_path));
+            if (disposed) return;
+            pathBaseline = { mode: saved.path_mode, value: saved.settings_path || '' };
+            pathDraft = Object.assign({}, pathBaseline); pathSaving = false;
+            toast('Settings path updated'); store.invalidate();
+          } catch (e) {
+            if (disposed) return;
+            pathField.setError(e.detail || e.message);
+            verifyPath = e.verify || null;
+            applyBtn.disabled = false;
+            applyBtn.textContent = verifyPath ? 'Check saved state' : 'Apply path';
+            if (!verifyPath) { pathSaving = false; pathSeg.inert = false; pathIn.disabled = false; }
+          }
+        }
         const managed = h('details', { class: 'disc' }, h('summary', null, icon('chevron-right'), 'Managed fields'), h('div', { class: 'disc-body' },
           h('div', { class: 'cc-managed' }, MANAGED.map(([k, what]) => h('span', null, h('b', null, 'env.' + k), ' · ' + what)), h('span', { class: 'opt' }, h('b', null, 'env.CLAUDE_CODE_SUBAGENT_MODEL'), ' · optional'), h('span', { class: 'opt' }, h('b', null, 'teammateDefaultModel'), ' · optional, top level')),
           h('p', { class: 'help' }, 'Only these fields are written. Everything else in the file is preserved byte-for-byte in meaning. Before the first write to an existing file a one-time copy is saved as ', h('code', null, '.cc-automux.bak'), ' next to it.')));

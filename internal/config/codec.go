@@ -208,6 +208,7 @@ func DecodeProvider(data []byte) (ProviderConfig, error) {
 	if err := decodeObject(data, &provider); err != nil {
 		return ProviderConfig{}, err
 	}
+	provider.TLS = provider.TLS.Normalize()
 	provider.Models = cloneStrings(provider.Models)
 	provider.Patches = cloneStrings(provider.Patches)
 	if provider.Models == nil {
@@ -519,7 +520,7 @@ func checkAutoModeKeys(object map[string]json.RawMessage) error {
 			if err != nil {
 				return err
 			}
-			if err := rejectUnknownKeys(tlsObject, map[string]struct{}{"ca_file": {}, "insecure_skip_verify": {}}); err != nil {
+			if err := rejectUnknownKeys(tlsObject, map[string]struct{}{"mode": {}, "ca_file": {}, "insecure_skip_verify": {}}); err != nil {
 				return err
 			}
 		}
@@ -540,7 +541,7 @@ func checkProviderKeys(raw map[string]json.RawMessage) error {
 		if err != nil {
 			return err
 		}
-		if err := rejectUnknownKeys(object, map[string]struct{}{"ca_file": {}, "insecure_skip_verify": {}}); err != nil {
+		if err := rejectUnknownKeys(object, map[string]struct{}{"mode": {}, "ca_file": {}, "insecure_skip_verify": {}}); err != nil {
 			return err
 		}
 	}

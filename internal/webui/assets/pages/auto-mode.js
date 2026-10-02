@@ -13,7 +13,7 @@
     { value: 'openai_responses', label: 'OpenAI Responses', path: '/v1/responses', implemented: false },
     { value: 'openai_compatible', label: 'OpenAI-compatible Chat Completions', path: '/v1/chat/completions', implemented: false }
   ];
-  function blankFixed() { return { base_url: '', api_key: '', use_x_api_key: false, protocol: 'anthropic_messages', tls: { ca_file: '', insecure_skip_verify: false }, patches: [] }; }
+  function blankFixed() { return { base_url: '', api_key: '', use_x_api_key: false, protocol: 'anthropic_messages', tls: { mode: 'system', ca_file: '' }, patches: [] }; }
 
   CCAM.pages['auto-mode'] = {
     render(ctx) {
@@ -21,74 +21,74 @@
       ctx.subtitle(['Where Claude Code’s ', h('b', null, 'security-monitor classifier'), ' requests go']);
       const host = h('div', null, skeleton(5, 48));
       ctx.root.appendChild(host);
-      let bar = null, disposed = false;
+      let bar = null, disposed = false, generation = 0;
 
       async function load() {
+        const gen = ++generation;
         try {
           const [config, providers, patches] = await Promise.all([store.config(), store.providers(), store.patches()]);
-          if (disposed) return;
+          if (disposed || gen !== generation) return;
           render(config, providers, patches);
         } catch (e) { if (!disposed) replace(host, errorCard(e.detail || e.message, load)); }
       }
 
       function render(config, providers, patches) {
         disposers.splice(0).forEach(dispose => dispose());
-        const draft = JSON.parse(JSON.stringify(config.auto_mode));
-        if (!draft.fixed_provider) draft.fixed_provider = null;
-        const baseline = JSON.stringify(draft);
+        const clone = value => JSON.parse(JSON.stringify(value));
+        const applied = clone(config.auto_mode);
+        const draft = { mode: applied.mode };
+        const modelDrafts = { provider_pool: applied.model, fixed_provider: applied.model };
+        const currentModel = () => draft.mode === 'disabled' ? applied.model : modelDrafts[draft.mode];
+        const fixed = clone(applied.fixed_provider || blankFixed());
+        const baseline = clone(fixed);
         const fields = {};
-        let lastFixed = draft.fixed_provider ? JSON.parse(JSON.stringify(draft.fixed_provider)) : blankFixed();
+        let saving = false;
         if (bar) bar.destroy();
         bar = savebar({ onSave: save, onRevert: load });
-        const dirty = () => JSON.stringify(draft) !== baseline;
+        const dirty = () => draft.mode !== applied.mode || Object.values(modelDrafts).some(m => m !== applied.model) || !store.same(fixed, baseline);
         const check = () => { bar.show(dirty()); Object.values(fields).forEach(f => f.setError && f.setError('')); bar.setError(''); };
-        CCAM.router.setGuard(async () => dirty() ? confirm({ title: 'Discard changes?', text: 'Auto mode has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
+        CCAM.router.setGuard(async () => saving ? false : dirty() ? confirm({ title: 'Discard changes?', text: 'Auto mode has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
 
         // Mode
         const modeDesc = h('p', { class: 'am-desc' });
         const modeSeg = seg({ ariaLabel: 'Auto mode', value: draft.mode, options: [{ value: 'disabled', label: 'Off' }, { value: 'provider_pool', label: 'Provider pool' }, { value: 'fixed_provider', label: 'Fixed provider' }], onchange: (v) => {
-          if (draft.mode === 'fixed_provider' && draft.fixed_provider) lastFixed = JSON.parse(JSON.stringify(draft.fixed_provider));
           draft.mode = v;
-          if (v === 'disabled') { draft.model = ''; draft.fixed_provider = null; }
-          if (v === 'provider_pool') { draft.fixed_provider = null; }
-          if (v === 'fixed_provider') { draft.fixed_provider = JSON.parse(JSON.stringify(lastFixed)); }
-          modelInput.value = draft.model;
+          modelInput.value = currentModel();
           sync(); check();
         } });
 
         // Shared classifier model
-        const modelInput = input({ id: 'am-model', value: draft.model, placeholder: 'claude-haiku-4-5', list: 'am-models', oninput: (e) => { draft.model = e.target.value; renderCands(); check(); } });
+        const modelInput = input({ id: 'am-model', value: currentModel(), placeholder: 'claude-haiku-4-5', list: 'am-models', oninput: (e) => { modelDrafts[draft.mode] = e.target.value; renderCands(); check(); } });
         const datalist = h('datalist', { id: 'am-models' }, Array.from(new Set(providers.flatMap(p => p.models))).sort().map(m => h('option', { value: m })));
         fields.model = field({ label: 'Classifier model', for: 'am-model', control: [modelInput, datalist], help: 'Written over the model in every classifier request. Shared by both modes.' });
 
         const candsEl = h('div', { class: 'am-cands' });
         const candsHelp = h('p', { class: 'help' });
         function renderCands() {
-          const cands = providers.filter(p => p.enabled && p.models.includes(draft.model)).sort((a, b) => b.priority - a.priority);
+          const cands = providers.filter(p => p.enabled && p.models.includes(currentModel())).sort((a, b) => b.priority - a.priority);
           replace(candsEl, cands.map(p => h('div', { class: 'am-cand' }, healthDot('unknown'), h('span', { class: 'n' }, p.name), h('span', { class: 'prio', 'data-tip': priorityTip(p.priority) }, 'P ' + fmt.priorityLabel(p.priority)), tag(fmt.host(p.base_url)))));
-          if (!draft.model) { candsHelp.textContent = 'Enter a model to see which providers can serve the classifier.'; candsHelp.className = 'help'; }
+          if (!currentModel()) { candsHelp.textContent = 'Enter a model to see which providers can serve the classifier.'; candsHelp.className = 'help'; }
           else if (!cands.length) { candsHelp.textContent = 'No enabled provider declares this model — classifier requests would get 404 model_not_configured.'; candsHelp.className = 'help warn-text'; }
           else { candsHelp.textContent = fmt.plural(cands.length, 'provider') + ' can serve the classifier. The highest healthy tier is used; sessions stick to one provider and use the classifier health channel. Each request calls at most one provider.'; candsHelp.className = 'help'; }
         }
         const poolBlock = h('div', { class: 'field' }, h('span', { class: 'lab' }, 'Candidates'), candsEl, candsHelp);
 
         // Fixed provider
-        const fx = () => draft.fixed_provider || (draft.fixed_provider = blankFixed());
-        const urlIn = input({ id: 'fx-url', value: lastFixed.base_url, placeholder: 'https://classifier.example', oninput: (e) => { fx().base_url = e.target.value; check(); } });
+        const urlIn = input({ id: 'fx-url', value: fixed.base_url, placeholder: 'https://classifier.example', oninput: (e) => { fixed.base_url = e.target.value; check(); } });
         fields['fixed.base_url'] = field({ label: 'Base URL', for: 'fx-url', control: urlIn, help: h('span', { class: 'fx-path' }) });
-        const keyWrap = secretInput({ id: 'fx-key', value: lastFixed.api_key, placeholder: 'target API key', copy: true, oninput: (e) => { fx().api_key = e.target.value; check(); } });
+        const keyWrap = secretInput({ id: 'fx-key', value: fixed.api_key, placeholder: 'target API key', copy: true, oninput: (e) => { fixed.api_key = e.target.value; check(); } });
         fields['fixed.api_key'] = field({ label: 'API key', for: 'fx-key', control: keyWrap });
-        const authSeg = CCAM.ui.authHeaderSeg({ useXApiKey: lastFixed.use_x_api_key, onchange: (v) => { fx().use_x_api_key = v; check(); } });
+        const authSeg = CCAM.ui.authHeaderSeg({ useXApiKey: fixed.use_x_api_key, onchange: (v) => { fixed.use_x_api_key = v; check(); } });
         fields['fixed.use_x_api_key'] = field({ label: 'Authentication header', control: authSeg });
-        const protoSel = select({ id: 'fx-proto', value: lastFixed.protocol, options: PROTOCOLS.map(p => ({ value: p.value, label: p.label, hint: p.implemented ? '' : 'not implemented' })), onchange: (e) => { fx().protocol = e.target.value; syncProto(); check(); } });
+        const protoSel = select({ id: 'fx-proto', value: fixed.protocol, options: PROTOCOLS.map(p => ({ value: p.value, label: p.label, hint: p.implemented ? '' : 'not implemented' })), onchange: (e) => { fixed.protocol = e.target.value; syncProto(); check(); } });
         const protoNote = h('div', { class: 'note warn', hidden: true });
         fields['fixed.protocol'] = field({ label: 'Protocol', for: 'fx-proto', control: protoSel, help: h('span', { class: 'fx-proto-help' }) });
-        const tls = CCAM.ui.tlsControl({ idPrefix: 'fx', value: lastFixed.tls, onchange: (v) => { fx().tls = v; check(); } });
+        const tls = CCAM.ui.tlsControl({ idPrefix: 'fx', value: fixed.tls, onchange: (v) => { fixed.tls = v; check(); } });
         fields['fixed.tls'] = field({ label: 'TLS', control: tls });
-        const patchSel = CCAM.ui.patchSelector({ patches, selected: lastFixed.patches, applicableTypes: ['classifier'], onchange: (ids) => { fx().patches = ids; check(); } });
+        const patchSel = CCAM.ui.patchSelector({ patches, selected: fixed.patches, applicableTypes: ['classifier'], onchange: (ids) => { fixed.patches = ids; check(); } });
         fields['fixed.patches'] = field({ label: 'Patches', control: patchSel, help: 'Only patches that apply to classifier requests are offered here.' });
         function syncProto() {
-          const p = PROTOCOLS.find(x => x.value === (draft.fixed_provider ? draft.fixed_provider.protocol : lastFixed.protocol)) || PROTOCOLS[0];
+          const p = PROTOCOLS.find(x => x.value === fixed.protocol) || PROTOCOLS[0];
           fields['fixed.base_url'].querySelector('.fx-path').textContent = 'CC AutoMux appends ' + p.path + ' for this protocol and keeps the client query string.';
           fields['fixed.protocol'].querySelector('.fx-proto-help').textContent = p.implemented ? 'The canonical Anthropic request is sent as-is and the response is used directly.' : 'Requests would be converted to ' + p.label + ' and the response converted back.';
           protoNote.hidden = p.implemented;
@@ -142,16 +142,33 @@
         disposers.push(offStatus);
 
         async function save() {
+          if (saving || disposed) return;
           const body = store.clientUpdate(config);
-          body.auto_mode = JSON.parse(JSON.stringify(draft));
-          if (!body.auto_mode.fixed_provider) delete body.auto_mode.fixed_provider;
-          bar.busy(true);
+          body.auto_mode = clone(applied);
+          body.auto_mode.mode = draft.mode;
+          body.auto_mode.model = draft.mode === 'disabled' ? applied.model : modelDrafts[draft.mode];
+          if (draft.mode === 'fixed_provider') body.auto_mode.fixed_provider = Object.assign(clone(fixed), { tls: tls.getSubmission() });
+          saving = true; modeCard.inert = true; bar.busy(true);
+          const write = async () => {
+            let saved;
+            await store.saveConfig(config, body, (_result, value) => { saved = value; });
+            return saved;
+          };
+          await complete(() => store.confirmedWrite(write, () => api.get('/api/v1/config'), value => store.same(value.auto_mode, body.auto_mode)));
+        }
+        async function complete(run) {
           try {
-            await store.saveConfig(config, body);
-            bar.busy(false); toast('Auto mode saved'); store.invalidate(); store.refreshStatus(); CCAM.router.clearGuard(); load();
+            const saved = await run();
+            if (disposed) return;
+            toast('Auto mode saved'); store.invalidate(); store.refreshStatus();
+            render(saved, providers, patches);
           } catch (e) {
-            bar.busy(false);
-            if (e.field) { const f = fields[e.field.replace(/\[\d+\]$/, '')] || fields[e.field.replace(/^fixed\.tls\..*/, 'fixed.tls')]; if (f && f.setError) { f.setError(e.detail); const inp = f.querySelector('input, select'); if (inp) inp.focus(); return; } }
+            if (disposed) return;
+            if (e.verify) { bar.setError(e.detail); bar.pending(() => complete(e.verify)); return; }
+            saving = false; modeCard.inert = false; bar.busy(false);
+            const key = (e.field || '').replace(/^auto_mode\./, '').replace(/^fixed_provider\./, 'fixed.').replace(/\[\d+\]$/, '').replace(/^fixed\.tls\..*/, 'fixed.tls');
+            const f = fields[key];
+            if (f && f.setError) { f.setError(e.detail); const inp = f.querySelector('input, select'); if (inp && !f.hidden) inp.focus(); }
             bar.setError(e.code === 'restart_in_progress' ? 'CC AutoMux is restarting — try again in a moment.' : (e.detail || e.message));
           }
         }

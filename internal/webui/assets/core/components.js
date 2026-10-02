@@ -56,31 +56,26 @@
     return wrap;
   }
 
-  // TLS trust selection mapped onto { ca_file, insecure_skip_verify }.
+  // The editor retains a custom draft separately from its applied baseline.
   function tlsControl(opts) {
-    let value = { ca_file: (opts.value && opts.value.ca_file) || '', insecure_skip_verify: !!(opts.value && opts.value.insecure_skip_verify) };
-    let selectedMode = value.insecure_skip_verify ? 'skip' : value.ca_file ? 'custom' : 'system';
-    const mode = () => selectedMode;
-    const caField = field({ label: 'CA file', control: input({ id: opts.idPrefix + '-ca', placeholder: '/absolute/path/to/ca.pem', value: value.ca_file, oninput: (e) => { value.ca_file = e.target.value; emit(); } }), help: 'PEM bundle used instead of the system roots. Cannot be combined with skipping verification.' });
+    const baseline = Object.assign({ mode: 'system', ca_file: '' }, opts.value);
+    const draft = Object.assign({}, baseline);
+    const caField = field({ label: 'CA file', control: input({ id: opts.idPrefix + '-ca', placeholder: '/absolute/path/to/ca.pem', value: draft.ca_file, oninput: (e) => { draft.ca_file = e.target.value; emit(); } }), help: 'PEM certificates added to the system trust store while Custom CA file is selected.' });
     const help = h('p', { class: 'help' });
-    const segEl = seg({ ariaLabel: 'TLS trust', value: mode(), options: [{ value: 'system', label: 'System roots' }, { value: 'custom', label: 'Custom CA file' }, { value: 'skip', label: 'Skip verification' }], onchange: (v) => {
-      selectedMode = v;
-      if (v === 'system') value = { ca_file: '', insecure_skip_verify: false };
-      else if (v === 'custom') value = { ca_file: value.ca_file, insecure_skip_verify: false };
-      else value = { ca_file: '', insecure_skip_verify: true };
-      sync(); emit();
+    const segEl = seg({ ariaLabel: 'TLS trust', value: draft.mode, options: [{ value: 'system', label: 'System roots' }, { value: 'custom', label: 'Custom CA file' }, { value: 'skip', label: 'Skip verification' }], onchange: (v) => {
+      draft.mode = v; sync(); emit();
     } });
     function sync() {
-      const m = mode();
-      caField.hidden = m !== 'custom';
-      help.textContent = m === 'system' ? 'Verify the upstream certificate against the operating system trust store.' : m === 'skip' ? 'Accept any certificate. Only for a self-signed local upstream you control.' : '';
+      caField.hidden = draft.mode !== 'custom';
+      help.textContent = draft.mode === 'system' ? 'Verify the upstream certificate against the operating system trust store.' : draft.mode === 'skip' ? 'Accept any certificate. Only for a self-signed local upstream you control.' : '';
       help.hidden = !help.textContent;
-      help.classList.toggle('warn-text', m === 'skip');
+      help.classList.toggle('warn-text', draft.mode === 'skip');
     }
     sync();
     const wrap = h('div', { class: 'tls' }, segEl, help, caField);
-    function emit() { opts.onchange && opts.onchange(Object.assign({}, value)); }
-    wrap.getValue = () => Object.assign({}, value);
+    function emit() { opts.onchange && opts.onchange(wrap.getDraft()); }
+    wrap.getDraft = () => Object.assign({}, draft);
+    wrap.getSubmission = () => ({ mode: draft.mode, ca_file: draft.mode === 'custom' ? draft.ca_file : baseline.ca_file });
     wrap.setError = (msg) => caField.setError(msg);
     return wrap;
   }

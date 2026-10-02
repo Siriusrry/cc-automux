@@ -107,7 +107,7 @@ func TestClaudeCodePathModeValidation(t *testing.T) {
 		{name: "default", mode: PathModeDefault, path: "", wantValid: true},
 		{name: "custom", mode: PathModeCustom, path: filepath.Join(t.TempDir(), "settings.json"), wantValid: true},
 		{name: "custom equals default", mode: PathModeCustom, path: defaultPath, wantValid: true},
-		{name: "default with path", mode: PathModeDefault, path: defaultPath},
+		{name: "default with path", mode: PathModeDefault, path: defaultPath, wantValid: true},
 		{name: "relative", mode: PathModeCustom, path: "settings.json"},
 		{name: "tilde is literal and not absolute", mode: PathModeCustom, path: "~/settings.json"},
 		{name: "environment variable is literal and not absolute", mode: PathModeCustom, path: "$HOME/settings.json"},

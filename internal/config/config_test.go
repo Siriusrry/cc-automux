@@ -50,8 +50,8 @@ func TestAutoModeStrictModesAndRoundTrip(t *testing.T) {
 		{name: "disabled", mode: AutoModeConfig{}, good: true},
 		{name: "pool", mode: AutoModeConfig{Mode: AutoModeProviderPool, Model: "m"}, good: true},
 		{name: "fixed", mode: validAutoModeFixed(), good: true},
-		{name: "disabled model", mode: AutoModeConfig{Mode: AutoModeDisabled, Model: "m"}},
-		{name: "pool fixed", mode: func() AutoModeConfig { a := validAutoModeFixed(); a.Mode = AutoModeProviderPool; return a }()},
+		{name: "disabled model", mode: AutoModeConfig{Mode: AutoModeDisabled, Model: "m"}, good: true},
+		{name: "pool fixed", mode: func() AutoModeConfig { a := validAutoModeFixed(); a.Mode = AutoModeProviderPool; return a }(), good: true},
 		{name: "fixed missing target", mode: AutoModeConfig{Mode: AutoModeFixedProvider, Model: "m"}},
 		{name: "unknown mode", mode: AutoModeConfig{Mode: "other", Model: "m"}},
 	}

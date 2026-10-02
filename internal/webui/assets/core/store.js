@@ -95,10 +95,31 @@
     });
   }
 
+  // A lost response may follow a committed write. Verify once, and expose a
+  // read-only retry if the service cannot be reached; never replay the write.
+  async function confirmedWrite(write, read, matches) {
+    async function verify() {
+      let value;
+      try { value = await read(); }
+      catch (cause) {
+        const error = new api.ApiError(0, 'write_unconfirmed', 'The save result is not confirmed. Check saved state before continuing.');
+        error.verify = verify;
+        throw error;
+      }
+      if (matches(value)) return value;
+      throw new api.ApiError(409, 'write_not_applied', 'The saved values differ. Your draft is kept; review or revert before applying again.');
+    }
+    try { return await write(); }
+    catch (error) {
+      if (error.isNetwork || !error.status || error.code === 'invalid_response') return verify();
+      throw error;
+    }
+  }
+
   const store = {
     on, off, emit, state,
     startPolling, stopPolling, refreshStatus,
-    invalidate, same, mergeDraft, saveConfig,
+    invalidate, same, mergeDraft, saveConfig, confirmedWrite,
     config: () => cached('config', () => api.get('/api/v1/config')),
     providers: () => cached('providers', async () => (await api.get('/api/v1/providers')) || []),
     providerHealth: async () => {

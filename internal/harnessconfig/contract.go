@@ -110,8 +110,8 @@ func (e *FileError) Unwrap() error {
 }
 
 // PathConfig is the adapter-independent path selection contract. A default
-// path is represented by an empty SettingsPath; custom paths are literal
-// absolute paths and are never expanded by the adapter.
+// path ignores the retained SettingsPath; custom paths are literal absolute
+// paths and are never expanded by the adapter.
 type PathConfig struct {
 	PathMode     string `json:"path_mode"`
 	SettingsPath string `json:"settings_path"`
@@ -129,17 +129,11 @@ func CustomPathConfig(path string) PathConfig {
 // default path's concrete home directory is intentionally resolved only by an
 // adapter, so this method does not touch the filesystem.
 func (p PathConfig) Validate() error {
-	switch p.PathMode {
-	case PathModeDefault:
-		if p.SettingsPath != "" {
-			return fmt.Errorf("%w: default mode requires an empty settings path", ErrInvalidPathConfig)
-		}
-	case PathModeCustom:
-		if p.SettingsPath == "" || !isAbsolutePath(p.SettingsPath) || hasControl(p.SettingsPath) {
-			return fmt.Errorf("%w: custom settings path must be a literal absolute path", ErrInvalidPathConfig)
-		}
-	default:
+	if p.PathMode != PathModeDefault && p.PathMode != PathModeCustom {
 		return fmt.Errorf("%w: unsupported path mode %q", ErrInvalidPathConfig, p.PathMode)
+	}
+	if p.PathMode == PathModeCustom && p.SettingsPath == "" || p.SettingsPath != "" && (!isAbsolutePath(p.SettingsPath) || hasControl(p.SettingsPath)) {
+		return fmt.Errorf("%w: custom settings path must be a literal absolute path", ErrInvalidPathConfig)
 	}
 	return nil
 }

@@ -120,6 +120,7 @@ func Compile(input config.ProviderConfig, context RuntimeContext) (*CompiledProv
 // persisted configuration.  The target's patch plan is filtered to patches
 // applicable to classifier requests; normal-only IDs fail closed.
 func CompileFixedTarget(input config.FixedProviderConfig, classifierModel string, context RuntimeContext) (*CompiledFixedTarget, error) {
+	input = input.Normalize()
 	if err := context.Validate(); err != nil {
 		return nil, err
 	}
@@ -160,6 +161,11 @@ func CompileAutoModeTarget(auto config.AutoModeConfig, context RuntimeContext) (
 		return nil, err
 	}
 	if auto.Mode != config.AutoModeFixedProvider {
+		if auto.FixedProvider != nil {
+			if err := context.Registry.Validate(auto.FixedProvider.Patches, patch.RequestTypeClassifier); err != nil {
+				return nil, err
+			}
+		}
 		return nil, nil
 	}
 	if auto.FixedProvider == nil {
@@ -176,6 +182,7 @@ func validateFixedTargetInput(input config.FixedProviderConfig, classifierModel 
 }
 
 func compileWithRegistry(input config.ProviderConfig, registry patch.Registry) (*CompiledProvider, error) {
+	input.TLS = input.TLS.Normalize()
 	// The config package owns the schema-level provider rules. Wrapping this one
 	// provider in a complete configuration keeps the two packages from duplicating
 	// validation logic while still allowing the provider compiler to be used on
@@ -280,17 +287,17 @@ func stablePrioritySort(items []*CompiledProvider) {
 }
 
 func compileTLS(input config.TLSConfig) (*tls.Config, error) {
-	if input.CAFile != "" && input.InsecureSkipVerify {
-		return nil, errors.New("ca_file and insecure_skip_verify are mutually exclusive")
+	if err := input.Validate("tls"); err != nil {
+		return nil, err
 	}
-	if input.CAFile == "" {
-		if input.InsecureSkipVerify {
+	effective := input.Effective()
+	if effective.CAFile == "" {
+		if effective.InsecureSkipVerify {
 			return &tls.Config{InsecureSkipVerify: true}, nil // explicitly requested by config
 		}
-		// nil delegates to the Go transport's system certificate pool.
-		return nil, nil
+		return nil, nil // use the system certificate pool
 	}
-	pemBytes, err := os.ReadFile(input.CAFile)
+	pemBytes, err := os.ReadFile(effective.CAFile)
 	if err != nil {
 		return nil, fmt.Errorf("read CA file: %w", err)
 	}

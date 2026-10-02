@@ -103,7 +103,7 @@
 
   // ---------- detail / new ----------
   function blankProvider() {
-    return { id: '', name: '', base_url: '', api_key: '', models: [], priority: 0, enabled: true, use_x_api_key: false, tls: { ca_file: '', insecure_skip_verify: false }, patches: [], disable_health: false };
+    return { id: '', name: '', base_url: '', api_key: '', models: [], priority: 0, enabled: true, use_x_api_key: false, tls: { mode: 'system', ca_file: '' }, patches: [], disable_health: false };
   }
   function stripHealth(p) {
     const out = Object.assign({}, p);
@@ -121,16 +121,16 @@
       ctx.actions([h('a', { class: 'btn quiet', href: '#/providers' }, icon('arrow-left'), 'All providers')]);
       const host = h('div', null, skeleton(6, 44));
       ctx.root.appendChild(host);
-      let bar = null, disposed = false, duplicating = false, draftDirty = false;
+      let bar = null, disposed = false, duplicating = false, draftDirty = false, saving = false;
 
       function syncDuplicate() {
         if (isNew || disposed) return;
-        duplicateButton.disabled = duplicating || draftDirty;
+        duplicateButton.disabled = saving || duplicating || draftDirty;
         duplicateHelp.hidden = !draftDirty;
       }
 
       async function duplicate() {
-        if (disposed || isNew || duplicating || draftDirty) return;
+        if (disposed || isNew || saving || duplicating || draftDirty) return;
         duplicating = true;
         syncDuplicate();
         let posting = false;
@@ -207,7 +207,7 @@
         bar = savebar({ onSave: save, onRevert: () => { if (isNew) CCAM.router.go('/providers'); else load(); } });
         const dirty = () => JSON.stringify(draft) !== baseline;
         const check = () => { draftDirty = dirty(); syncDuplicate(); bar.show(isNew ? true : draftDirty); Object.values(fields).forEach(f => f.setError && f.setError('')); bar.setError(''); };
-        CCAM.router.setGuard(async () => { if (!dirty() && !isNew) return true; if (isNew && JSON.stringify(draft) === JSON.stringify(blankProvider())) return true; return confirm({ title: 'Discard changes?', text: 'This provider has unsaved changes.', confirmLabel: 'Discard', danger: true }); });
+        CCAM.router.setGuard(async () => { if (saving) return false; if (!dirty() && !isNew) return true; if (isNew && JSON.stringify(draft) === JSON.stringify(blankProvider())) return true; return confirm({ title: 'Discard changes?', text: 'This provider has unsaved changes.', confirmLabel: 'Discard', danger: true }); });
 
         // --- form ---
         fields.name = field({ label: 'Name', for: 'p-name', control: input({ id: 'p-name', sans: true, value: draft.name, oninput: (e) => { draft.name = e.target.value; check(); } }), help: 'Shown in logs and health diagnostics. Must be unique.' });
@@ -285,18 +285,34 @@
         check();
 
         async function save() {
+          if (saving || disposed) return;
           const body = JSON.parse(JSON.stringify(draft));
+          body.tls = tls.getSubmission();
           if (!isNew) body.id = id; else delete body.id;
-          bar.busy(true);
+          saving = true; formCard.inert = true; bar.busy(true); syncDuplicate();
+          const read = async () => {
+            const list = await api.get('/api/v1/providers');
+            return list.find(p => isNew ? p.name === body.name : p.id === id);
+          };
+          const matches = p => p && store.same(Object.assign({}, p, { id: undefined }), Object.assign({}, body, { id: undefined }));
+          await complete(() => store.confirmedWrite(() => isNew ? api.post('/api/v1/providers', body) : api.put('/api/v1/providers/' + id, body), read, matches));
+        }
+        async function complete(run) {
           try {
-            const saved = isNew ? await api.post('/api/v1/providers', body) : await api.put('/api/v1/providers/' + id, body);
-            bar.busy(false);
-            toast(isNew ? saved.name + ' added' : 'Saved ' + saved.name);
+            const saved = await run();
             store.invalidate();
+            if (disposed) return;
+            saving = false;
+            toast(isNew ? saved.name + ' added' : 'Saved ' + saved.name);
             CCAM.router.clearGuard();
-            if (isNew) CCAM.router.go('/providers/' + saved.id); else load();
+            if (isNew) { CCAM.router.go('/providers/' + saved.id); return; }
+            const fresh = await store.providerHealth().catch(() => null);
+            if (disposed) return;
+            render(saved, patches, (fresh && fresh.providers.find(p => p.id === id)) || Object.assign({}, diag, saved));
           } catch (e) {
-            bar.busy(false);
+            if (disposed) return;
+            if (e.verify) { bar.setError(e.detail); bar.pending(() => complete(e.verify)); return; }
+            saving = false; formCard.inert = false; bar.busy(false); syncDuplicate();
             if (e.status === 409 && /name/.test(e.message)) { fields.name.setError('A provider with this name already exists.'); fields.name.querySelector('input').focus(); return; }
             if (e.field) {
               const key = e.field.replace(/\[\d+\]$/, '').replace(/^tls\..*/, 'tls');

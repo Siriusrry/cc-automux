@@ -317,10 +317,9 @@ func (r Registry) List() []PatchMetadata {
 	return result
 }
 
-// Validate checks IDs without applying request-type filtering. It is useful at
-// config/schema boundaries where the target type is not yet known.
-func (r Registry) Validate(ids []string) error {
-	_, err := r.Compile(ids)
+// Validate checks selection and applicability without constructing a plan.
+func (r Registry) Validate(ids []string, targetTypes ...RequestType) error {
+	_, err := r.selectDefinitions(ids, targetTypes)
 	return err
 }
 
@@ -331,30 +330,38 @@ func (r Registry) Compile(ids []string, targetTypes ...RequestType) (Plan, error
 }
 
 func (r Registry) compile(ids []string, targetTypes []RequestType) (Plan, error) {
-	types, err := normalizeTargetTypes(targetTypes)
+	selected, err := r.selectDefinitions(ids, targetTypes)
 	if err != nil {
 		return Plan{}, err
+	}
+	return newPlan(selected, r.services)
+}
+
+func (r Registry) selectDefinitions(ids []string, targetTypes []RequestType) ([]PatchDefinition, error) {
+	types, err := normalizeTargetTypes(targetTypes)
+	if err != nil {
+		return nil, err
 	}
 	selected := make([]PatchDefinition, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		if _, duplicate := seen[id]; duplicate {
-			return Plan{}, fmt.Errorf("patch %q: %w", id, ErrDuplicatePatch)
+			return nil, fmt.Errorf("patch %q: %w", id, ErrDuplicatePatch)
 		}
 		seen[id] = struct{}{}
 		d, ok := r.entries[id]
 		if !ok {
-			return Plan{}, fmt.Errorf("patch %q: %w", id, ErrUnknownPatch)
+			return nil, fmt.Errorf("patch %q: %w", id, ErrUnknownPatch)
 		}
 		if len(types) > 0 && !definitionAppliesToAny(d, types) {
 			// An ID that is valid globally but not applicable to this target is
 			// a static configuration error, not a silently ignored patch.
-			return Plan{}, fmt.Errorf("patch %q: %w", id, ErrPatchNotApplicable)
+			return nil, fmt.Errorf("patch %q: %w", id, ErrPatchNotApplicable)
 		}
 		selected = append(selected, cloneDefinition(d))
 	}
 	if err := validateSelectedConflicts(selected, types); err != nil {
-		return Plan{}, err
+		return nil, err
 	}
 	if len(types) > 0 {
 		filtered := selected[:0]
@@ -365,7 +372,7 @@ func (r Registry) compile(ids []string, targetTypes []RequestType) (Plan, error)
 		}
 		selected = filtered
 	}
-	return newPlan(selected, r.services)
+	return selected, nil
 }
 
 func (r Registry) CompileForType(ids []string, requestType RequestType) (Plan, error) {

@@ -81,8 +81,8 @@ func TestPathResolutionUsesExplicitDefaultAndLiteralCustomModes(t *testing.T) {
 	if err != nil || got != literal {
 		t.Fatalf("literal custom path = %q, err %v", got, err)
 	}
-	if _, err := adapter.ResolvePath(PathConfig{PathMode: PathModeDefault, SettingsPath: custom}); !errors.Is(err, ErrInvalidPathConfig) {
-		t.Fatalf("default path with value error = %v", err)
+	if got, err := adapter.ResolvePath(PathConfig{PathMode: PathModeDefault, SettingsPath: custom}); err != nil || got != filepath.Join(home, ".claude", "settings.json") {
+		t.Fatalf("default ignores retained path: %q, %v", got, err)
 	}
 	if _, err := adapter.ResolvePath(PathConfig{PathMode: PathModeCustom, SettingsPath: "relative/settings.json"}); !errors.Is(err, ErrInvalidPathConfig) {
 		t.Fatalf("relative custom path error = %v", err)

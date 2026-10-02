@@ -42,7 +42,7 @@ func TestClientPoolUsesCompiledCustomCAAndGatewayAuthHeaders(t *testing.T) {
 		APIKey:  providerKey,
 		Models:  []string{"model"},
 		Enabled: true,
-		TLS:     config.TLSConfig{CAFile: caPath},
+		TLS:     config.TLSConfig{Mode: config.TLSCustom, CAFile: caPath},
 	}, func() provider.RuntimeContext {
 		registry := patch.DefaultRegistry(patch.Services{AliasStore: patch.NewAliasStore()})
 		context, contextErr := provider.NewRuntimeContext(registry)

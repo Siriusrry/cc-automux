@@ -130,7 +130,7 @@ func TestTLSDefaultsAndExecutablePatchRegistry(t *testing.T) {
 	if err != nil || compiled.TLS != nil {
 		t.Fatalf("default TLS = %#v, err %v; want system-root nil", compiled.TLS, err)
 	}
-	p.TLS.InsecureSkipVerify = true
+	p.TLS.Mode = config.TLSSkip
 	compiled, err = Compile(p, testCompileContext(t))
 	if err != nil || compiled.TLS == nil || !compiled.TLS.InsecureSkipVerify {
 		t.Fatalf("insecure TLS = %#v, err %v", compiled.TLS, err)
@@ -139,8 +139,12 @@ func TestTLSDefaultsAndExecutablePatchRegistry(t *testing.T) {
 	if err := os.WriteFile(p.TLS.CAFile, []byte("not pem"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Compile(p, testCompileContext(t)); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("CA/insecure conflict error = %v", err)
+	if _, err := Compile(p, testCompileContext(t)); err != nil {
+		t.Fatalf("dormant CA: %v", err)
+	}
+	p.TLS.Mode = config.TLSCustom
+	if _, err := Compile(p, testCompileContext(t)); err == nil {
+		t.Fatal("invalid custom CA accepted")
 	}
 
 	p = providerConfig("11111111-1111-4111-8111-111111111111", "p", "m", "k", 0)
@@ -335,7 +339,7 @@ func TestProviderGenerationTracksOnlyRuntimeIdentity(t *testing.T) {
 		func(p *config.ProviderConfig) { p.BaseURL = "https://other.test" },
 		func(p *config.ProviderConfig) { p.APIKey = "other-key" },
 		func(p *config.ProviderConfig) { p.UseXAPIKey = true },
-		func(p *config.ProviderConfig) { p.TLS.InsecureSkipVerify = true },
+		func(p *config.ProviderConfig) { p.TLS.Mode = config.TLSSkip },
 		func(p *config.ProviderConfig) { p.Patches = []string{patch.AnyRouterSubagentThinkingID} },
 	} {
 		candidate := base

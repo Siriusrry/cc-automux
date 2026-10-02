@@ -182,7 +182,7 @@ func TestSnapshotAutoModeSharesPublishedFixedTarget(t *testing.T) {
 		BaseURL:  "https://classifier.example/prefix",
 		APIKey:   "classifier-key",
 		Protocol: config.ProtocolOpenAIResponses,
-		TLS:      config.TLSConfig{InsecureSkipVerify: true},
+		TLS:      config.TLSConfig{Mode: config.TLSSkip},
 	}}
 	if _, err := manager.Apply(next); err != nil {
 		t.Fatal(err)
@@ -233,7 +233,7 @@ func TestFixedTargetCompileAndPersistFailuresDoNotPublishSnapshot(t *testing.T) 
 		BaseURL:  "https://classifier.example",
 		APIKey:   "classifier-key",
 		Protocol: config.ProtocolOpenAIResponses,
-		TLS:      config.TLSConfig{CAFile: badCA},
+		TLS:      config.TLSConfig{Mode: config.TLSCustom, CAFile: badCA},
 	}}
 	if _, err := manager.Apply(uncompilable); err == nil {
 		t.Fatal("uncompilable fixed target was accepted")

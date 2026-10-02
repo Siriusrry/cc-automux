@@ -18,16 +18,16 @@ func generationFor(input config.ProviderConfig) ProviderGeneration {
 	patches := make([]string, len(input.Patches))
 	copy(patches, input.Patches)
 	identity := struct {
-		BaseURL    string           `json:"base_url"`
-		APIKey     string           `json:"api_key"`
-		UseXAPIKey bool             `json:"use_x_api_key"`
-		TLS        config.TLSConfig `json:"tls"`
-		Patches    []string         `json:"patches"`
+		BaseURL    string              `json:"base_url"`
+		APIKey     string              `json:"api_key"`
+		UseXAPIKey bool                `json:"use_x_api_key"`
+		TLS        config.EffectiveTLS `json:"tls"`
+		Patches    []string            `json:"patches"`
 	}{
 		BaseURL:    input.BaseURL,
 		APIKey:     input.APIKey,
 		UseXAPIKey: input.UseXAPIKey,
-		TLS:        input.TLS,
+		TLS:        input.TLS.Effective(),
 		Patches:    patches,
 	}
 	return hashGeneration(identity)
@@ -41,18 +41,18 @@ func fixedGenerationFor(input config.FixedProviderConfig, classifierModel string
 	patches := make([]string, len(input.Patches))
 	copy(patches, input.Patches)
 	identity := struct {
-		BaseURL         string           `json:"base_url"`
-		APIKey          string           `json:"api_key"`
-		UseXAPIKey      bool             `json:"use_x_api_key"`
-		TLS             config.TLSConfig `json:"tls"`
-		Patches         []string         `json:"patches"`
-		ClassifierModel string           `json:"classifier_model"`
-		Protocol        string           `json:"protocol"`
+		BaseURL         string              `json:"base_url"`
+		APIKey          string              `json:"api_key"`
+		UseXAPIKey      bool                `json:"use_x_api_key"`
+		TLS             config.EffectiveTLS `json:"tls"`
+		Patches         []string            `json:"patches"`
+		ClassifierModel string              `json:"classifier_model"`
+		Protocol        string              `json:"protocol"`
 	}{
 		BaseURL:         input.BaseURL,
 		APIKey:          input.APIKey,
 		UseXAPIKey:      input.UseXAPIKey,
-		TLS:             input.TLS,
+		TLS:             input.TLS.Effective(),
 		Patches:         patches,
 		ClassifierModel: classifierModel,
 		Protocol:        input.Protocol,

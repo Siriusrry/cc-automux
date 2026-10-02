@@ -437,10 +437,10 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	restart := h.manager.RestartStatus()
 	autoStatus := autoModeStatusResponse{
 		Mode:                    cfg.AutoMode.Mode,
-		Model:                   cfg.AutoMode.Model,
-		FixedProviderConfigured: cfg.AutoMode.FixedProvider != nil,
+		Model:                   snapshot.AutoMode().ClassifierModel,
+		FixedProviderConfigured: snapshot.AutoMode().FixedTarget != nil,
 	}
-	if cfg.AutoMode.FixedProvider != nil {
+	if autoStatus.FixedProviderConfigured {
 		autoStatus.FixedProviderProtocol = cfg.AutoMode.FixedProvider.Protocol
 	}
 	if h.autoModeDiagnostics != nil {

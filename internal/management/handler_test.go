@@ -264,7 +264,7 @@ func TestManagementConfigRoundTripsFixedAutoModeAndStatusOmitsKey(t *testing.T) 
 		FixedProvider: &config.FixedProviderConfig{
 			BaseURL: "https://classifier.example/prefix", APIKey: "fixed-secret",
 			UseXAPIKey: true, Protocol: config.ProtocolOpenAIResponses,
-			TLS:     config.TLSConfig{InsecureSkipVerify: true},
+			TLS:     config.TLSConfig{Mode: config.TLSSkip},
 			Patches: []string{patch.AnyRouterClassifierRequestID},
 		},
 	}
@@ -284,7 +284,7 @@ func TestManagementConfigRoundTripsFixedAutoModeAndStatusOmitsKey(t *testing.T) 
 	if got.AutoMode.FixedProvider == nil || got.AutoMode.Mode != config.AutoModeFixedProvider ||
 		got.AutoMode.Model != "classifier-model" || got.AutoMode.FixedProvider.BaseURL != "https://classifier.example/prefix" ||
 		got.AutoMode.FixedProvider.APIKey != "fixed-secret" || !got.AutoMode.FixedProvider.UseXAPIKey ||
-		got.AutoMode.FixedProvider.Protocol != config.ProtocolOpenAIResponses || !got.AutoMode.FixedProvider.TLS.InsecureSkipVerify ||
+		got.AutoMode.FixedProvider.Protocol != config.ProtocolOpenAIResponses || got.AutoMode.FixedProvider.TLS.Mode != config.TLSSkip ||
 		len(got.AutoMode.FixedProvider.Patches) != 1 || got.AutoMode.FixedProvider.Patches[0] != patch.AnyRouterClassifierRequestID {
 		t.Fatalf("fixed Auto Mode round trip = %#v", got.AutoMode)
 	}

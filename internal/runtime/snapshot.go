@@ -29,13 +29,13 @@ func compileAutoMode(auto config.AutoModeConfig, context provider.RuntimeContext
 	if err := auto.Validate(); err != nil {
 		return CompiledAutoMode{}, err
 	}
-	compiled := CompiledAutoMode{Mode: auto.Mode, ClassifierModel: auto.Model}
-	if auto.Mode == config.AutoModeFixedProvider {
-		target, err := provider.CompileAutoModeTarget(auto, context)
-		if err != nil {
-			return CompiledAutoMode{}, fmt.Errorf("compile auto_mode.fixed_provider: %w", err)
-		}
-		compiled.FixedTarget = target
+	target, err := provider.CompileAutoModeTarget(auto, context)
+	if err != nil {
+		return CompiledAutoMode{}, fmt.Errorf("compile auto_mode.fixed_provider: %w", err)
+	}
+	compiled := CompiledAutoMode{Mode: auto.Mode, ClassifierModel: auto.Model, FixedTarget: target}
+	if auto.Mode == config.AutoModeDisabled {
+		compiled.ClassifierModel = ""
 	}
 	return compiled, nil
 }

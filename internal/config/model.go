@@ -276,6 +276,7 @@ func (f FixedProviderConfig) Clone() FixedProviderConfig {
 
 func (f FixedProviderConfig) Normalize() FixedProviderConfig {
 	out := f.Clone()
+	out.TLS = out.TLS.Normalize()
 	if out.Patches == nil {
 		out.Patches = []string{}
 	}
@@ -298,11 +299,6 @@ type ProviderConfig struct {
 	TLS           TLSConfig `json:"tls"`
 	Patches       []string  `json:"patches"`
 	DisableHealth bool      `json:"disable_health"`
-}
-
-type TLSConfig struct {
-	CAFile             string `json:"ca_file"`
-	InsecureSkipVerify bool   `json:"insecure_skip_verify"`
 }
 
 // Default returns a valid, intentionally data-plane-inactive configuration
@@ -349,17 +345,13 @@ func (c Config) Clone() Config {
 // names.
 func (c Config) Normalize() Config {
 	out := c.Clone()
-	if out.AutoMode.Mode == "" {
-		out.AutoMode.Mode = AutoModeDisabled
-	}
-	if out.AutoMode.FixedProvider != nil && out.AutoMode.FixedProvider.Patches == nil {
-		out.AutoMode.FixedProvider.Patches = []string{}
-	}
+	out.AutoMode = out.AutoMode.Normalize()
 	out.Harnesses = out.Harnesses.Normalize()
 	if out.Providers == nil {
 		out.Providers = []ProviderConfig{}
 	}
 	for i := range out.Providers {
+		out.Providers[i].TLS = out.Providers[i].TLS.Normalize()
 		if out.Providers[i].Models == nil {
 			out.Providers[i].Models = []string{}
 		}
@@ -449,8 +441,8 @@ func (c Config) Validate() error {
 			}
 			seenModels[model] = struct{}{}
 		}
-		if p.TLS.CAFile != "" && p.TLS.InsecureSkipVerify {
-			return validation(prefix+".tls", "ca_file and insecure_skip_verify are mutually exclusive")
+		if err := p.TLS.Validate(prefix + ".tls"); err != nil {
+			return err
 		}
 		seenPatches := make(map[string]struct{}, len(p.Patches))
 		for j, patch := range p.Patches {
@@ -526,7 +518,7 @@ func (current Config) ActiveProfileInputsEqual(next Config) bool {
 	}
 	left := current.Harnesses.ClaudeCode
 	right := next.Harnesses.ClaudeCode
-	if left.PathMode != right.PathMode || left.SettingsPath != right.SettingsPath || left.DisableTelemetry != right.DisableTelemetry {
+	if left.PathMode != right.PathMode || (left.PathMode == PathModeCustom && left.SettingsPath != right.SettingsPath) || left.DisableTelemetry != right.DisableTelemetry {
 		return false
 	}
 	// Names are display-only and attempt limits control only gateway execution.
@@ -616,32 +608,20 @@ func (a AutoModeConfig) Clone() AutoModeConfig {
 func validateAutoMode(a AutoModeConfig) error {
 	a = a.Normalize()
 	switch a.Mode {
-	case AutoModeDisabled:
-		if a.Model != "" {
-			return validation("auto_mode.model", "must be empty when mode is disabled")
-		}
-		if a.FixedProvider != nil {
-			return validation("auto_mode.fixed_provider", "must be omitted when mode is disabled")
-		}
-	case AutoModeProviderPool:
-		if err := validateClassifierModel("auto_mode.model", a.Model); err != nil {
-			return err
-		}
-		if a.FixedProvider != nil {
-			return validation("auto_mode.fixed_provider", "must be omitted in provider_pool mode")
-		}
-	case AutoModeFixedProvider:
-		if err := validateClassifierModel("auto_mode.model", a.Model); err != nil {
-			return err
-		}
-		if a.FixedProvider == nil {
-			return validation("auto_mode.fixed_provider", "is required in fixed_provider mode")
-		}
-		if err := validateFixedProvider("auto_mode.fixed_provider", *a.FixedProvider); err != nil {
-			return err
-		}
+	case AutoModeDisabled, AutoModeProviderPool, AutoModeFixedProvider:
 	default:
 		return validation("auto_mode.mode", fmt.Sprintf("unsupported mode %q", a.Mode))
+	}
+	if a.Mode != AutoModeDisabled || a.Model != "" {
+		if err := validateClassifierModel("auto_mode.model", a.Model); err != nil {
+			return err
+		}
+	}
+	if a.Mode == AutoModeFixedProvider && a.FixedProvider == nil {
+		return validation("auto_mode.fixed_provider", "is required in fixed_provider mode")
+	}
+	if a.FixedProvider != nil {
+		return validateFixedProvider("auto_mode.fixed_provider", *a.FixedProvider)
 	}
 	return nil
 }
@@ -663,17 +643,15 @@ func validateClassifierModel(field, model string) error {
 }
 
 func validateClaudeCode(prefix string, value ClaudeCodeConfig) error {
-	switch value.PathMode {
-	case PathModeDefault:
-		if value.SettingsPath != "" {
-			return validation(prefix+".settings_path", "must be empty in default path mode")
-		}
-	case PathModeCustom:
-		if value.SettingsPath == "" {
-			return validation(prefix+".settings_path", "must be a non-empty absolute path in custom mode")
-		}
+	if value.PathMode != PathModeDefault && value.PathMode != PathModeCustom {
+		return validation(prefix+".path_mode", fmt.Sprintf("unsupported path mode %q", value.PathMode))
+	}
+	if value.PathMode == PathModeCustom && value.SettingsPath == "" {
+		return validation(prefix+".settings_path", "must be a non-empty absolute path in custom mode")
+	}
+	if value.SettingsPath != "" {
 		if !filepath.IsAbs(value.SettingsPath) {
-			return validation(prefix+".settings_path", "must be an absolute path in custom mode")
+			return validation(prefix+".settings_path", "must be an absolute path")
 		}
 		if !utf8.ValidString(value.SettingsPath) {
 			return validation(prefix+".settings_path", "must be valid UTF-8")
@@ -681,8 +659,6 @@ func validateClaudeCode(prefix string, value ClaudeCodeConfig) error {
 		if containsControl(value.SettingsPath) {
 			return validation(prefix+".settings_path", "must not contain control characters")
 		}
-	default:
-		return validation(prefix+".path_mode", fmt.Sprintf("unsupported mode %q", value.PathMode))
 	}
 
 	seenIDs := make(map[string]int, len(value.Profiles))
@@ -782,8 +758,8 @@ func validateFixedProvider(prefix string, fixed FixedProviderConfig) error {
 	if fixed.Protocol != ProtocolAnthropicMessages && fixed.Protocol != ProtocolOpenAIResponses && fixed.Protocol != ProtocolOpenAICompatible {
 		return validation(prefix+".protocol", fmt.Sprintf("unsupported protocol %q", fixed.Protocol))
 	}
-	if fixed.TLS.CAFile != "" && fixed.TLS.InsecureSkipVerify {
-		return validation(prefix+".tls", "ca_file and insecure_skip_verify are mutually exclusive")
+	if err := fixed.TLS.Validate(prefix + ".tls"); err != nil {
+		return err
 	}
 	seen := make(map[string]struct{}, len(fixed.Patches))
 	for i, id := range fixed.Patches {
