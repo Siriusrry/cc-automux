@@ -63,6 +63,7 @@ func newHarnessHandlerFixture(t *testing.T, gatewayKey string) harnessHandlerFix
 	}
 	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
 		HarnessValidator: validator,
+		HarnessUpdater:   harnessconfig.NewTelemetryUpdater(validator),
 		RuntimeContext:   runtimeContext,
 		Preflight:        func(config.Config, config.Config) error { return nil },
 	})
@@ -664,5 +665,76 @@ func TestClearingGatewayKeyPreservesActivationInvalidationReason(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTelemetryBothHTTPEntrypointsPreserveActiveAndRespectETag(t *testing.T) {
+	f := newHarnessHandlerFixture(t, "gateway-key")
+	id := "11111111-1111-4111-8111-111111111111"
+	r := harnessRequest(f.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles", encodeHarnessValue(t, validHarnessProfile(id, "Daily")))
+	if r.Code != http.StatusCreated {
+		t.Fatal(r.Body.String())
+	}
+	r = harnessRequest(f.handler, http.MethodPost, "/api/v1/harnesses/claude-code/profiles/"+id+"/activate", "{}")
+	if r.Code != http.StatusOK {
+		t.Fatal(r.Body.String())
+	}
+	r = harnessRequest(f.handler, http.MethodPut, "/api/v1/harnesses/claude-code", `{"disable_telemetry":false}`)
+	if r.Code != http.StatusOK {
+		t.Fatal(r.Body.String())
+	}
+	var status harnessconfig.HarnessStatus
+	if err := json.Unmarshal(r.Body.Bytes(), &status); err != nil || status.ActiveProfileID != id || status.DisableTelemetry {
+		t.Fatalf("status: %+v %v", status, err)
+	}
+	resource := harnessRequest(f.handler, http.MethodGet, "/api/v1/config", "")
+	var value map[string]any
+	if err := json.Unmarshal(resource.Body.Bytes(), &value); err != nil {
+		t.Fatal(err)
+	}
+	cc := value["harnesses"].(map[string]any)["claude_code"].(map[string]any)
+	delete(cc, "active_profile_id")
+	cc["disable_telemetry"] = true
+	apply := func(tag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/config", strings.NewReader(encodeHarnessValue(t, value)))
+		req.Header.Set("Authorization", "Bearer management-key")
+		req.Header.Set("If-Match", tag)
+		res := httptest.NewRecorder()
+		f.handler.ServeHTTP(res, req)
+		return res
+	}
+	original, _ := os.ReadFile(f.target)
+	if r := apply(`"stale"`); r.Code != http.StatusPreconditionFailed {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	after, _ := os.ReadFile(f.target)
+	if !bytes.Equal(original, after) {
+		t.Fatal("stale ETag wrote target")
+	}
+	if r := apply(resource.Header().Get("ETag")); r.Code != http.StatusOK {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	got, err := f.harness.Status(harnessconfig.ClaudeCodeAdapterID)
+	if err != nil || got.State != harnessconfig.StateInSync || got.ActiveProfileID != id || !got.DisableTelemetry {
+		t.Fatalf("full update: %+v %v", got, err)
+	}
+	// Restart-bound updates never write new telemetry into the old active file.
+	value["service"].(map[string]any)["log_max_bytes"] = 2097152
+	cc["disable_telemetry"] = false
+	original, _ = os.ReadFile(f.target)
+	update, err := config.DecodeClientUpdate([]byte(encodeHarnessValue(t, value)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := f.runtime.ApplyClientUpdate(update); err != nil || !result.RestartRequired {
+		t.Fatal(result, err)
+	}
+	after, _ = os.ReadFile(f.target)
+	if !bytes.Equal(original, after) {
+		t.Fatal("pending update wrote target")
+	}
+	r = harnessRequest(f.handler, http.MethodPut, "/api/v1/harnesses/claude-code", `{"disable_telemetry":false}`)
+	if r.Code != http.StatusConflict {
+		t.Fatal(r.Code, r.Body.String())
 	}
 }

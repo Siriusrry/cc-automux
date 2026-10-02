@@ -159,6 +159,7 @@ func New(options Options) (*App, error) {
 		RuntimeContext:          runtimeContext,
 		ScanRequirements:        scanRequirements,
 		HarnessValidator:        harnessValidator,
+		HarnessUpdater:          harnessconfig.NewTelemetryUpdater(harnessValidator),
 		ClassifierAttemptPolicy: scheduler.DefaultClassifierAttemptPolicy(),
 		RestartDelay:            options.RestartDelay,
 		Now:                     options.Now,

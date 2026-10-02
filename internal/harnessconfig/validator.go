@@ -2,6 +2,7 @@ package harnessconfig
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -30,16 +31,21 @@ func NewValidator(registry AdapterRegistry, files *FileStore, protected []string
 }
 
 func (v *Validator) Check(cfg config.Config) (config.HarnessValidation, error) {
+	check, _, _, err := v.inspect(cfg)
+	return check, err
+}
+
+func (v *Validator) inspect(cfg config.Config) (config.HarnessValidation, Adapter, targetState, error) {
 	adapter, ok := v.registry.Lookup(ClaudeCodeAdapterID)
 	if !ok || adapter == nil {
-		return config.HarnessValidation{}, fmt.Errorf("%w: %s", ErrHarnessNotFound, ClaudeCodeAdapterID)
+		return config.HarnessValidation{}, nil, targetState{}, fmt.Errorf("%w: %s", ErrHarnessNotFound, ClaudeCodeAdapterID)
 	}
 	path, err := v.pathFor(cfg, adapter)
 	result := config.HarnessValidation{State: string(StateInactive), ResolvedPath: path}
-	fail := func(state HarnessState, reason string) (config.HarnessValidation, error) {
+	fail := func(state HarnessState, reason string) (config.HarnessValidation, Adapter, targetState, error) {
 		result.State = string(state)
 		result.Reason = reason
-		return result, nil
+		return result, adapter, targetState{}, nil
 	}
 	if err != nil {
 		state, reason := classifyPathError(err)
@@ -47,7 +53,7 @@ func (v *Validator) Check(cfg config.Config) (config.HarnessValidation, error) {
 	}
 	activeID := cfg.Harnesses.ClaudeCode.ActiveProfileID
 	if activeID == "" {
-		return result, nil
+		return result, adapter, targetState{}, nil
 	}
 	profile, ok := v.profileFor(cfg, activeID)
 	if !ok {
@@ -58,17 +64,20 @@ func (v *Validator) Check(cfg config.Config) (config.HarnessValidation, error) {
 		state, reason := classifyProjectionError(err)
 		return fail(state, reason)
 	}
-	target, err := v.files.Read(path)
+	target, err := v.files.readState(path)
+	if err == nil && !target.exists {
+		err = os.ErrNotExist
+	}
 	if err != nil {
 		state, reason := classifyReadError(err)
 		return fail(state, reason)
 	}
-	if err := adapter.Verify(target, projection); err != nil {
+	if err := adapter.Verify(target.data, projection); err != nil {
 		state, reason := classifyVerifyError(err)
 		return fail(state, reason)
 	}
 	result.State = string(StateInSync)
-	return result, nil
+	return result, adapter, target, nil
 }
 
 func normalizeProtectedPaths(paths []string) []string {

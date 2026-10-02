@@ -147,6 +147,18 @@ type HarnessValidator interface {
 	Check(Config) (HarnessValidation, error)
 }
 
+// HarnessFileUpdate coordinates external-file work under the Runtime lock.
+// Commit may have replaced the target even when it returns an error; Rollback
+// must restore only this transaction's own write and never overwrite drift.
+type HarnessFileUpdate interface {
+	Commit() error
+	Rollback() error
+}
+
+type HarnessUpdatePreparer interface {
+	PrepareTelemetry(current, next Config) (HarnessFileUpdate, HarnessValidation, error)
+}
+
 var ErrActiveProfileStateFailed = errors.New("active profile state persistence failed")
 
 // ClaudeCodeConfig is the persistent, file-independent portion of the Claude
@@ -507,35 +519,55 @@ func (current Config) ApplyServerUpdate(next Config) (Config, error) {
 // previously verified active profile stale are unchanged. Unrelated Provider
 // and non-active Profile changes do not invalidate the active record.
 func (current Config) ActiveProfileInputsEqual(next Config) bool {
+	return current.ActiveProfileChange(next) == ActiveInputsUnchanged
+}
+
+type ActiveInputChange uint8
+
+const (
+	ActiveInputsChanged ActiveInputChange = iota
+	ActiveInputsUnchanged
+	ActiveTelemetryChanged
+)
+
+// ActiveProfileChange distinguishes the one managed input that can be applied
+// automatically while retaining a verified activation.
+func (current Config) ActiveProfileChange(next Config) ActiveInputChange {
 	current = current.Normalize()
 	next = next.Normalize()
 	activeID := current.Harnesses.ClaudeCode.ActiveProfileID
 	if activeID == "" || next.Harnesses.ClaudeCode.ActiveProfileID != "" && next.Harnesses.ClaudeCode.ActiveProfileID != activeID {
-		return false
+		return ActiveInputsChanged
 	}
 	if current.Service.ListenAddr != next.Service.ListenAddr || current.Auth.GatewayKey != next.Auth.GatewayKey {
-		return false
+		return ActiveInputsChanged
 	}
 	left := current.Harnesses.ClaudeCode
 	right := next.Harnesses.ClaudeCode
-	if left.PathMode != right.PathMode || (left.PathMode == PathModeCustom && left.SettingsPath != right.SettingsPath) || left.DisableTelemetry != right.DisableTelemetry {
-		return false
+	if left.PathMode != right.PathMode || (left.PathMode == PathModeCustom && left.SettingsPath != right.SettingsPath) {
+		return ActiveInputsChanged
 	}
 	// Names are display-only and attempt limits control only gateway execution.
 	// Neither changes the managed client settings or invalidates activation.
 	leftProfile, leftOK := findProfile(left.Profiles, activeID)
 	rightProfile, rightOK := findProfile(right.Profiles, activeID)
-	return leftOK && rightOK &&
+	if !(leftOK && rightOK &&
 		leftProfile.HaikuModel == rightProfile.HaikuModel && leftProfile.SonnetModel == rightProfile.SonnetModel &&
 		leftProfile.OpusModel == rightProfile.OpusModel && leftProfile.FableModel == rightProfile.FableModel &&
-		leftProfile.SubagentModel == rightProfile.SubagentModel && leftProfile.TeammateDefaultModel == rightProfile.TeammateDefaultModel
+		leftProfile.SubagentModel == rightProfile.SubagentModel && leftProfile.TeammateDefaultModel == rightProfile.TeammateDefaultModel) {
+		return ActiveInputsChanged
+	}
+	if left.DisableTelemetry != right.DisableTelemetry {
+		return ActiveTelemetryChanged
+	}
+	return ActiveInputsUnchanged
 }
 
 func (current Config) prepareServerUpdate(next Config) Config {
 	current = current.Normalize()
 	next = next.Normalize()
 	activeID := current.Harnesses.ClaudeCode.ActiveProfileID
-	if activeID == "" || !current.ActiveProfileInputsEqual(next) {
+	if activeID == "" || current.ActiveProfileChange(next) == ActiveInputsChanged {
 		next.Harnesses.ClaudeCode.ActiveProfileID = ""
 	} else {
 		next.Harnesses.ClaudeCode.ActiveProfileID = activeID

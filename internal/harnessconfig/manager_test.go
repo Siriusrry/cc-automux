@@ -83,6 +83,7 @@ func newHarnessFixture(t *testing.T, gatewayKey string, files ...FileOps) harnes
 	}
 	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
 		HarnessValidator: validator,
+		HarnessUpdater:   NewTelemetryUpdater(validator),
 		RuntimeContext:   context,
 		Preflight:        func(config.Config, config.Config) error { return nil },
 	})
@@ -487,6 +488,7 @@ func TestManagerFinalActivePersistenceFailureStaysInactiveAndCanRetry(t *testing
 	}
 	runtimeManager, err := runtimeconfig.NewManager(store, cfg, runtimeconfig.Options{
 		HarnessValidator: validator,
+		HarnessUpdater:   NewTelemetryUpdater(validator),
 		RuntimeContext:   context,
 		Preflight:        func(config.Config, config.Config) error { return nil },
 	})

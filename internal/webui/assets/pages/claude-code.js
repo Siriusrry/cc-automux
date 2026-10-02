@@ -88,7 +88,7 @@
       ctx.subtitle(['Point Claude Code at the gateway and switch ', h('b', null, 'model-mapping profiles'), ' without editing settings.json by hand']);
       const host = h('div', null, skeleton(4, 60));
       ctx.root.appendChild(host);
-      let disposed = false, generation = 0;
+      let disposed = false, generation = 0, telemetryBusy = false, settingsView = null;
       let pathDraft = null, pathBaseline = null, pathSaving = false;
       const pathDirty = () => pathDraft && !store.same(pathDraft, pathBaseline);
       CCAM.router.setGuard(async () => pathSaving ? false : pathDirty() ? confirm({ title: 'Discard changes?', text: 'The settings path has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
@@ -97,7 +97,7 @@
         const gen = ++generation;
         try {
           const [harness, profiles, providers] = await Promise.all([store.harness(), store.profiles(), store.providers()]);
-          if (disposed || gen !== generation || pathSaving) return;
+          if (disposed || gen !== generation || pathSaving || telemetryBusy) return;
           if (!pathDirty()) {
             pathBaseline = { mode: harness.path_mode, value: harness.settings_path || '' };
             pathDraft = Object.assign({}, pathBaseline);
@@ -117,8 +117,53 @@
         const status = store.state.status;
         const gatewayOk = status ? status.gateway_configured : true;
         const st = STATE[harness.state] || { text: harness.state, kind: 'mist', desc: '' };
-        ctx.actions([h('button', { class: 'btn primary', type: 'button', onclick: async () => { const r = await profileDialog(null, models); if (r) { toast('Profile ' + r.name + ' created'); store.invalidate(); load(); } } }, icon('plus'), 'New profile')]);
+        ctx.actions([h('button', { class: 'btn primary', type: 'button', onclick: async () => { const r = await profileDialog(null, models); if (r) { toast('Profile ' + r.name + ' created'); store.invalidate(); } } }, icon('plus'), 'New profile')]);
 
+        if (!settingsView) settingsView = createSettings(harness, profiles);
+        else settingsView.update(harness, profiles);
+        const settingsCard = settingsView.card;
+
+        // ---- profiles ----
+        const banners = h('div', { class: 'banners' });
+        if (!gatewayOk) banners.appendChild(banner('warn', 'Gateway key required', 'Activation writes the gateway key into settings.json as ANTHROPIC_AUTH_TOKEN, so a profile cannot be activated until the key is set.', [h('a', { class: 'btn sm', href: '#/service' }, 'Set gateway key')]));
+        if (harness.state === 'out_of_sync' || harness.state === 'state_error') banners.appendChild(banner(harness.state === 'state_error' ? 'bad' : 'warn', st.text, harness.last_invalidation_reason || st.desc));
+
+        const rows = profiles.length ? h('div', { class: 'rows' }, profiles.map(p => profileRow(p))) : empty({ title: 'No profiles yet', text: 'A profile names the models Claude Code should use for Haiku, Sonnet, Opus and Fable. Activating one writes those names, the gateway address and key into settings.json.', action: h('button', { class: 'btn primary', type: 'button', onclick: async () => { const r = await profileDialog(null, models); if (r) { store.invalidate(); } } }, icon('plus'), 'New profile') });
+        function profileRow(p) {
+          const isActive = harness.state === 'in_sync' && p.active;
+          const map = h('div', { class: 'p-map' }, MODEL_FIELDS.map(([key, label, env, required]) => (required || p[key]) ? h('div', { class: 'mp' + (required ? '' : ' opt'), 'data-tip': env + ' = ' + p[key] + '\n' + (required ? 'Written into settings.json while this profile is active.' : 'Optional override, written only when set.') }, h('span', { class: 'k' }, label), h('span', { class: 'v' }, p[key])) : null));
+          const activate = h('button', { class: 'btn sm' + (isActive ? '' : ' primary'), type: 'button', disabled: isActive || !gatewayOk, onclick: async () => {
+            activate.disabled = true; replace(activate, h('span', { class: 'spin' }), 'Activating…');
+            try {
+              const r = await api.post('/api/v1/harnesses/claude-code/profiles/' + p.id + '/activate', {});
+              toast(r.idempotent ? p.name + ' was already active' : 'Activated ' + p.name + ' · settings.json updated'); store.invalidate();
+            } catch (e) {
+              const msg = e.code === 'gateway_not_configured' ? 'Set a gateway key before activating a profile.' : e.code === 'harness_config_io_failed' ? 'settings.json could not be written: ' + (e.detail || '') : e.code === 'restart_in_progress' ? 'CC AutoMux is restarting — try again shortly.' : (e.detail || e.message);
+              toast('Activation failed: ' + msg, 'bad'); load();
+            }
+          } }, isActive ? [icon('check'), 'Active'] : [icon('play'), 'Activate']);
+          return h('div', { class: 'profile' + (isActive ? ' active' : '') },
+            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, 'Max attempts per request: ' + p.max_attempts), h('div', { class: 'p-sub' }, 'Sticky attempts before failover: ' + p.sticky_no_cooldown_attempts)),
+            map,
+            h('div', { class: 'p-acts' },
+              wrapTip(activate, !gatewayOk ? 'Set a gateway key before activating a profile.' : isActive ? 'Active — settings.json matches this profile.' : 'Writes this mapping, the gateway address and key into settings.json.'),
+              h('button', { class: 'ib bordered', type: 'button', 'aria-label': 'Edit ' + p.name, 'data-tip': 'Edit profile', onclick: async () => { const r = await profileDialog(p, models); if (r) { toast(r.active ? 'Saved and applied ' + r.name : 'Saved ' + r.name + ' — activate to apply'); store.invalidate(); } } }, icon('edit')),
+              wrapTip(h('button', { class: 'ib bordered danger', type: 'button', 'aria-label': 'Delete ' + p.name, disabled: isActive, onclick: async () => {
+                const ok = await confirm({ title: 'Delete ' + p.name + '?', text: 'The mapping is removed from CC AutoMux. settings.json is not touched.', confirmLabel: 'Delete', danger: true });
+                if (!ok) return;
+                try { await api.del('/api/v1/harnesses/claude-code/profiles/' + p.id); toast(p.name + ' deleted'); store.invalidate(); } catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
+              } }, icon('trash')), isActive ? 'Switch profiles before deleting the active one.' : 'Delete profile')));
+        }
+        const profilesCard = h('div', { class: 'card' },
+          h('div', { class: 'card-head' }, h('div', null, h('p', { class: 'eyebrow' }, 'Model mapping profiles'), h('p', { class: 'lede', style: { margin: 0 } }, 'Claude Code only knows Haiku, Sonnet, Opus and Fable. A profile maps each to a model your providers serve; the gateway then routes by that name.')), pill(fmt.plural(profiles.length, 'profile'), 'mist', 'plain')),
+          banners, rows);
+
+        if (!host.querySelector('.cc-stack')) replace(host, h('div', { class: 'stack cc-stack' }, settingsCard, h('div', { class: 'cc-profiles' })));
+        replace(host.querySelector('.cc-profiles'), profilesCard);
+      }
+
+      function createSettings(harness, profiles) {
+        let st = STATE[harness.state] || { text: harness.state, kind: 'mist', desc: '' };
         // ---- settings file card ----
         let pathMode = pathDraft.mode, pathValue = pathDraft.value;
         const pathIn = input({ id: 'cc-path', value: pathValue, placeholder: '/absolute/path/to/settings.json', oninput: (e) => { pathValue = pathDraft.value = e.target.value; applyBtn.hidden = !pathDirty(); } });
@@ -140,7 +185,7 @@
             const saved = await (verifyPath ? verifyPath() : store.confirmedWrite(() => api.put('/api/v1/harnesses/claude-code', body), () => store.harness(), value => value.path_mode === body.path_mode && value.settings_path === body.settings_path));
             if (disposed) return;
             pathBaseline = { mode: saved.path_mode, value: saved.settings_path || '' };
-            pathDraft = Object.assign({}, pathBaseline); pathSaving = false;
+            pathDraft = Object.assign({}, pathBaseline); pathSaving = false; verifyPath = null;
             toast('Settings path updated'); store.invalidate();
           } catch (e) {
             if (disposed) return;
@@ -155,62 +200,55 @@
           h('div', { class: 'cc-managed' }, MANAGED.map(([k, what]) => h('span', null, h('b', null, 'env.' + k), ' · ' + what)), h('span', { class: 'opt' }, h('b', null, 'env.CLAUDE_CODE_SUBAGENT_MODEL'), ' · optional'), h('span', { class: 'opt' }, h('b', null, 'teammateDefaultModel'), ' · optional, top level')),
           h('p', { class: 'help' }, 'Only these fields are written. Everything else in the file is preserved byte-for-byte in meaning. Before the first write to an existing file a one-time copy is saved as ', h('code', null, '.cc-automux.bak'), ' next to it.')));
 
-        const teleSw = switchCtl({ checked: harness.disable_telemetry, label: 'Disable Claude Code telemetry', onchange: async (v, inp) => {
-          inp.disabled = true;
-          try { await api.put('/api/v1/harnesses/claude-code', { disable_telemetry: v }); toast(v ? 'Telemetry will be disabled on the next activation' : 'Telemetry allowed on the next activation'); store.invalidate(); load(); }
-          catch (e) { inp.checked = !v; inp.disabled = false; toast('Could not update telemetry: ' + (e.detail || e.message), 'bad'); }
+        const retryTelemetry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => finishTelemetry(() => store.harness(), false) }, 'Check telemetry state');
+        const teleSw = switchCtl({ checked: harness.disable_telemetry, label: 'Disable Claude Code telemetry', onchange: async (v) => {
+          if (telemetryBusy) return;
+          telemetryBusy = true; generation++; teleSw.input.disabled = true;
+          await finishTelemetry(() => store.confirmedWrite(() => api.put('/api/v1/harnesses/claude-code', { disable_telemetry: v }), () => store.harness(), value => value.disable_telemetry === v), true);
         } });
+        async function finishTelemetry(run, applied) {
+          retryTelemetry.disabled = true;
+          try {
+            harness = await run();
+            if (disposed) return;
+            if (applied) toast(harness.active_profile_id ? 'Telemetry settings applied' : 'Telemetry preference saved');
+          } catch (e) {
+            if (disposed) return;
+            toast('Could not confirm telemetry: ' + (e.detail || e.message), 'bad');
+            try { harness = await store.harness(); }
+            catch (_) { retryTelemetry.hidden = false; retryTelemetry.disabled = false; return; }
+          }
+          telemetryBusy = false;
+          if (!disposed) { retryTelemetry.hidden = true; teleSw.input.checked = harness.disable_telemetry; teleSw.input.disabled = false; store.invalidate(); }
+        }
         teleSw.setAttribute('data-tip', TELE_FIELDS.map(f => f[0] + ' = "' + f[1] + '"  —  ' + f[2]).join('\n'));
-        const teleBlock = h('div', { class: 'cc-tele' }, h('div', null, teleSw, h('div', { class: 'cc-tele-fields' }, TELE_FIELDS.flatMap(([k, v, d]) => [h('code', null, k + ' = "' + v + '"'), h('span', null, d)]))));
+        const teleBlock = h('div', { class: 'cc-tele' }, h('div', null, teleSw, retryTelemetry, h('div', { class: 'cc-tele-fields' }, TELE_FIELDS.flatMap(([k, v, d]) => [h('code', null, k + ' = "' + v + '"'), h('span', null, d)]))));
 
-        const settingsCard = h('div', { class: 'card' },
-          h('div', { class: 'card-head' }, h('p', { class: 'eyebrow' }, 'Settings file'), tip(pill(st.text, st.kind), () => {
+        const statePill = pill(st.text, st.kind);
+        const card = h('div', { class: 'card' },
+          h('div', { class: 'card-head' }, h('p', { class: 'eyebrow' }, 'Settings file'), tip(statePill, () => {
             const active = profiles.find(x => x.active);
-            return tipBlock({ title: st.text, rows: [['Settings file', harness.resolved_settings_path, 'mono'], ['Active profile', active ? active.name : 'none'], ['Telemetry', harness.disable_telemetry ? 'disabled on activation' : 'allowed']], note: harness.last_invalidation_reason || st.desc });
+            return tipBlock({ title: st.text, rows: [['Settings file', harness.resolved_settings_path, 'mono'], ['Active profile', active ? active.name : 'none'], ['Telemetry', harness.disable_telemetry ? 'disabled' : 'allowed']], note: harness.last_invalidation_reason || st.desc });
           })),
           h('div', { class: 'cc-state' }, h('span', { class: 'reason' }, harness.last_invalidation_reason ? harness.last_invalidation_reason : st.desc)),
           pathField, h('div', { style: { height: '14px' } }), managed,
           h('hr', { class: 'hr' }),
           h('p', { class: 'eyebrow' }, 'Telemetry'),
-          h('p', { class: 'lede' }, 'Written together with the model mapping on every activation. Hover the switch to see the exact fields.'),
+          h('p', { class: 'lede' }, 'Applied immediately while a profile is active. Otherwise saved for the next activation. Hover the switch to see the exact fields.'),
           teleBlock);
 
-        // ---- profiles ----
-        const banners = h('div', { class: 'banners' });
-        if (!gatewayOk) banners.appendChild(banner('warn', 'Gateway key required', 'Activation writes the gateway key into settings.json as ANTHROPIC_AUTH_TOKEN, so a profile cannot be activated until the key is set.', [h('a', { class: 'btn sm', href: '#/service' }, 'Set gateway key')]));
-        if (harness.state === 'out_of_sync' || harness.state === 'state_error') banners.appendChild(banner(harness.state === 'state_error' ? 'bad' : 'warn', st.text, harness.last_invalidation_reason || st.desc));
-
-        const rows = profiles.length ? h('div', { class: 'rows' }, profiles.map(p => profileRow(p))) : empty({ title: 'No profiles yet', text: 'A profile names the models Claude Code should use for Haiku, Sonnet, Opus and Fable. Activating one writes those names, the gateway address and key into settings.json.', action: h('button', { class: 'btn primary', type: 'button', onclick: async () => { const r = await profileDialog(null, models); if (r) { store.invalidate(); load(); } } }, icon('plus'), 'New profile') });
-        function profileRow(p) {
-          const isActive = harness.state === 'in_sync' && p.active;
-          const map = h('div', { class: 'p-map' }, MODEL_FIELDS.map(([key, label, env, required]) => (required || p[key]) ? h('div', { class: 'mp' + (required ? '' : ' opt'), 'data-tip': env + ' = ' + p[key] + '\n' + (required ? 'Written into settings.json while this profile is active.' : 'Optional override, written only when set.') }, h('span', { class: 'k' }, label), h('span', { class: 'v' }, p[key])) : null));
-          const activate = h('button', { class: 'btn sm' + (isActive ? '' : ' primary'), type: 'button', disabled: isActive || !gatewayOk, onclick: async () => {
-            activate.disabled = true; replace(activate, h('span', { class: 'spin' }), 'Activating…');
-            try {
-              const r = await api.post('/api/v1/harnesses/claude-code/profiles/' + p.id + '/activate', {});
-              toast(r.idempotent ? p.name + ' was already active' : 'Activated ' + p.name + ' · settings.json updated'); store.invalidate(); load();
-            } catch (e) {
-              const msg = e.code === 'gateway_not_configured' ? 'Set a gateway key before activating a profile.' : e.code === 'harness_config_io_failed' ? 'settings.json could not be written: ' + (e.detail || '') : e.code === 'restart_in_progress' ? 'CC AutoMux is restarting — try again shortly.' : (e.detail || e.message);
-              toast('Activation failed: ' + msg, 'bad'); load();
-            }
-          } }, isActive ? [icon('check'), 'Active'] : [icon('play'), 'Activate']);
-          return h('div', { class: 'profile' + (isActive ? ' active' : '') },
-            h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, 'Max attempts per request: ' + p.max_attempts), h('div', { class: 'p-sub' }, 'Sticky attempts before failover: ' + p.sticky_no_cooldown_attempts)),
-            map,
-            h('div', { class: 'p-acts' },
-              wrapTip(activate, !gatewayOk ? 'Set a gateway key before activating a profile.' : isActive ? 'Active — settings.json matches this profile.' : 'Writes this mapping, the gateway address and key into settings.json.'),
-              h('button', { class: 'ib bordered', type: 'button', 'aria-label': 'Edit ' + p.name, 'data-tip': 'Edit profile', onclick: async () => { const r = await profileDialog(p, models); if (r) { toast(r.active ? 'Saved and applied ' + r.name : 'Saved ' + r.name + ' — activate to apply'); store.invalidate(); load(); } } }, icon('edit')),
-              wrapTip(h('button', { class: 'ib bordered danger', type: 'button', 'aria-label': 'Delete ' + p.name, disabled: isActive, onclick: async () => {
-                const ok = await confirm({ title: 'Delete ' + p.name + '?', text: 'The mapping is removed from CC AutoMux. settings.json is not touched.', confirmLabel: 'Delete', danger: true });
-                if (!ok) return;
-                try { await api.del('/api/v1/harnesses/claude-code/profiles/' + p.id); toast(p.name + ' deleted'); store.invalidate(); load(); } catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
-              } }, icon('trash')), isActive ? 'Switch profiles before deleting the active one.' : 'Delete profile')));
-        }
-        const profilesCard = h('div', { class: 'card' },
-          h('div', { class: 'card-head' }, h('div', null, h('p', { class: 'eyebrow' }, 'Model mapping profiles'), h('p', { class: 'lede', style: { margin: 0 } }, 'Claude Code only knows Haiku, Sonnet, Opus and Fable. A profile maps each to a model your providers serve; the gateway then routes by that name.')), pill(fmt.plural(profiles.length, 'profile'), 'mist', 'plain')),
-          banners, rows);
-
-        replace(host, h('div', { class: 'stack' }, settingsCard, profilesCard));
+        return { card, update(nextHarness, nextProfiles) {
+          harness = nextHarness; profiles = nextProfiles;
+          st = STATE[harness.state] || { text: harness.state, kind: 'mist', desc: '' };
+          const nextPill = pill(st.text, st.kind); statePill.className = nextPill.className; statePill.textContent = st.text;
+          card.querySelector('.reason').textContent = harness.last_invalidation_reason || st.desc;
+          pathField.querySelector('.cc-path').textContent = 'Resolves to ' + harness.resolved_settings_path;
+          pathMode = pathDraft.mode; pathValue = pathDraft.value;
+          if (pathIn.value !== pathValue) pathIn.value = pathValue;
+          pathIn.hidden = pathMode !== 'custom'; pathSeg.setValue(pathMode); applyBtn.hidden = !pathDirty();
+          if (!pathSaving) { pathSeg.inert = false; pathIn.disabled = false; applyBtn.disabled = false; applyBtn.textContent = 'Apply path'; }
+          if (!telemetryBusy) teleSw.input.checked = harness.disable_telemetry;
+        } };
       }
 
       load();

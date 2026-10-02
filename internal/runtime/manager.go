@@ -53,6 +53,7 @@ type Options struct {
 	RuntimeContext          provider.RuntimeContext
 	ScanRequirements        ScanRequirements
 	HarnessValidator        config.HarnessValidator
+	HarnessUpdater          config.HarnessUpdatePreparer
 	ClassifierAttemptPolicy scheduler.AttemptPolicy
 	// Preflight runs after full schema/provider compilation but before the
 	// pending file is written. Nil uses a loopback listener probe when the
@@ -238,6 +239,7 @@ type Manager struct {
 	current          atomic.Pointer[Snapshot]
 	revision         uint64
 	harnessValidator config.HarnessValidator
+	harnessUpdater   config.HarnessUpdatePreparer
 	// Mutation-locked diagnostic history, never a second activation record.
 	harnessInvalidationReason string
 	activeProfileInvalid      bool
@@ -295,6 +297,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	m := &Manager{
 		store:                store,
 		harnessValidator:     options.HarnessValidator,
+		harnessUpdater:       options.HarnessUpdater,
 		runtimeContext:       context,
 		scanRequirements:     options.ScanRequirements,
 		revision:             1,
@@ -542,6 +545,9 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 	}
 	currentSnapshot := m.current.Load()
 	currentConfig := currentSnapshot.Config()
+	restartRequired := serviceRestartRequired(currentConfig.Service, next.Service)
+	telemetry := !restartRequired && currentConfig.ActiveProfileChange(next) == config.ActiveTelemetryChanged
+	var fileUpdate config.HarnessFileUpdate
 	checked := forceCheck || !reflect.DeepEqual(currentConfig.Harnesses, next.Harnesses)
 	// guard is the activation guard that takes effect only if this transaction
 	// commits; the manager field is untouched on every failure path.
@@ -549,7 +555,14 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 	invalidated := false
 	if checked {
 		var err error
-		check, err = m.checkHarness(next)
+		if telemetry {
+			if m.harnessUpdater == nil {
+				return ApplyResult{}, check, fmt.Errorf("%w: harness updater is required", config.ErrActiveProfileStateFailed)
+			}
+			fileUpdate, check, err = m.harnessUpdater.PrepareTelemetry(currentConfig, next)
+		} else {
+			check, err = m.checkHarness(next)
+		}
 		if err != nil {
 			return ApplyResult{}, check, err
 		}
@@ -571,14 +584,21 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 		}, check, nil
 	}
 
-	restartRequired := serviceRestartRequired(currentConfig.Service, next.Service)
 	if !restartRequired {
 		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
 		if err != nil {
 			return ApplyResult{}, check, err
 		}
+		if fileUpdate != nil {
+			if err := fileUpdate.Commit(); err != nil {
+				return ApplyResult{}, check, m.recoverHarnessUpdateLocked(fileUpdate, err)
+			}
+		}
 		if !reflect.DeepEqual(currentConfig, next) {
 			if err := m.store.Save(next); err != nil {
+				if fileUpdate != nil {
+					return ApplyResult{}, check, m.recoverHarnessUpdateLocked(fileUpdate, fmt.Errorf("persist active configuration: %w", err))
+				}
 				if invalidated {
 					// The stale activation must not keep serving its budget even
 					// though the cleared ID could not be persisted.
@@ -621,6 +641,32 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 		Restarting:      true,
 		ListenAddr:      next.Service.ListenAddr,
 	}, check, nil
+}
+
+// Restore only our own target write. If the old projection cannot be proved,
+// revoke its policy even when persisting the cleared ID also fails.
+func (m *Manager) recoverHarnessUpdateLocked(update config.HarnessFileUpdate, cause error) error {
+	restoreErr := update.Rollback()
+	current := m.current.Load()
+	cfg := current.Config()
+	check, checkErr := m.checkHarness(cfg)
+	if restoreErr == nil && checkErr == nil && check.State == "in_sync" {
+		return cause
+	}
+	m.activeProfileInvalid = true
+	m.harnessInvalidationReason = check.Reason
+	cfg.Harnesses.ClaudeCode.ActiveProfileID = ""
+	if err := m.store.Save(cfg); err != nil {
+		m.invalidatePolicyLocked()
+		return errors.Join(cause, restoreErr, checkErr, fmt.Errorf("%w: %v", config.ErrActiveProfileStateFailed, err))
+	}
+	next := *current
+	m.revision++
+	next.revision, next.created = m.revision, m.now()
+	next.config = cfg
+	next.normalAttempts = defaultNormalAttemptPolicy()
+	m.current.Store(&next)
+	return errors.Join(cause, restoreErr, checkErr, config.ErrActiveProfileStateFailed)
 }
 
 // PrepareRestart reserves the pending transaction and returns a starter that

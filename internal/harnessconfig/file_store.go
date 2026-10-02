@@ -152,38 +152,71 @@ func (s *FileStore) Read(path string) ([]byte, error) {
 // one-time sibling backup when required, atomically replaces the target, and
 // rereads/verifies the committed bytes. It returns the verified final bytes.
 func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjection) ([]byte, error) {
+	prepared, err := s.Prepare(path, adapter, projection)
+	if err != nil {
+		return nil, err
+	}
+	return prepared.Commit()
+}
+
+// PreparedFile owns the original bytes and the proposed projection. Preparing
+// does not write anything; commit and conditional rollback use the same safe
+// replacement core as explicit activation.
+type PreparedFile struct {
+	store      *FileStore
+	path       string
+	adapter    Adapter
+	projection ManagedProjection
+	original   targetState
+	merged     []byte
+	written    *targetState
+}
+
+func (s *FileStore) readState(path string) (targetState, error) {
+	if s == nil || s.fs == nil {
+		return targetState{}, ErrNilFileSystem
+	}
+	if err := validateTargetPath(path); err != nil {
+		return targetState{}, err
+	}
+	data, exists, err := s.readExisting(path)
+	if err != nil {
+		return targetState{}, err
+	}
+	state := targetState{exists: exists, data: data}
+	if exists {
+		state.info, err = s.fs.Lstat(path)
+		if err != nil {
+			return targetState{}, fileError("inspect target", path, ErrTargetIO, err)
+		}
+	}
+	return state, nil
+}
+
+func (s *FileStore) Prepare(path string, adapter Adapter, projection ManagedProjection) (*PreparedFile, error) {
 	if s == nil || s.fs == nil {
 		return nil, ErrNilFileSystem
-	}
-	if isNilAdapter(adapter) {
-		return nil, ErrNilAdapter
 	}
 	if err := validateTargetPath(path); err != nil {
 		return nil, err
 	}
-	backupPath := BackupPath(path)
-	if samePath(path, backupPath) {
+	state, err := s.readState(path)
+	if err != nil {
+		return nil, err
+	}
+	return s.prepare(path, adapter, projection, state)
+}
+
+func (s *FileStore) prepare(path string, adapter Adapter, projection ManagedProjection, state targetState) (*PreparedFile, error) {
+	if isNilAdapter(adapter) {
+		return nil, ErrNilAdapter
+	}
+	if samePath(path, BackupPath(path)) {
 		return nil, ErrPathConflict
 	}
-	directory := filepath.Dir(path)
-
-	original, targetExists, err := s.readExisting(path)
-	if err != nil {
-		return nil, err
-	}
-	state := targetState{exists: targetExists, data: append([]byte(nil), original...)}
-	if targetExists {
-		state.info, err = s.fs.Lstat(path)
-		if err != nil {
-			return nil, fileError("inspect target", path, ErrTargetIO, err)
-		}
-	}
-	if !targetExists {
+	original := state.data
+	if !state.exists {
 		original = []byte("{}")
-	}
-	backupExists, err := s.inspectBackup(backupPath)
-	if err != nil {
-		return nil, err
 	}
 	merged, err := adapter.Merge(original, projection)
 	if err != nil {
@@ -192,59 +225,89 @@ func (s *FileStore) Apply(path string, adapter Adapter, projection ManagedProjec
 	if err := adapter.Verify(merged, projection); err != nil {
 		return nil, fmt.Errorf("%w: pre-write verification: %w", ErrVerification, err)
 	}
-	// Do not create parent directories until all validation and merge work has
-	// succeeded. If a later pre-commit operation fails, remove only the empty
-	// directories created by this attempt.
-	cleanupDirectories, err := s.prepareDirectory(directory)
+	return &PreparedFile{store: s, path: path, adapter: adapter, projection: projection, original: state, merged: merged}, nil
+}
+
+func (p *PreparedFile) Commit() ([]byte, error) {
+	if p.written != nil {
+		return nil, errors.New("target update was already committed")
+	}
+	s := p.store
+	backupPath := BackupPath(p.path)
+	backupExists, err := s.inspectBackup(backupPath)
 	if err != nil {
 		return nil, err
 	}
-	committed := false
+	cleanup, err := s.prepareDirectory(filepath.Dir(p.path))
+	if err != nil {
+		return nil, err
+	}
 	defer func() {
-		if !committed {
-			cleanupDirectories()
+		if p.written == nil {
+			cleanup()
 		}
 	}()
-
-	if targetExists && !backupExists {
-		if _, err := s.createBackup(backupPath, original); err != nil {
+	if p.original.exists && !backupExists {
+		if _, err := s.createBackup(backupPath, p.original.data); err != nil {
 			return nil, err
 		}
 	}
-	temporaryPath, err := s.writeTemporary(directory, merged)
+	p.written, err = s.replacePrepared(p.path, p.original, p.merged)
 	if err != nil {
 		return nil, err
 	}
-	temporaryOwned := true
-	defer func() {
-		if temporaryOwned {
-			_ = s.fs.Remove(temporaryPath)
-		}
-	}()
+	final, err := s.Read(p.path)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.adapter.Verify(final, p.projection); err != nil {
+		return nil, fmt.Errorf("%w: committed target: %w", ErrVerification, err)
+	}
+	return final, nil
+}
 
-	if err := s.checkTargetBeforeReplace(path, state); err != nil {
+// Rollback restores this operation's original bytes, not the historical backup.
+func (p *PreparedFile) Rollback() error {
+	if p.written == nil {
+		return nil
+	}
+	if !p.original.exists {
+		if err := p.store.checkTargetBeforeReplace(p.path, *p.written); err != nil {
+			return err
+		}
+		if err := p.store.fs.Remove(p.path); err != nil {
+			return err
+		}
+	} else {
+		if _, err := p.store.replacePrepared(p.path, *p.written, p.original.data); err != nil {
+			return err
+		}
+	}
+	p.written = nil
+	return nil
+}
+
+// A non-nil returned state means replacement happened, even if a subsequent
+// verification outside this function fails.
+func (s *FileStore) replacePrepared(path string, expected targetState, data []byte) (*targetState, error) {
+	directory := filepath.Dir(path)
+	temporaryPath, err := s.writeTemporary(directory, data)
+	if err != nil {
+		return nil, err
+	}
+	defer s.fs.Remove(temporaryPath)
+	info, err := s.fs.Lstat(temporaryPath)
+	if err != nil {
+		return nil, fileError("inspect temporary target", temporaryPath, ErrTargetIO, err)
+	}
+	if err := s.checkTargetBeforeReplace(path, expected); err != nil {
 		return nil, err
 	}
 	if err := atomicReplace(s.fs, temporaryPath, path); err != nil {
 		return nil, fileError("atomically replace target", path, ErrAtomicReplace, err)
 	}
-	// Rename is the committed state transition. Directory synchronization is
-	// best effort and must not turn a successful replacement into a false error.
-	temporaryOwned = false
-	committed = true
 	_ = s.fs.SyncDirectory(directory)
-
-	final, exists, err := s.readExisting(path)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, fileError("verify replaced target", path, ErrTargetIO, os.ErrNotExist)
-	}
-	if err := adapter.Verify(final, projection); err != nil {
-		return nil, fmt.Errorf("%w: committed target: %w", ErrVerification, err)
-	}
-	return final, nil
+	return &targetState{exists: true, info: info, data: data}, nil
 }
 
 // prepareDirectory creates the target's parent and returns a cleanup function

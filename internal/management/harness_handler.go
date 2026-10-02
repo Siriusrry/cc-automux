@@ -220,6 +220,9 @@ func (h *Handler) writeHarnessDecodeError(w http.ResponseWriter, err error) {
 
 func (h *Handler) writeHarnessError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, harnessconfig.ErrActiveProfileStateFailed):
+		writeError(w, http.StatusInternalServerError, "active_profile_state_failed", "active profile state could not be persisted")
+
 	case errors.Is(err, runtime.ErrRestartInProgress):
 		writeError(w, http.StatusConflict, "restart_in_progress", "restart_in_progress")
 	case errors.Is(err, harnessconfig.ErrHarnessNotFound):
@@ -238,8 +241,6 @@ func (h *Handler) writeHarnessError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "harness_config_conflict", "harness target configuration conflicts with the requested operation")
 	case errors.Is(err, harnessconfig.ErrHarnessConfigIOFailed):
 		writeError(w, http.StatusInternalServerError, "harness_config_io_failed", "harness target configuration could not be written")
-	case errors.Is(err, harnessconfig.ErrActiveProfileStateFailed):
-		writeError(w, http.StatusInternalServerError, "active_profile_state_failed", "active profile state could not be persisted")
 	case errors.Is(err, harnessconfig.ErrInvalidPathConfig), errors.Is(err, harnessconfig.ErrInvalidTargetPath),
 		errors.Is(err, harnessconfig.ErrInvalidActivation), errors.Is(err, harnessconfig.ErrInvalidModel),
 		errors.Is(err, harnessconfig.ErrInvalidProjection):
