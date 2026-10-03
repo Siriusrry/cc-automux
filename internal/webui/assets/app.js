@@ -33,6 +33,7 @@
   let currentCleanup = null;
   let uptimeTimer = null;
   let lastStatusAt = 0;
+  const narrowLayout = window.matchMedia('(max-width: 900px)');
 
   function renderLogin(reason) {
     teardownPage();
@@ -55,24 +56,36 @@
     };
     const signOutHandler = () => { CCAM.store.reset(); CCAM.auth.logout(); };
     const signOut = h('button', { class: 'btn quiet sm', type: 'button', onclick: signOutHandler }, icon('logout'), 'Sign out');
+    const brandStatus = h('div', { class: 'brand-status' });
     const side = h('aside', { class: 'side' },
-      h('div', { class: 'brand' }, mascot(), h('div', null, h('div', { class: 'name' }, 'CC AutoMux'), h('div', { class: 'ver' }, VERSION)),
-        h('div', { class: 'brand-tools' }, makeThemeSeg(), h('button', { class: 'ib bordered', type: 'button', 'aria-label': 'Sign out', 'data-tip': 'Sign out', onclick: signOutHandler }, icon('logout')))),
+      h('header', { class: 'brand-header' },
+        h('div', { class: 'brand' }, mascot(), h('div', null, h('div', { class: 'name' }, 'CC AutoMux'), h('div', { class: 'ver' }, VERSION)),
+          h('div', { class: 'brand-tools' }, makeThemeSeg(), h('button', { class: 'ib bordered', type: 'button', 'aria-label': 'Sign out', 'data-tip': 'Sign out', onclick: signOutHandler }, icon('logout')))),
+        brandStatus),
       h('nav', { class: 'nav', 'aria-label': 'Sections' }, navLinks),
       h('div', { class: 'side-foot' }, h('div', { class: 'foot-row' }, makeThemeSeg(), signOut), h('div', { class: 'side-note' }, 'Loopback only · 127.0.0.1'))
     );
     const titleEl = h('h1', null, '');
     const subEl = h('div', { class: 'sub' }, '');
-    const chips = h('div', { class: 'status-chips' });
+    const chips = h('div', { class: 'status-chips', role: 'group', 'aria-label': 'Service status' });
     const actionsEl = h('div', { class: 'page-actions' });
+    const headActions = h('div', { class: 'actions' }, chips, actionsEl);
     const pageHost = h('div', { id: 'page' });
     const main = h('main', { class: 'main' }, h('div', { class: 'main-in' },
-      h('div', { class: 'page-head' }, h('div', { class: 'page-heading' }, titleEl, subEl), h('div', { class: 'actions' }, chips, actionsEl)),
+      h('div', { class: 'page-head' }, h('div', { class: 'page-heading' }, titleEl, subEl), headActions),
       pageHost));
     root.appendChild(h('div', { class: 'app' }, side, main));
-    shell = { navLinks, pageHost, titleEl, subEl, actionsEl, chips };
+    shell = { navLinks, pageHost, titleEl, subEl, actionsEl, chips, brandStatus, headActions };
+    placeStatus();
     renderChips();
   }
+
+  function placeStatus() {
+    if (!shell) return;
+    const host = narrowLayout.matches ? shell.brandStatus : shell.headActions;
+    if (shell.chips.parentNode !== host) host.prepend(shell.chips);
+  }
+  narrowLayout.addEventListener('change', placeStatus);
 
   function renderChips() {
     if (!shell) return;
