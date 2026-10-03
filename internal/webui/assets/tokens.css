@@ -48,6 +48,9 @@
   --mono: ui-monospace, "SF Mono", Menlo, Monaco, "Courier New", monospace;
 
   --dur: 150ms;
+  --motion-control: 220ms;
+  --motion-position: 240ms;
+  --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --side-w: 236px;
 }
 
@@ -86,5 +89,5 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root { --dur: 0ms; }
+  :root { --dur: 0ms; --motion-control: 0ms; --motion-position: 0ms; }
 }

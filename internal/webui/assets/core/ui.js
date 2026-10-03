@@ -31,7 +31,13 @@
     if (child instanceof Node) { el.appendChild(child); return; }
     el.appendChild(document.createTextNode(String(child)));
   }
-  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
+  const cleanups = new WeakMap();
+  function disposeTree(el) {
+    const cleanup = cleanups.get(el);
+    if (cleanup) { cleanups.delete(el); cleanup(); }
+    Array.from(el.children || []).forEach(disposeTree);
+  }
+  function clear(el) { while (el.firstChild) { disposeTree(el.firstChild); el.removeChild(el.firstChild); } return el; }
   function replace(el) { clear(el); for (let i = 1; i < arguments.length; i++) append(el, arguments[i]); return el; }
   function frag() { const f = document.createDocumentFragment(); for (let i = 0; i < arguments.length; i++) append(f, arguments[i]); return f; }
 
@@ -320,19 +326,30 @@
 
   function seg(opts) {
     const wrap = h('div', { class: 'seg' + (opts.class ? ' ' + opts.class : ''), role: 'radiogroup', 'aria-label': opts.ariaLabel || '' });
-    let value = opts.value;
-    // An icon-only option has no text node to name it, so it takes its accessible name from the hover text (or,
-    // failing that, its value). A tooltip is not an accessible name.
+    const indicator = h('span', { class: 'seg-indicator', 'aria-hidden': 'true' });
+    wrap.appendChild(indicator);
+    let value = opts.value, ready = false;
     const buttons = opts.options.map(o => h('button', { type: 'button', role: 'radio', 'aria-checked': String(o.value === value), dataset: { value: o.value }, disabled: !!o.disabled, 'data-tip': o.title || undefined, 'aria-label': o.label ? undefined : (o.title || o.aria || String(o.value)) },
       o.icon ? icon(o.icon) : null, o.label, o.count !== undefined ? h('span', { class: 'seg-c' }, String(o.count)) : null));
-    const setValue = (v, emit) => {
-      value = v; buttons.forEach(b => { b.setAttribute('aria-checked', String(b.dataset.value === String(v))); b.tabIndex = b.dataset.value === String(v) ? 0 : -1; });
-      if (emit && opts.onchange) opts.onchange(v);
-    };
+    function position(animate) {
+      const button = buttons.find(b => b.dataset.value === String(value));
+      if (!button || !button.offsetWidth) { ready = false; return; }
+      indicator.classList.toggle('moving', !!animate && ready);
+      const rect = button.getBoundingClientRect(), parent = wrap.getBoundingClientRect();
+      Object.assign(indicator.style, { width: rect.width + 'px', height: rect.height + 'px', transform: 'translate(' + (rect.left - parent.left - wrap.clientLeft) + 'px,' + (rect.top - parent.top - wrap.clientTop) + 'px)' });
+      indicator.hidden = false; ready = true;
+    }
+    function setValue(v, emit) {
+      const changed = value !== v;
+      value = v;
+      buttons.forEach(b => { b.setAttribute('aria-checked', String(b.dataset.value === String(v))); b.tabIndex = b.dataset.value === String(v) ? 0 : -1; });
+      if (changed || !ready) position(emit);
+      if (changed && emit && opts.onchange) opts.onchange(v);
+    }
     buttons.forEach((b, i) => {
-      b.addEventListener('click', () => setValue(b.dataset.value, true));
+      b.addEventListener('click', () => { if (!b.disabled) setValue(b.dataset.value, true); });
       b.addEventListener('keydown', (e) => {
-        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
         e.preventDefault();
         const dir = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1 : -1;
         let j = i; do { j = (j + dir + buttons.length) % buttons.length; } while (buttons[j].disabled && j !== i);
@@ -340,7 +357,11 @@
       });
       wrap.appendChild(b);
     });
+    indicator.hidden = true;
     setValue(value, false);
+    const observer = new ResizeObserver(() => position(false));
+    observer.observe(wrap); buttons.forEach(b => observer.observe(b));
+    cleanups.set(wrap, () => observer.disconnect());
     wrap.setValue = (v) => setValue(v, false);
     wrap.getValue = () => value;
     return wrap;
@@ -348,11 +369,16 @@
 
   let switchSeq = 0;
   function switchCtl(opts) {
-    const inp = h('input', { type: 'checkbox', checked: !!opts.checked, disabled: !!opts.disabled, id: opts.id || ('sw-' + (++switchSeq)), name: opts.name || opts.id || ('sw-' + switchSeq) });
+    let busy = false, disabled = !!opts.disabled;
+    const inp = h('input', { type: 'checkbox', checked: !!opts.checked, disabled, id: opts.id || ('sw-' + (++switchSeq)), name: opts.name || opts.id || ('sw-' + switchSeq) });
     const lab = h('label', { class: 'sw' + (opts.class ? ' ' + opts.class : ''), 'data-tip': opts.tip || undefined }, inp, h('span', { class: 'track' }),
       opts.label ? h('span', null, opts.label, opts.sub ? h('span', { class: 'sw-sub' }, ' · ' + opts.sub) : null) : null);
-    if (opts.onchange) inp.addEventListener('change', () => opts.onchange(inp.checked, inp));
+    inp.addEventListener('click', e => { if (busy) e.preventDefault(); });
+    if (opts.onchange) inp.addEventListener('change', () => { if (!busy && !disabled) opts.onchange(inp.checked, inp); });
     lab.input = inp;
+    lab.setChecked = value => { inp.checked = !!value; };
+    lab.setBusy = value => { busy = !!value; lab.classList.toggle('busy', busy); lab.setAttribute('aria-busy', String(busy)); inp.setAttribute('aria-disabled', String(busy || disabled)); };
+    lab.setDisabled = value => { disabled = !!value; inp.disabled = disabled; inp.setAttribute('aria-disabled', String(busy || disabled)); };
     return lab;
   }
 

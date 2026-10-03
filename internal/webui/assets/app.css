@@ -235,20 +235,24 @@ textarea.in { resize: vertical; min-height: 96px; line-height: 1.5; }
 .chk .opt { font-weight: 500; color: var(--mist-2); font-size: 12px; }
 
 /* Segmented control */
-.seg { display: inline-flex; padding: 4px; gap: 4px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 999px; max-width: 100%; }
+.seg { position: relative; isolation: isolate; display: inline-flex; padding: 4px; gap: 4px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 999px; max-width: 100%; }
 .seg button {
+  position: relative; z-index: 1;
   font-family: var(--font); font-size: 13px; font-weight: 600; color: var(--mist); background: none; border: none;
-  padding: 7px 15px; border-radius: 999px; transition: background var(--dur), color var(--dur), box-shadow var(--dur); white-space: nowrap;
+  padding: 7px 15px; border-radius: 999px; transition: color var(--motion-control) var(--motion-ease); white-space: nowrap;
   display: inline-flex; align-items: center; gap: 7px;
 }
 .seg button:hover { color: var(--paper); }
-.seg button[aria-checked="true"] { background: var(--iris); color: #fff; box-shadow: 0 6px 16px -8px rgba(77, 99, 240, 0.7); }
+.seg-indicator { position: absolute; left: 0; top: 0; pointer-events: none; border-radius: 999px; background: var(--iris); box-shadow: 0 6px 16px -8px rgba(77, 99, 240, 0.7); }
+.seg-indicator.moving { transition: transform var(--motion-control) var(--motion-ease), width var(--motion-control) var(--motion-ease), height var(--motion-control) var(--motion-ease); }
+.seg button[aria-checked="true"] { color: #fff; }
 .seg button[aria-checked="true"] .seg-c { color: rgba(255, 255, 255, 0.8); }
 .seg button .seg-c { font-family: var(--mono); font-size: 10.5px; color: var(--mist-2); }
 .seg.sm button { padding: 5px 11px; font-size: 12.5px; }
 .seg.icons button { padding: 6px 9px; }
 .seg.icons svg { width: 15px; height: 15px; }
-.seg.quiet button[aria-checked="true"] { background: var(--card); color: var(--paper); box-shadow: var(--shadow-sm); }
+.seg.quiet .seg-indicator { background: var(--card); box-shadow: var(--shadow-sm); }
+.seg.quiet button[aria-checked="true"] { color: var(--paper); }
 .seg.auth-header { flex-wrap: nowrap; border-radius: 999px; }
 /* Intrinsic text widths determine each option's share of the shrinkage. */
 .seg.auth-header button { flex: 0 1 auto; min-width: 0; padding: 7px 15px; }
@@ -257,12 +261,13 @@ textarea.in { resize: vertical; min-height: 96px; line-height: 1.5; }
 /* Switch */
 .sw { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--paper); user-select: none; }
 .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
-.sw .track { position: relative; width: 42px; height: 24px; border-radius: 999px; background: var(--line-2); transition: background var(--dur); flex: none; }
-.sw .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform var(--dur); }
+.sw .track { position: relative; width: 42px; height: 24px; border-radius: 999px; background: var(--line-2); transition: background var(--motion-control) var(--motion-ease), opacity var(--motion-control) var(--motion-ease); flex: none; }
+.sw .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform var(--motion-control) var(--motion-ease), box-shadow var(--motion-control) var(--motion-ease); }
 .sw input:checked + .track { background: var(--iris); }
 .sw input:checked + .track::after { transform: translateX(18px); }
 .sw input:focus-visible + .track { box-shadow: 0 0 0 4px var(--iris-ring); }
-.sw input:disabled + .track { opacity: 0.45; cursor: not-allowed; }
+.sw:not(.busy) input:disabled + .track { opacity: 0.45; cursor: not-allowed; }
+.sw.busy { cursor: progress; }
 .sw.ok input:checked + .track { background: var(--emerald); }
 .sw .sw-sub { font-weight: 500; color: var(--mist); font-size: 12.5px; }
 

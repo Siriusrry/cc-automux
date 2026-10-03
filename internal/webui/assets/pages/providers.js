@@ -24,10 +24,15 @@
       ctx.actions([h('a', { class: 'btn primary', href: '#/providers/new' }, icon('plus'), 'Add provider')]);
       const host = h('div', null, skeleton(4, 68));
       ctx.root.appendChild(host);
-      let disposed = false;
+      let disposed = false, loadEpoch = 0;
       let patchIndex = {};
-      let loadEpoch = 0;
-
+      const views = new Map(), groups = new Map(), busy = new Set();
+      const listHost = h('div');
+      replace(host, listHost);
+      function place(parent, nodes) {
+        nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] || null); });
+        while (parent.children.length > nodes.length) parent.lastElementChild.remove();
+      }
       async function load() {
         const epoch = ++loadEpoch;
         try {
@@ -36,63 +41,89 @@
           patchIndex = {};
           (Array.isArray(patchList) ? patchList : (patchList && patchList.patches) || []).forEach(x => { patchIndex[x.id] = x; });
           render(data.providers);
-        } catch (e) { if (!disposed && epoch === loadEpoch) replace(host, errorCard(e.detail || e.message, load)); }
+        } catch (e) { if (!disposed && epoch === loadEpoch) toast('Could not refresh providers: ' + (e.detail || e.message), 'bad'); }
       }
       function render(list) {
         ctx.subtitle([h('b', null, fmt.plural(list.length, 'provider')), ' · upstreams that speak the Anthropic Messages API, scheduled by priority']);
         if (!list.length) {
-          replace(host, h('div', { class: 'card' }, empty({ title: 'No providers yet', text: 'Add an upstream that accepts the Anthropic Messages API directly. CC AutoMux appends /v1/messages to its base URL and does no protocol conversion for normal traffic.', action: h('a', { class: 'btn primary', href: '#/providers/new' }, icon('plus'), 'Add provider') })));
+          views.clear(); groups.clear();
+          replace(listHost, h('div', { class: 'card' }, empty({ title: 'No providers yet', text: 'Add an upstream that accepts the Anthropic Messages API directly. CC AutoMux appends /v1/messages to its base URL and does no protocol conversion for normal traffic.', action: h('a', { class: 'btn primary', href: '#/providers/new' }, icon('plus'), 'Add provider') })));
           return;
         }
+        const ids = new Set(list.map(p => p.id));
+        for (const [id, view] of views) if (!ids.has(id)) { view.el.remove(); views.delete(id); }
         const tiers = tiersOf(list);
-        const out = tiers.map((t, i) => {
-          const hint = tiers.length === 1 ? 'new sessions round-robin across this tier' : i === 0 ? 'tried first · round-robin within the tier' : 'used only while every higher tier is unavailable';
-          return h('section', { class: 'pr-tier' },
-            h('div', { class: 'pr-tier-head' }, h('p', { class: 'eyebrow' }, 'Priority ' + fmt.priorityLabel(t.priority)), h('span', { class: 'hint' }, hint)),
-            h('div', { class: 'rows' }, t.items.map(row)));
+        const sections = tiers.map((t, i) => {
+          let group = groups.get(t.priority);
+          if (!group) {
+            const rows = h('div', { class: 'rows' }), hint = h('span', { class: 'hint' });
+            group = { rows, hint, el: h('section', { class: 'pr-tier' }, h('div', { class: 'pr-tier-head' }, h('p', { class: 'eyebrow' }, 'Priority ' + fmt.priorityLabel(t.priority)), hint), rows) };
+            groups.set(t.priority, group);
+          }
+          group.hint.textContent = tiers.length === 1 ? 'new sessions round-robin across this tier' : i === 0 ? 'tried first · round-robin within the tier' : 'used only while every higher tier is unavailable';
+          place(group.rows, t.items.map(p => {
+            let view = views.get(p.id);
+            if (!view) { view = row(p); views.set(p.id, view); }
+            view.update(p); return view.el;
+          }));
+          return group.el;
         });
-        replace(host, out);
+        for (const [priority] of groups) if (!tiers.some(t => t.priority === priority)) groups.delete(priority);
+        place(listHost, sections);
       }
-      function row(p) {
-        const stat = p.static_availability;
-        const state = p.global_health ? p.global_health.state : 'unknown';
-        const n = p.models.length;
-        const modelsCell = n
-          ? tip(tag(fmt.plural(n, 'model')), () => tipBlock({ title: 'Declared models', list: p.models.slice(), note: 'Requests naming one of these models can be routed here.' }))
-          : tip(h('span', { class: 'faint', style: { fontSize: '12px' } }, 'no models declared'), 'Declare at least one model — a provider without models is never routed to.');
-        const sw = switchCtl({ checked: p.enabled, tip: p.enabled ? 'Enabled — in rotation. Turn off to stop routing here without deleting the provider.' : 'Disabled — receives no traffic. Turn on to put it back in rotation.', onchange: async (on, inp) => {
-          inp.disabled = true;
-          try {
-            const next = Object.assign({}, p, { enabled: on });
-            delete next.static_availability; delete next.global_health; delete next.channels; delete next.sessions; delete next.active_session_count;
-            await api.put('/api/v1/providers/' + p.id, next);
-            toast(on ? p.name + ' enabled' : p.name + ' disabled');
-            store.invalidate(); load();
-          } catch (e) { inp.checked = !on; inp.disabled = false; toast('Could not update ' + p.name + ': ' + (e.detail || e.message), 'bad'); }
+      function row(initial) {
+        let p = initial, verify = null;
+        const dot = healthDot('unknown');
+        const link = h('a', { class: 'rc-link', href: '#/providers/' + p.id });
+        const sub = h('div', { class: 'rc-sub' });
+        const tags = h('div', { class: 'rc-tags' }), meta = h('div', { class: 'rc-meta' });
+        const retry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => complete(verify) }, 'Check saved state');
+        const sw = switchCtl({ checked: p.enabled, onchange: async on => {
+          if (busy.has(p.id)) return;
+          busy.add(p.id); loadEpoch++; sw.setBusy(true);
+          const id = p.id;
+          await complete(() => store.confirmedWrite(() => api.put('/api/v1/providers/' + id, Object.assign(stripHealth(p), { enabled: on })), async () => (await api.get('/api/v1/providers')).find(value => value.id === id), value => value && value.enabled === on));
         } });
-        sw.setAttribute('aria-label', 'Enabled');
-        let healthCell;
-        if (stat === 'active') {
-          const suffix = state === 'cooldown' && p.global_health.cooldown_until ? 'retry ' + fmt.untilShort(p.global_health.cooldown_until) : null;
-          healthCell = healthPill(state, suffix);
-        } else healthCell = pill(STATIC_TEXT[stat], stat === 'no_models' ? 'warn' : 'mist', 'plain');
-        tip(healthCell, healthSummary(p), { live: state === 'cooldown' });
-        const patchNames = p.patches.map(id => patchIndex[id] ? patchIndex[id].name : id);
-        const patchesCell = tip(h('span', { class: 'm' }, icon('patch'), String(p.patches.length)), () => tipBlock({ title: 'Provider patches · ' + p.patches.length, list: patchNames,
-          note: patchNames.length ? 'Request rewrites applied to every request sent here, in this order.' : 'No patches — requests are forwarded exactly as received.' }));
-        const sessionsCell = tip(h('span', { class: 'm' }, icon('sessions'), String(p.active_session_count)), () => tipBlock({ title: 'Sticky bindings · ' + p.active_session_count,
-          note: (p.active_session_count ? 'Session bindings currently pinned to this provider. ' : 'No session is pinned to this provider right now. ') + 'A session keeps its provider for one hour after its last request, so a conversation stays on one upstream.' }));
-        const prioCell = tip(h('span', { class: 'prio' }, 'P ' + fmt.priorityLabel(p.priority)), priorityTip(p.priority));
-        // Hover targets sit above the row-wide link, so a click on them navigates explicitly.
-        return h('div', { class: 'row-card pr-row' + (stat !== 'active' ? ' dim' : ''), onclick: (e) => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
-          healthDot(stat === 'active' ? state : 'unknown'),
-          h('div', { class: 'rc-main' },
-            h('div', { class: 'rc-title' }, h('a', { class: 'rc-link', href: '#/providers/' + p.id }, p.name)),
-            h('div', { class: 'rc-sub' }, fmt.host(p.base_url))),
-          h('div', { class: 'rc-tags' }, modelsCell),
-          h('div', { class: 'rc-meta' }, prioCell, patchesCell, sessionsCell, h('span', { class: 'hs' }, healthCell)),
-          sw,
-          icon('chevron-right', 'chev'));
+        sw.input.setAttribute('aria-label', 'Enabled');
+        const el = h('div', { class: 'row-card pr-row', dataset: { providerId: p.id }, onclick: e => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
+          dot, h('div', { class: 'rc-main' }, h('div', { class: 'rc-title' }, link), sub), tags, meta, retry, sw, icon('chevron-right', 'chev'));
+        async function complete(run) {
+          if (disposed || !run) return;
+          retry.disabled = true;
+          try {
+            const saved = await run();
+            if (disposed) return;
+            p = Object.assign({}, p, saved); sw.setChecked(p.enabled);
+            toast(p.name + (p.enabled ? ' enabled' : ' disabled'));
+          } catch (e) {
+            if (disposed) return;
+            if (e.verify) { verify = e.verify; retry.hidden = false; retry.disabled = false; toast(e.detail, 'bad'); return; }
+            toast('Could not update ' + p.name + ': ' + (e.detail || e.message), 'bad');
+            sw.setChecked(p.enabled);
+          }
+          busy.delete(p.id); verify = null; retry.hidden = true; sw.setBusy(false); store.invalidate();
+        }
+        function update(value) {
+          p = value;
+          const stat = p.static_availability, state = p.global_health ? p.global_health.state : 'unknown', n = p.models.length;
+          el.classList.toggle('dim', stat !== 'active');
+          const nextDot = healthDot(stat === 'active' ? state : 'unknown'); dot.className = nextDot.className;
+          dot.setAttribute('data-tip', nextDot.getAttribute('data-tip'));
+          link.textContent = p.name; sub.textContent = fmt.host(p.base_url);
+          replace(tags, n ? tip(tag(fmt.plural(n, 'model')), () => tipBlock({ title: 'Declared models', list: p.models.slice(), note: 'Requests naming one of these models can be routed here.' }))
+            : tip(h('span', { class: 'faint', style: { fontSize: '12px' } }, 'no models declared'), 'Declare at least one model — a provider without models is never routed to.'));
+          const healthCell = stat === 'active' ? healthPill(state, state === 'cooldown' && p.global_health.cooldown_until ? 'retry ' + fmt.untilShort(p.global_health.cooldown_until) : null) : pill(STATIC_TEXT[stat], stat === 'no_models' ? 'warn' : 'mist', 'plain');
+          tip(healthCell, healthSummary(p), { live: state === 'cooldown' });
+          const patchNames = p.patches.map(id => patchIndex[id] ? patchIndex[id].name : id);
+          replace(meta,
+            tip(h('span', { class: 'prio' }, 'P ' + fmt.priorityLabel(p.priority)), priorityTip(p.priority)),
+            tip(h('span', { class: 'm' }, icon('patch'), String(p.patches.length)), () => tipBlock({ title: 'Provider patches · ' + p.patches.length, list: patchNames, note: patchNames.length ? 'Request rewrites applied in this order.' : 'No patches — requests are forwarded exactly as received.' })),
+            tip(h('span', { class: 'm' }, icon('sessions'), String(p.active_session_count)), () => tipBlock({ title: 'Sticky bindings · ' + p.active_session_count, note: 'A session keeps its provider for one hour after its last request.' })), h('span', { class: 'hs' }, healthCell));
+          sw.setAttribute('data-tip', p.enabled ? 'Enabled — in rotation. Turn off to stop routing here without deleting the provider.' : 'Disabled — receives no traffic. Turn on to put it back in rotation.');
+          if (!busy.has(p.id)) sw.setChecked(p.enabled);
+          sw.setBusy(busy.has(p.id));
+        }
+        return { el, sw, update };
       }
       load();
       const off = store.on('invalidate', load);

@@ -86,7 +86,7 @@
       options: [option('bearer', 'Authorization: Bearer'), option('x-api-key', 'x-api-key')], onchange: (v) => opts.onchange(v === 'x-api-key') });
     // The full name is the button's accessible name already; the hover text only
     // appears once a narrow column has actually truncated the label.
-    Array.from(control.children).forEach(button => {
+    Array.from(control.querySelectorAll('button[role="radio"]')).forEach(button => {
       const label = button.querySelector('.auth-option-label');
       tip(button, () => label.scrollWidth > label.clientWidth ? label.textContent : '');
     });

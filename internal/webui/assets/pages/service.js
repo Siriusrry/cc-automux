@@ -94,8 +94,13 @@
         const runtimeCard = h('div', { class: 'card sv-runtime' }, h('p', { class: 'eyebrow' }, 'Runtime'), runtimeBody);
         if (CCAM.host.capabilities.autostart) {
           const sw = switchCtl({ checked: false, label: 'Launch at login', sub: 'registered with the operating system' });
-          CCAM.host.capabilities.autostart.get().then(v => { sw.input.checked = v; });
-          sw.input.addEventListener('change', () => CCAM.host.capabilities.autostart.set(sw.input.checked));
+          CCAM.host.capabilities.autostart.get().then(v => { if (!disposed) sw.setChecked(v); }).catch(e => { if (!disposed) toast(e.message, 'bad'); });
+          sw.input.addEventListener('change', async () => {
+            sw.setBusy(true);
+            try { await CCAM.host.capabilities.autostart.set(sw.input.checked); }
+            catch (e) { if (!disposed) { toast(e.message, 'bad'); try { sw.setChecked(await CCAM.host.capabilities.autostart.get()); } catch (_) { sw.setDisabled(true); } } }
+            finally { if (!disposed) sw.setBusy(false); }
+          });
           runtimeCard.appendChild(h('div', { style: { marginTop: '16px' } }, sw));
         }
 

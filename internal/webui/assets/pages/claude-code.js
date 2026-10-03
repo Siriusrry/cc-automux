@@ -203,7 +203,7 @@
         const retryTelemetry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => finishTelemetry(() => store.harness(), false) }, 'Check telemetry state');
         const teleSw = switchCtl({ checked: harness.disable_telemetry, label: 'Disable Claude Code telemetry', onchange: async (v) => {
           if (telemetryBusy) return;
-          telemetryBusy = true; generation++; teleSw.input.disabled = true;
+          telemetryBusy = true; generation++; teleSw.setBusy(true);
           await finishTelemetry(() => store.confirmedWrite(() => api.put('/api/v1/harnesses/claude-code', { disable_telemetry: v }), () => store.harness(), value => value.disable_telemetry === v), true);
         } });
         async function finishTelemetry(run, applied) {
@@ -219,7 +219,7 @@
             catch (_) { retryTelemetry.hidden = false; retryTelemetry.disabled = false; return; }
           }
           telemetryBusy = false;
-          if (!disposed) { retryTelemetry.hidden = true; teleSw.input.checked = harness.disable_telemetry; teleSw.input.disabled = false; store.invalidate(); }
+          if (!disposed) { retryTelemetry.hidden = true; teleSw.setChecked(harness.disable_telemetry); teleSw.setBusy(false); store.invalidate(); }
         }
         teleSw.setAttribute('data-tip', TELE_FIELDS.map(f => f[0] + ' = "' + f[1] + '"  —  ' + f[2]).join('\n'));
         const teleBlock = h('div', { class: 'cc-tele' }, h('div', null, teleSw, retryTelemetry, h('div', { class: 'cc-tele-fields' }, TELE_FIELDS.flatMap(([k, v, d]) => [h('code', null, k + ' = "' + v + '"'), h('span', null, d)]))));
@@ -247,7 +247,7 @@
           if (pathIn.value !== pathValue) pathIn.value = pathValue;
           pathIn.hidden = pathMode !== 'custom'; pathSeg.setValue(pathMode); applyBtn.hidden = !pathDirty();
           if (!pathSaving) { pathSeg.inert = false; pathIn.disabled = false; applyBtn.disabled = false; applyBtn.textContent = 'Apply path'; }
-          if (!telemetryBusy) teleSw.input.checked = harness.disable_telemetry;
+          if (!telemetryBusy) teleSw.setChecked(harness.disable_telemetry);
         } };
       }
 
