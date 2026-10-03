@@ -110,10 +110,10 @@ func newSnapshot(revision uint64, cfg config.Config, catalog *provider.Catalog, 
 	if err != nil {
 		return nil, err
 	}
-	return newSnapshotWithAuto(revision, cfg, catalog, autoMode, runtimeContext, requirements, normal, classifierAttempts, now)
+	return newSnapshotWithAuto(nil, revision, cfg, catalog, autoMode, runtimeContext, requirements, normal, classifierAttempts, now)
 }
 
-func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.Catalog, autoMode CompiledAutoMode, runtimeContext provider.RuntimeContext, requirements ScanRequirements, normal NormalAttemptPolicy, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
+func newSnapshotWithAuto(previous *Snapshot, revision uint64, cfg config.Config, catalog *provider.Catalog, autoMode CompiledAutoMode, runtimeContext provider.RuntimeContext, requirements ScanRequirements, normal NormalAttemptPolicy, classifierAttempts scheduler.AttemptPolicy, now time.Time) (*Snapshot, error) {
 	if err := normal.Policy.Validate(); err != nil {
 		return nil, err
 	}
@@ -124,6 +124,11 @@ func newSnapshotWithAuto(revision uint64, cfg config.Config, catalog *provider.C
 	if err != nil {
 		return nil, err
 	}
+	var previousCatalog *provider.Catalog
+	if previous != nil {
+		previousCatalog = previous.catalog
+	}
+	catalog = catalog.WithHealthEpochs(previousCatalog, revision)
 	return &Snapshot{
 		revision:           revision,
 		config:             cfg.Clone(),

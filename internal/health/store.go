@@ -59,6 +59,7 @@ type channelKey struct {
 type scopeKey struct {
 	providerID string
 	generation scheduler.ProviderGeneration
+	epoch      uint64
 }
 
 type retiredKey struct {
@@ -132,6 +133,7 @@ func newScope(p *provider.CompiledProvider) *providerScope {
 		key: scopeKey{
 			providerID: p.ID,
 			generation: p.Generation,
+			epoch:      p.HealthEpoch,
 		},
 		disableHealth: disabled,
 		active:        true,
@@ -153,6 +155,7 @@ func newRetiredScope(key scheduler.HealthKey, disableHealth bool) *providerScope
 		key: scopeKey{
 			providerID: key.ProviderID,
 			generation: key.Generation,
+			epoch:      key.Epoch,
 		},
 		disableHealth: disableHealth,
 		modelSet:      map[string]struct{}{key.Model: {}},
@@ -171,8 +174,8 @@ func initialState(disabled bool) machineState {
 	return stateUnknown
 }
 
-// Reconcile installs the current provider generations while isolating leases
-// already issued for retired generations.
+// Reconcile installs the current provider generations and health epochs while
+// isolating leases already issued for retired scopes.
 func (s *Store) Reconcile(providers []*provider.CompiledProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -184,7 +187,8 @@ func (s *Store) Reconcile(providers []*provider.CompiledProvider) {
 		}
 		seen[item.ID] = struct{}{}
 		current := s.active[item.ID]
-		if current != nil && current.key.generation == item.Generation && current.disableHealth == item.DisableHealth {
+		sameLifetime := current != nil && current.key.generation == item.Generation && current.key.epoch == item.HealthEpoch
+		if sameLifetime && current.disableHealth == item.DisableHealth {
 			s.reconcileModelsLocked(current, item.Models)
 			continue
 		}
@@ -192,7 +196,7 @@ func (s *Store) Reconcile(providers []*provider.CompiledProvider) {
 			s.retireLocked(current)
 		}
 		fresh := newScope(item)
-		if current != nil && current.key.generation == item.Generation {
+		if sameLifetime {
 			copyScopeDiagnostics(fresh, current)
 		}
 		s.active[item.ID] = fresh
@@ -330,13 +334,14 @@ func (s *Store) Acquire(key scheduler.HealthKey, disableHealth bool) scheduler.H
 }
 
 func (s *Store) scopeForAcquireLocked(key scheduler.HealthKey, disableHealth bool) *providerScope {
-	if current := s.active[key.ProviderID]; current != nil && current.key.generation == key.Generation && current.disableHealth == disableHealth {
+	if current := s.active[key.ProviderID]; current != nil && current.key.generation == key.Generation && current.key.epoch == key.Epoch && current.disableHealth == disableHealth {
 		return current
 	}
 	lookup := retiredKey{
 		scopeKey: scopeKey{
 			providerID: key.ProviderID,
 			generation: key.Generation,
+			epoch:      key.Epoch,
 		},
 		disableHealth: disableHealth,
 	}
@@ -394,7 +399,7 @@ func blockingRetryAt(now time.Time, entries ...*stateEntry) *time.Time {
 }
 
 // Report consumes a lease exactly once and applies the outcome to its isolated
-// provider generation.
+// provider health scope.
 func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) (scheduler.HealthUpdate, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -421,7 +426,7 @@ func (s *Store) Report(lease scheduler.HealthLease, outcome scheduler.Outcome) (
 			GlobalState:  globalState(scope.global.state),
 			ChannelState: channelState(channel.state),
 		}
-		// A generation or health-mode change may retire a scope while one of
+		// A generation, epoch, or health-mode change may retire a scope while one of
 		// its half-open probes is still in flight. The late result is isolated
 		// from current state, but its single-use lease must still release the
 		// retired probe token so another old-snapshot request cannot remain
@@ -664,11 +669,11 @@ func composedRetryAt(now time.Time, global, channel *stateEntry) time.Time {
 
 func (s *Store) scopesForKeyLocked(key scheduler.HealthKey) []*providerScope {
 	result := make([]*providerScope, 0, 3)
-	if current := s.active[key.ProviderID]; current != nil && current.key.generation == key.Generation {
+	if current := s.active[key.ProviderID]; current != nil && current.key.generation == key.Generation && current.key.epoch == key.Epoch {
 		result = append(result, current)
 	}
 	for retiredKey, scopes := range s.retired {
-		if retiredKey.providerID != key.ProviderID || retiredKey.generation != key.Generation {
+		if retiredKey.providerID != key.ProviderID || retiredKey.generation != key.Generation || retiredKey.epoch != key.Epoch {
 			continue
 		}
 		for _, scope := range scopes {
@@ -687,7 +692,7 @@ func (s *Store) UpdateError(lease scheduler.HealthLease, observation uint64, raw
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	scope := s.active[lease.Key.ProviderID]
-	if observation == 0 || scope == nil || scope.key.generation != lease.Key.Generation || scope.disableHealth != lease.Disabled {
+	if observation == 0 || scope == nil || scope.key.generation != lease.Key.Generation || scope.key.epoch != lease.Key.Epoch || scope.disableHealth != lease.Disabled {
 		return
 	}
 	for _, entry := range []*stateEntry{&scope.global, scope.channels[channelKey{model: lease.Key.Model, requestType: lease.Key.RequestType}]} {

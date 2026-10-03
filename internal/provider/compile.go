@@ -99,6 +99,9 @@ type CompiledProvider struct {
 	Enabled       bool
 	Patches       []patch.PatchMetadata
 	DisableHealth bool
+	// HealthEpoch identifies the enabled-state lifecycle in a published
+	// snapshot. It does not change the target's transport or patch identity.
+	HealthEpoch uint64
 
 	modelSet map[string]struct{}
 }

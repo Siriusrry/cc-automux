@@ -8,6 +8,26 @@ type Catalog struct {
 	index     map[string][]*CompiledProvider
 }
 
+// WithHealthEpochs returns a catalog for a new runtime revision. Each enabled
+// transition starts a new health lifetime, even if consumers skip intermediate
+// snapshots. Unchanged providers retain their epoch across unrelated updates.
+func (c *Catalog) WithHealthEpochs(previous *Catalog, revision uint64) *Catalog {
+	before := make(map[string]*CompiledProvider)
+	if previous != nil {
+		for _, item := range previous.providers {
+			before[item.ID] = item
+		}
+	}
+	out := c.Clone()
+	for _, item := range out.providers {
+		item.HealthEpoch = revision
+		if old := before[item.ID]; old != nil && old.Enabled == item.Enabled {
+			item.HealthEpoch = old.HealthEpoch
+		}
+	}
+	return out
+}
+
 func (c *Catalog) Clone() *Catalog {
 	if c == nil {
 		return &Catalog{providers: []*CompiledProvider{}, index: map[string][]*CompiledProvider{}}

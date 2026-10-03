@@ -247,7 +247,7 @@ func (s *Scheduler) Acquire(snapshot Snapshot, key StickyKey, request *RequestSe
 func (s *Scheduler) selectInTierLocked(key StickyKey, request *RequestSelection, group []*provider.CompiledProvider, reason candidateReason, earliestRetry *time.Time) (candidateSelection, bool) {
 	blocked := false
 	acquire := func(item *provider.CompiledProvider) (HealthLease, bool) {
-		decision := s.health.Acquire(HealthKey{ProviderID: item.ID, Generation: item.Generation, Model: key.Model, RequestType: key.RequestType}, item.DisableHealth)
+		decision := s.health.Acquire(HealthKey{ProviderID: item.ID, Generation: item.Generation, Epoch: item.HealthEpoch, Model: key.Model, RequestType: key.RequestType}, item.DisableHealth)
 		if !decision.Available {
 			if decision.RetryAt != nil && (earliestRetry.IsZero() || decision.RetryAt.Before(*earliestRetry)) {
 				*earliestRetry = *decision.RetryAt
@@ -501,9 +501,13 @@ func (s *Scheduler) Reconcile(snapshot Snapshot) {
 
 	s.health.Reconcile(providers)
 	next := make(map[string]providerState, len(providers))
+	reset := make(map[string]bool)
 	for _, item := range providers {
 		if item == nil {
 			continue
+		}
+		if old, ok := s.providers[item.ID]; ok && old.Provider.HealthEpoch != item.HealthEpoch {
+			reset[item.ID] = true
 		}
 		next[item.ID] = providerState{Provider: item, Static: StaticAvailabilityOf(item)}
 	}
@@ -512,7 +516,7 @@ func (s *Scheduler) Reconcile(snapshot Snapshot) {
 
 	for _, entry := range appendAssignmentEntries(s.assignments) {
 		state, ok := next[entry.assignment.ProviderID]
-		if !ok || state.Static != StaticActive ||
+		if !ok || reset[entry.assignment.ProviderID] || state.Static != StaticActive ||
 			state.Provider.Generation != entry.assignment.Generation ||
 			!state.Provider.SupportsModel(entry.assignment.Key.Model) {
 			s.removeAssignmentLocked(entry)
@@ -520,7 +524,7 @@ func (s *Scheduler) Reconcile(snapshot Snapshot) {
 	}
 	for key, pending := range s.pending {
 		state, ok := next[pending.ProviderID]
-		if !ok || state.Static != StaticActive || state.Provider.Generation != pending.Generation || !state.Provider.SupportsModel(key.Model) {
+		if !ok || reset[pending.ProviderID] || state.Static != StaticActive || state.Provider.Generation != pending.Generation || !state.Provider.SupportsModel(key.Model) {
 			delete(s.pending, key)
 		}
 	}
@@ -529,7 +533,7 @@ func (s *Scheduler) Reconcile(snapshot Snapshot) {
 		if cursor.ProviderID == "" {
 			continue
 		}
-		if !ok || state.Static != StaticActive || state.Provider.Priority != key.Priority ||
+		if !ok || reset[cursor.ProviderID] || state.Static != StaticActive || state.Provider.Priority != key.Priority ||
 			!state.Provider.SupportsModel(key.Model) {
 			s.clearCursorLocked(key)
 		}

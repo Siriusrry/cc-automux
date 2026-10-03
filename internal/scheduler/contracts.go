@@ -112,6 +112,7 @@ func (o Outcome) IsHealthFailure() bool {
 type HealthKey struct {
 	ProviderID  string
 	Generation  ProviderGeneration
+	Epoch       uint64
 	Model       string
 	RequestType traffic.RequestType
 }

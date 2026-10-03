@@ -326,7 +326,7 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 			m.restartStatus.LastError = "pending configuration requires cleanup"
 		}
 	}
-	initialSnapshot, err := newSnapshotWithAuto(m.revision, initial, catalog, autoMode, m.runtimeContext, m.scanRequirements, defaultNormalAttemptPolicy(), m.classifierAttempts, startedAt)
+	initialSnapshot, err := newSnapshotWithAuto(nil, m.revision, initial, catalog, autoMode, m.runtimeContext, m.scanRequirements, defaultNormalAttemptPolicy(), m.classifierAttempts, startedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +585,7 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 	}
 
 	if !restartRequired {
-		nextSnapshot, err := newSnapshotWithAuto(m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
+		nextSnapshot, err := newSnapshotWithAuto(currentSnapshot, m.revision+1, next, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
 		if err != nil {
 			return ApplyResult{}, check, err
 		}
@@ -754,7 +754,7 @@ func (m *Manager) RestartSucceeded() error {
 		return err
 	}
 	normal := m.normalAttempts(pending, m.activeProfileInvalid)
-	nextSnapshot, err := newSnapshotWithAuto(m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
+	nextSnapshot, err := newSnapshotWithAuto(m.current.Load(), m.revision+1, pending, catalog, autoMode, m.runtimeContext, m.scanRequirements, normal, m.classifierAttempts, m.now())
 	if err != nil {
 		_ = m.restartFailedLocked(err)
 		return err

@@ -217,6 +217,7 @@ func TestClassifierChannelHealthIsolatedFromNormalChannel(t *testing.T) {
 	classifierKey := scheduler.HealthKey{
 		ProviderID:  p.ID,
 		Generation:  p.Generation,
+		Epoch:       p.HealthEpoch,
 		Model:       "model",
 		RequestType: traffic.RequestTypeClassifier,
 	}
@@ -879,6 +880,7 @@ func testHealthKey(p *provider.CompiledProvider, model string) scheduler.HealthK
 	return scheduler.HealthKey{
 		ProviderID:  p.ID,
 		Generation:  p.Generation,
+		Epoch:       p.HealthEpoch,
 		Model:       model,
 		RequestType: traffic.RequestTypeNormal,
 	}
