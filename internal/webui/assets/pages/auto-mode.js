@@ -47,7 +47,7 @@
         bar = savebar({ onSave: save, onRevert: load });
         const dirty = () => draft.mode !== applied.mode || Object.values(modelDrafts).some(m => m !== applied.model) || !store.same(fixed, baseline);
         const check = () => { bar.show(dirty()); Object.values(fields).forEach(f => f.setError && f.setError('')); bar.setError(''); };
-        CCAM.router.setGuard(async () => saving ? false : dirty() ? confirm({ title: 'Discard changes?', text: 'Auto mode has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
+        CCAM.router.setGuard(async () => saving || dirty() ? confirm({ title: 'Discard changes?', text: saving ? 'Saving will continue after you leave. Other unsaved edits will be discarded.' : 'Auto mode has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
 
         // Mode
         const modeDesc = h('p', { class: 'am-desc' });
@@ -154,7 +154,7 @@
             await store.saveConfig(config, body, (_result, value) => { saved = value; });
             return saved;
           };
-          await complete(() => store.confirmedWrite(write, () => api.get('/api/v1/config'), value => store.same(value.auto_mode, body.auto_mode)));
+          await complete(write);
         }
         async function complete(run) {
           try {
@@ -164,7 +164,6 @@
             render(saved, providers, patches);
           } catch (e) {
             if (disposed) return;
-            if (e.verify) { bar.setError(e.detail); bar.pending(() => complete(e.verify)); return; }
             saving = false; modeCard.inert = false; bar.busy(false);
             const key = (e.field || '').replace(/^auto_mode\./, '').replace(/^fixed_provider\./, 'fixed.').replace(/\[\d+\]$/, '').replace(/^fixed\.tls\..*/, 'fixed.tls');
             const f = fields[key];

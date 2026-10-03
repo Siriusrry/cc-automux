@@ -467,18 +467,16 @@
   }
 
   function savebar(opts) {
-    let verify = null;
     const msg = h('div', { class: 'msg' }, h('span', { class: 'dot' }), h('span', { class: 'msg-text' }, 'Unsaved changes'));
     const revert = h('button', { class: 'btn', type: 'button', onclick: () => opts.onRevert && opts.onRevert() }, 'Revert');
-    const save = h('button', { class: 'btn primary', type: 'button', onclick: () => verify ? verify() : opts.onSave && opts.onSave() }, 'Save changes');
+    const save = h('button', { class: 'btn primary', type: 'button', onclick: () => opts.onSave && opts.onSave() }, 'Save changes');
     const bar = h('div', { class: 'savebar', hidden: true }, h('div', { class: 'in-bar' }, msg, h('div', { class: 'acts' }, revert, save)));
     document.body.appendChild(bar);
     const ctl = {
       el: bar,
       show(on) { bar.hidden = !on; if (!on) ctl.setError(''); },
       setError(text) { msg.classList.toggle('error', !!text); msg.querySelector('.msg-text').textContent = text || 'Unsaved changes'; },
-      busy(on) { verify = null; save.disabled = on; revert.disabled = on; replace(save, on ? [h('span', { class: 'spin' }), 'Saving…'] : 'Save changes'); },
-      pending(check) { verify = () => { save.disabled = true; return check(); }; save.disabled = false; revert.disabled = true; replace(save, 'Check saved state'); },
+      busy(on) { save.disabled = on; revert.disabled = on; replace(save, on ? [h('span', { class: 'spin' }), 'Saving…'] : 'Save changes'); },
       destroy() { remove(bar); }
     };
     return ctl;

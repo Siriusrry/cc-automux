@@ -90,7 +90,7 @@ func (h *Handler) handleHarnessResource(w http.ResponseWriter, r *http.Request, 
 			h.writeHarnessDecodeError(w, err)
 			return
 		}
-		status, err := h.harnesses.UpdatePatch(id, update)
+		status, err := h.harnesses.UpdatePatchIfMatch(id, update, strings.Join(r.Header.Values("If-Match"), ","))
 		if err != nil {
 			h.writeHarnessError(w, err)
 			return
@@ -124,7 +124,7 @@ func (h *Handler) handleProfileCollection(w http.ResponseWriter, r *http.Request
 			h.writeHarnessDecodeError(w, err)
 			return
 		}
-		created, err := h.harnesses.CreateProfile(id, profile)
+		created, err := h.harnesses.CreateProfileIfMatch(id, profile, strings.Join(r.Header.Values("If-Match"), ","))
 		if err != nil {
 			h.writeHarnessError(w, err)
 			return
@@ -159,14 +159,14 @@ func (h *Handler) handleProfileResource(w http.ResponseWriter, r *http.Request, 
 			h.writeHarnessDecodeError(w, err)
 			return
 		}
-		updated, err := h.harnesses.UpdateProfile(id, profileID, profile)
+		updated, err := h.harnesses.UpdateProfileIfMatch(id, profileID, profile, strings.Join(r.Header.Values("If-Match"), ","))
 		if err != nil {
 			h.writeHarnessError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
-		if err := h.harnesses.DeleteProfile(id, profileID); err != nil {
+		if err := h.harnesses.DeleteProfileIfMatch(id, profileID, strings.Join(r.Header.Values("If-Match"), ",")); err != nil {
 			h.writeHarnessError(w, err)
 			return
 		}
@@ -193,7 +193,7 @@ func (h *Handler) handleProfileActivation(w http.ResponseWriter, r *http.Request
 		h.writeHarnessDecodeError(w, err)
 		return
 	}
-	result, err := h.harnesses.Activate(id, profileID)
+	result, err := h.harnesses.ActivateIfMatch(id, profileID, strings.Join(r.Header.Values("If-Match"), ","))
 	if err != nil {
 		h.writeHarnessError(w, err)
 		return
@@ -220,6 +220,8 @@ func (h *Handler) writeHarnessDecodeError(w http.ResponseWriter, err error) {
 
 func (h *Handler) writeHarnessError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, runtime.ErrConfigChanged):
+		writeError(w, http.StatusPreconditionFailed, "configuration_changed", "configuration changed; reload before saving")
 	case errors.Is(err, harnessconfig.ErrActiveProfileStateFailed):
 		writeError(w, http.StatusInternalServerError, "active_profile_state_failed", "active profile state could not be persisted")
 

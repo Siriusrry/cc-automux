@@ -430,6 +430,11 @@ type ActivationResult struct {
 // restores the old active ID, and a failed final state write never reports the
 // target as active.
 func (m *Manager) Activate(id, profileID string) (ActivationResult, error) {
+	return m.ActivateIfMatch(id, profileID, "")
+}
+
+// ActivateIfMatch checks the configuration version before any mutation or file I/O.
+func (m *Manager) ActivateIfMatch(id, profileID string, condition string) (ActivationResult, error) {
 	adapter, err := m.lookup(id)
 	if err != nil {
 		return ActivationResult{}, err
@@ -440,6 +445,9 @@ func (m *Manager) Activate(id, profileID string) (ActivationResult, error) {
 
 	var result ActivationResult
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		if err := tx.CheckConfigETag(condition); err != nil {
+			return err
+		}
 		cfg := tx.Config().Normalize()
 		selected, ok := m.profileFor(cfg, profileID)
 		if !ok {
@@ -635,6 +643,11 @@ func (m *Manager) GetProfile(id, profileID string) (ProfileView, error) {
 // CreateProfile persists a new profile. An omitted ID is filled with a random
 // v4 UUID before the schema validation transaction.
 func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView, error) {
+	return m.CreateProfileIfMatch(id, profile, "")
+}
+
+// CreateProfileIfMatch checks the configuration version before any mutation or file I/O.
+func (m *Manager) CreateProfileIfMatch(id string, profile config.Profile, condition string) (ProfileView, error) {
 	_, err := m.lookup(id)
 	if err != nil {
 		return ProfileView{}, err
@@ -650,6 +663,9 @@ func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView,
 	}
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		if err := tx.CheckConfigETag(condition); err != nil {
+			return err
+		}
 		cfg := tx.Config()
 		beforeActiveID := cfg.Harnesses.ClaudeCode.ActiveProfileID
 		for _, existing := range cfg.Harnesses.ClaudeCode.Profiles {
@@ -692,6 +708,11 @@ func (m *Manager) CreateProfile(id string, profile config.Profile) (ProfileView,
 
 // UpdateProfile replaces a profile while preserving its immutable ID.
 func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (ProfileView, error) {
+	return m.UpdateProfileIfMatch(id, profileID, profile, "")
+}
+
+// UpdateProfileIfMatch checks the configuration version before any mutation or file I/O.
+func (m *Manager) UpdateProfileIfMatch(id, profileID string, profile config.Profile, condition string) (ProfileView, error) {
 	_, err := m.lookup(id)
 	if err != nil {
 		return ProfileView{}, err
@@ -705,6 +726,9 @@ func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (P
 	profile.ID = profileID
 	var result ProfileView
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		if err := tx.CheckConfigETag(condition); err != nil {
+			return err
+		}
 		cfg := tx.Config()
 		beforeActiveID := cfg.Harnesses.ClaudeCode.ActiveProfileID
 		found := false
@@ -758,6 +782,11 @@ func (m *Manager) UpdateProfile(id, profileID string, profile config.Profile) (P
 // DeleteProfile removes a non-active profile. A profile that is stale-active
 // is first reconciled; a verified active profile remains protected.
 func (m *Manager) DeleteProfile(id, profileID string) error {
+	return m.DeleteProfileIfMatch(id, profileID, "")
+}
+
+// DeleteProfileIfMatch checks the configuration version before any mutation or file I/O.
+func (m *Manager) DeleteProfileIfMatch(id, profileID string, condition string) error {
 	_, err := m.lookup(id)
 	if err != nil {
 		return err
@@ -766,6 +795,9 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 		return ErrManagerNotInitialized
 	}
 	return m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		if err := tx.CheckConfigETag(condition); err != nil {
+			return err
+		}
 		cfg := tx.Config()
 		if cfg.Harnesses.ClaudeCode.ActiveProfileID == profileID {
 			status, checked, stateErr := m.reconciledOperationState(tx, id)
@@ -802,6 +834,11 @@ func (m *Manager) DeleteProfile(id, profileID string) error {
 // UpdatePatch applies only the supplied harness-level fields while retaining
 // all omitted values from the same transaction snapshot.
 func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStatus, error) {
+	return m.UpdatePatchIfMatch(id, update, "")
+}
+
+// UpdatePatchIfMatch checks the configuration version before any mutation or file I/O.
+func (m *Manager) UpdatePatchIfMatch(id string, update HarnessUpdatePatch, condition string) (HarnessStatus, error) {
 	_, err := m.lookup(id)
 	if err != nil {
 		return HarnessStatus{}, err
@@ -811,6 +848,9 @@ func (m *Manager) UpdatePatch(id string, update HarnessUpdatePatch) (HarnessStat
 	}
 	var result HarnessStatus
 	err = m.runtime.WithHarnessMutation(func(tx config.HarnessMutation) error {
+		if err := tx.CheckConfigETag(condition); err != nil {
+			return err
+		}
 		beforeActiveID := tx.Config().Harnesses.ClaudeCode.ActiveProfileID
 		if err := tx.UpdateHarness(func(h *config.HarnessesConfig) error {
 			if update.PathMode != nil {

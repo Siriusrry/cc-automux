@@ -738,3 +738,46 @@ func TestTelemetryBothHTTPEntrypointsPreserveActiveAndRespectETag(t *testing.T) 
 		t.Fatal(r.Code, r.Body.String())
 	}
 }
+
+func TestResourceWritesRejectStaleConditionsBeforeSideEffects(t *testing.T) {
+	f := newHarnessHandlerFixture(t, "gateway-key")
+	p := config.Profile{ID: "22222222-2222-4222-8222-222222222222", Name: "Daily", HaikuModel: "h", SonnetModel: "s", OpusModel: "o", FableModel: "f"}
+	if _, err := f.harness.CreateProfile("claude-code", p); err != nil {
+		t.Fatal(err)
+	}
+	provider := config.ProviderConfig{ID: "11111111-1111-4111-8111-111111111111", Name: "Provider", BaseURL: "https://provider.example"}
+	if _, err := f.runtime.Update(func(cfg *config.Config) error { cfg.Providers = []config.ProviderConfig{provider}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	stale := f.runtime.Snapshot().ConfigETag()
+	if _, err := f.runtime.Update(func(cfg *config.Config) error { cfg.Providers[0].Name = "Latest"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	profileBody, _ := json.Marshal(p.Normalize())
+	providerBody, _ := json.Marshal(map[string]string{"id": provider.ID, "name": provider.Name, "base_url": provider.BaseURL})
+	for _, tc := range []struct{ method, path, body string }{
+		{"POST", "/api/v1/providers", string(providerBody)},
+		{"PUT", "/api/v1/providers/" + provider.ID, string(providerBody)},
+		{"DELETE", "/api/v1/providers/" + provider.ID, ""},
+		{"PUT", "/api/v1/harnesses/claude-code", `{"disable_telemetry":false}`},
+		{"POST", "/api/v1/harnesses/claude-code/profiles", string(profileBody)},
+		{"PUT", "/api/v1/harnesses/claude-code/profiles/" + p.ID, string(profileBody)},
+		{"DELETE", "/api/v1/harnesses/claude-code/profiles/" + p.ID, ""},
+		{"POST", "/api/v1/harnesses/claude-code/profiles/" + p.ID + "/activate", `{}`},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			before := f.runtime.Snapshot()
+			r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			r.Header.Set("Authorization", "Bearer management-key")
+			r.Header.Set("If-Match", stale)
+			w := httptest.NewRecorder()
+			f.handler.ServeHTTP(w, r)
+			if w.Code != http.StatusPreconditionFailed || f.runtime.Snapshot() != before {
+				t.Fatalf("stale write = %d %s", w.Code, w.Body.String())
+			}
+			if _, err := os.Stat(f.target); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stale operation touched target: %v", err)
+			}
+		})
+	}
+}

@@ -81,45 +81,105 @@
     }
     throw new api.ApiError(412, 'configuration_changed', 'Another window changed ' + (path || 'this configuration') + '. Your draft is kept; use Revert to load the latest values.');
   }
-  function saveConfig(baseline, draft, onApplied) {
+  const uncertain = error => error.isNetwork || error.code === 'invalid_response';
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  async function reconnect(read) {
+    for (let delay = 250;; delay = Math.min(delay * 2, 3000)) {
+      try { return await read(); }
+      catch (error) { if (!uncertain(error)) throw error; await pause(delay); }
+    }
+  }
+  const configResponse = () => api.get('/api/v1/config', { response: true });
+  function configTag(response) {
+    const tag = response.headers.get('ETag');
+    if (!tag || !/^"[^"\s]+"$/.test(tag)) throw new api.ApiError(502, 'invalid_response', 'The service did not provide a configuration validator.');
+    return tag;
+  }
+  // Each retry carries the original strong precondition and immutable intent.
+  // A read may race an in-flight write; the mutation lock still allows only one
+  // state change. A different version is never used to replay an old intent.
+  async function commit({ method, path, body, tag, matches, recovered, read = configResponse, onDisconnect }) {
+    let recovering = false, delay = 250;
+    for (;;) {
+      try { return await api.request(method, path, body, { headers: { 'If-Match': tag } }); }
+      catch (error) {
+        if (!uncertain(error) && !(recovering && (error.status === 412 || error.status === 404 || error.code === 'restart_in_progress'))) throw error;
+        if (!recovering) CCAM.ui?.toast('Reconnecting to finish saving…', 'warn');
+        recovering = true;
+      }
+      for (;;) {
+        await pause(delay); delay = Math.min(delay * 2, 3000);
+        let response;
+        try { response = await read(); }
+        catch (error) {
+          if (onDisconnect) { const result = await onDisconnect(); if (result) return result; }
+          if (uncertain(error)) continue;
+          throw error;
+        }
+        if (matches(response.json)) return recovered(response.json);
+        if (configTag(response) !== tag) throw new api.ApiError(412, 'configuration_changed', 'Another window changed these settings. Your draft is kept; review or revert before saving again.');
+        break;
+      }
+    }
+  }
+  function saveConfig(baseline, draft, onApplied, recovery) {
     const before = store.clientUpdate(baseline), wanted = copy(draft);
     return api.enqueue(async () => {
-      const response = await api.get('/api/v1/config', { response: true });
-      const tag = response.headers.get('ETag');
-      if (!tag) throw new api.ApiError(502, 'invalid_response', 'The service did not provide a configuration validator.');
+      const response = await reconnect(configResponse);
+      const tag = configTag(response);
       const body = mergeDraft(before, wanted, store.clientUpdate(response.json), '');
-      const result = await api.request('PUT', '/api/v1/config', body, { headers: { 'If-Match': tag } });
+      const result = await commit({ method: 'PUT', path: '/api/v1/config', body, tag,
+        matches: value => same(store.clientUpdate(value), body), recovered: () => ({ applied: true }),
+        ...(recovery ? recovery(body) : {}) });
       if (onApplied) await onApplied(result, body);
       invalidate();
       return result;
     });
   }
-
-  // A lost response may follow a committed write. Verify once, and expose a
-  // read-only retry if the service cannot be reached; never replay the write.
-  async function confirmedWrite(write, read, matches) {
-    async function verify() {
-      let value;
-      try { value = await read(); }
-      catch (cause) {
-        const error = new api.ApiError(0, 'write_unconfirmed', 'The save result is not confirmed. Check saved state before continuing.');
-        error.verify = verify;
-        throw error;
+  function contains(value, wanted) {
+    if (same(value, wanted)) return true;
+    return value && wanted && !Array.isArray(wanted) && typeof wanted === 'object' &&
+      Object.keys(wanted).every(key => contains(value[key], wanted[key]));
+  }
+  function write(method, path, input, options) {
+    const body = copy(input);
+    const provider = path.match(/^\/api\/v1\/providers(?:\/([^/]+))?$/);
+    const profile = path.match(/^\/api\/v1\/harnesses\/claude-code\/profiles(?:\/([^/]+))?(\/activate)?$/);
+    const harness = path === '/api/v1/harnesses/claude-code';
+    const order = path === '/api/v1/providers/order';
+    if (method === 'POST' && ((provider && !provider[1]) || (profile && !profile[1]))) body.id ||= crypto.randomUUID();
+    if (!provider && !profile && !harness) throw new Error('Unsupported configuration resource');
+    const id = provider?.[1] || profile?.[1] || body?.id;
+    const select = cfg => order ? (cfg.providers || []).filter(p => body.provider_ids.includes(p.id)).map(p => p.id)
+      : harness || profile?.[2] ? cfg.harnesses.claude_code
+      : (provider ? cfg.providers || [] : cfg.harnesses.claude_code.profiles || []).find(value => value.id === id);
+    const matches = cfg => method === 'DELETE' ? !select(cfg) : order ? same(select(cfg), body.provider_ids)
+      : profile?.[2] ? select(cfg).active_profile_id === id : contains(select(cfg), body);
+    const recovered = async cfg => {
+      if (method === 'DELETE') return null;
+      if (harness) return reconnect(() => store.harness());
+      if (profile) {
+        const status = await reconnect(() => store.harness());
+        const active = status.state === 'in_sync' && status.active_profile_id === id;
+        if (profile[2] && !active) throw new api.ApiError(409, 'activation_changed', 'The settings file no longer matches this profile. Review its current state before activating again.');
+        const value = Object.assign({}, cfg.harnesses.claude_code.profiles.find(p => p.id === id), { active });
+        return profile[2] ? { active, harness: status, profile: value } : value;
       }
-      if (matches(value)) return value;
-      throw new api.ApiError(409, 'write_not_applied', 'The saved values differ. Your draft is kept; review or revert before applying again.');
-    }
-    try { return await write(); }
-    catch (error) {
-      if (error.isNetwork || !error.status || error.code === 'invalid_response') return verify();
-      throw error;
-    }
+      return order ? { applied: true } : select(cfg);
+    };
+    return api.enqueue(async () => {
+      const response = await reconnect(configResponse);
+      const tag = options?.headers?.['If-Match'] || configTag(response);
+      const result = await commit({ method, path, body, tag, matches, recovered });
+      invalidate();
+      return result;
+    });
   }
 
   const store = {
     on, off, emit, state,
     startPolling, stopPolling, refreshStatus,
-    invalidate, same, mergeDraft, saveConfig, confirmedWrite,
+    invalidate, same, mergeDraft, saveConfig, write, reconnect,
     config: () => cached('config', () => api.get('/api/v1/config')),
     providers: () => cached('providers', async () => (await api.get('/api/v1/providers')) || []),
     providerHealth: async () => {

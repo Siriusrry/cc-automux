@@ -113,6 +113,14 @@ func (m *Manager) WithHarnessMutation(fn func(config.HarnessMutation) error) err
 	return fn(&HarnessMutation{manager: m})
 }
 
+// CheckConfigETag checks a write precondition under the enclosing mutation lock.
+func (t *HarnessMutation) CheckConfigETag(condition string) error {
+	if condition != "" && !matchesConfigETag(condition, t.manager.current.Load().ConfigETag()) {
+		return ErrConfigChanged
+	}
+	return nil
+}
+
 // Config returns the current configuration from a transaction-scoped
 // HarnessMutation. The returned value is a defensive copy.
 func (t *HarnessMutation) Config() config.Config {
@@ -447,6 +455,12 @@ func matchesConfigETag(condition, tag string) bool {
 // Update serializes read-modify-write operations such as Provider CRUD so two
 // concurrent requests cannot overwrite each other's changes.
 func (m *Manager) Update(mutator func(*config.Config) error) (ApplyResult, error) {
+	return m.UpdateIfMatch("", mutator)
+}
+
+// UpdateIfMatch protects a resource mutation with the same configuration token
+// used by complete config replacement. Retries cannot overwrite a later save.
+func (m *Manager) UpdateIfMatch(condition string, mutator func(*config.Config) error) (ApplyResult, error) {
 	if mutator == nil {
 		return ApplyResult{}, errors.New("configuration mutator is required")
 	}
@@ -454,6 +468,9 @@ func (m *Manager) Update(mutator func(*config.Config) error) (ApplyResult, error
 	defer m.mu.Unlock()
 	if m.restartStatus.InProgress {
 		return ApplyResult{}, ErrRestartInProgress
+	}
+	if condition != "" && !matchesConfigETag(condition, m.current.Load().ConfigETag()) {
+		return ApplyResult{}, ErrConfigChanged
 	}
 	current := m.current.Load().Config()
 	next := current.Clone()

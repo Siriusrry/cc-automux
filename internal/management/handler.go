@@ -232,7 +232,7 @@ func (h *Handler) handleProviders(w http.ResponseWriter, r *http.Request) {
 			h.writeSemanticError(w, err)
 			return
 		}
-		_, err = h.manager.Update(func(cfg *config.Config) error {
+		_, err = h.manager.UpdateIfMatch(strings.Join(r.Header.Values("If-Match"), ","), func(cfg *config.Config) error {
 			for _, existing := range cfg.Providers {
 				if existing.ID == input.ID {
 					return &config.ConflictError{Field: "id", Message: "provider id already exists"}
@@ -291,7 +291,7 @@ func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request, id stri
 			h.writeSemanticError(w, err)
 			return
 		}
-		_, err = h.manager.Update(func(next *config.Config) error {
+		_, err = h.manager.UpdateIfMatch(strings.Join(r.Header.Values("If-Match"), ","), func(next *config.Config) error {
 			for _, existing := range next.Providers {
 				if existing.ID != id && existing.ID == input.ID {
 					return &config.ConflictError{Field: "id", Message: "provider id already exists"}
@@ -320,7 +320,7 @@ func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request, id stri
 			writeError(w, http.StatusNotFound, "not_found", "provider not found")
 			return
 		}
-		_, err := h.manager.Update(func(next *config.Config) error {
+		_, err := h.manager.UpdateIfMatch(strings.Join(r.Header.Values("If-Match"), ","), func(next *config.Config) error {
 			for i := range next.Providers {
 				if next.Providers[i].ID == id {
 					next.Providers = append(next.Providers[:i], next.Providers[i+1:]...)

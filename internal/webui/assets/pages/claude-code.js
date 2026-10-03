@@ -36,6 +36,7 @@
   function profileDialog(profile, models) {
     const draft = Object.assign({ name: '', haiku_model: '', sonnet_model: '', opus_model: '', fable_model: '', subagent_model: '', teammate_default_model: '', max_attempts: 3, sticky_no_cooldown_attempts: 1 }, profile || {});
     const isNew = !profile;
+    let saving = false;
     const fields = {};
     const list = h('datalist', { id: 'cc-models' }, models.map(m => h('option', { value: m })));
     fields.name = field({ label: 'Profile name', for: 'pf-name', control: input({ id: 'pf-name', sans: true, value: draft.name, placeholder: 'e.g. Daily', oninput: (e) => { draft.name = e.target.value; } }) });
@@ -61,6 +62,7 @@
     return dialog({ title: isNew ? 'New profile' : 'Edit ' + profile.name, body: form, wide: true, focus: '#pf-name', actions: [
       { label: 'Cancel', value: null },
       { label: isNew ? 'Create profile' : 'Save profile', primary: true, onClick: async () => {
+        if (saving) return false;
         Object.values(fields).forEach(f => f.setError(''));
         let bad = false;
         if (!draft.name.trim()) { fields.name.setError('Give the profile a name.'); bad = true; }
@@ -68,16 +70,17 @@
         const attempts = readPositiveInteger(draft.max_attempts, 3, attemptsInput, fields.max_attempts);
         const stickyAttempts = readPositiveInteger(draft.sticky_no_cooldown_attempts, 1, stickyAttemptsInput, fields.sticky_no_cooldown_attempts);
         if (bad || attempts === null || stickyAttempts === null) return false;
+        saving = true; form.inert = true;
         try {
           const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts, sticky_no_cooldown_attempts: stickyAttempts };
-          if (isNew) return await api.post('/api/v1/harnesses/claude-code/profiles', body);
-          return await api.put('/api/v1/harnesses/claude-code/profiles/' + profile.id, Object.assign({ id: profile.id }, body));
+          if (isNew) return await store.write('POST', '/api/v1/harnesses/claude-code/profiles', body);
+          return await store.write('PUT', '/api/v1/harnesses/claude-code/profiles/' + profile.id, Object.assign({ id: profile.id }, body));
         } catch (e) {
           if (e.status === 409 && /name/.test(e.message)) fields.name.setError('Another profile already uses this name.');
           else if (e.field && fields[e.field.replace(/^(?:profile\.|harnesses\.claude_code\.profiles\[\d+\]\.)/, '')]) fields[e.field.replace(/^(?:profile\.|harnesses\.claude_code\.profiles\[\d+\]\.)/, '')].setError(e.detail);
           else fields.name.setError(e.detail || e.message);
           return false;
-        }
+        } finally { saving = false; form.inert = false; }
       } }
     ] });
   }
@@ -91,7 +94,7 @@
       let disposed = false, generation = 0, telemetryBusy = false, settingsView = null;
       let pathDraft = null, pathBaseline = null, pathSaving = false;
       const pathDirty = () => pathDraft && !store.same(pathDraft, pathBaseline);
-      CCAM.router.setGuard(async () => pathSaving ? false : pathDirty() ? confirm({ title: 'Discard changes?', text: 'The settings path has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
+      CCAM.router.setGuard(async () => pathSaving || pathDirty() ? confirm({ title: 'Discard changes?', text: pathSaving ? 'Saving will continue after you leave. Other unsaved edits will be discarded.' : 'The settings path has unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
 
       async function load(quiet) {
         const gen = ++generation;
@@ -135,7 +138,7 @@
           const activate = h('button', { class: 'btn sm' + (isActive ? '' : ' primary'), type: 'button', disabled: isActive || !gatewayOk, onclick: async () => {
             activate.disabled = true; replace(activate, h('span', { class: 'spin' }), 'Activating…');
             try {
-              const r = await api.post('/api/v1/harnesses/claude-code/profiles/' + p.id + '/activate', {});
+              const r = await store.write('POST', '/api/v1/harnesses/claude-code/profiles/' + p.id + '/activate', {});
               toast(r.idempotent ? p.name + ' was already active' : 'Activated ' + p.name + ' · settings.json updated'); store.invalidate();
             } catch (e) {
               const msg = e.code === 'gateway_not_configured' ? 'Set a gateway key before activating a profile.' : e.code === 'harness_config_io_failed' ? 'settings.json could not be written: ' + (e.detail || '') : e.code === 'restart_in_progress' ? 'CC AutoMux is restarting — try again shortly.' : (e.detail || e.message);
@@ -151,7 +154,7 @@
               wrapTip(h('button', { class: 'ib bordered danger', type: 'button', 'aria-label': 'Delete ' + p.name, disabled: isActive, onclick: async () => {
                 const ok = await confirm({ title: 'Delete ' + p.name + '?', text: 'The mapping is removed from CC AutoMux. settings.json is not touched.', confirmLabel: 'Delete', danger: true });
                 if (!ok) return;
-                try { await api.del('/api/v1/harnesses/claude-code/profiles/' + p.id); toast(p.name + ' deleted'); store.invalidate(); } catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
+                try { await store.write('DELETE', '/api/v1/harnesses/claude-code/profiles/' + p.id); toast(p.name + ' deleted'); store.invalidate(); } catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
               } }, icon('trash')), isActive ? 'Switch profiles before deleting the active one.' : 'Delete profile')));
         }
         const profilesCard = h('div', { class: 'card' },
@@ -177,53 +180,44 @@
         const resolvedPath = h('code');
         const pathField = field({ label: 'Settings file', control: [pathSeg, h('div', { style: { height: '10px' } }), pathRow],
           help: h('div', { class: 'cc-path' }, 'Resolves to ', resolvedPath) });
-        let verifyPath = null;
         async function savePath() {
-          if (disposed || (pathSaving && !verifyPath)) return;
+          if (disposed || pathSaving) return;
           pathSaving = true; pathSeg.inert = true; pathIn.disabled = true; applyBtn.disabled = true;
           const body = { path_mode: pathMode, settings_path: pathMode === 'custom' ? pathValue : pathBaseline.value };
           try {
-            const saved = await (verifyPath ? verifyPath() : store.confirmedWrite(() => api.put('/api/v1/harnesses/claude-code', body), () => store.harness(), value => value.path_mode === body.path_mode && value.settings_path === body.settings_path));
+            pathField.setError('');
+            const saved = await store.write('PUT', '/api/v1/harnesses/claude-code', body);
             if (disposed) return;
             pathBaseline = { mode: saved.path_mode, value: saved.settings_path || '' };
-            pathDraft = Object.assign({}, pathBaseline); pathSaving = false; verifyPath = null;
+            pathDraft = Object.assign({}, pathBaseline); pathSaving = false;
             toast('Settings path updated'); store.invalidate();
           } catch (e) {
             if (disposed) return;
             pathField.setError(e.detail || e.message);
-            verifyPath = e.verify || null;
-            applyBtn.disabled = false;
-            applyBtn.textContent = verifyPath ? 'Check saved state' : 'Apply path';
-            if (!verifyPath) { pathSaving = false; pathSeg.inert = false; pathIn.disabled = false; }
+            pathSaving = false; pathSeg.inert = false; pathIn.disabled = false; applyBtn.disabled = false;
           }
         }
         const managed = h('details', { class: 'disc' }, h('summary', null, icon('chevron-right'), 'Managed fields'), h('div', { class: 'disc-body' },
           h('div', { class: 'cc-managed' }, MANAGED.map(([k, what]) => h('span', null, h('b', null, 'env.' + k), ' · ' + what)), h('span', { class: 'opt' }, h('b', null, 'env.CLAUDE_CODE_SUBAGENT_MODEL'), ' · optional'), h('span', { class: 'opt' }, h('b', null, 'teammateDefaultModel'), ' · optional, top level')),
           h('p', { class: 'help' }, 'Only these fields are written. Everything else in the file is preserved byte-for-byte in meaning. Before the first write to an existing file a one-time copy is saved as ', h('code', null, '.cc-automux.bak'), ' next to it.')));
 
-        const retryTelemetry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => finishTelemetry(() => store.harness(), false) }, 'Check telemetry state');
         const teleSw = switchCtl({ label: 'Disable Claude Code telemetry', onchange: async (v) => {
           if (telemetryBusy) return;
           telemetryBusy = true; generation++; teleSw.setBusy(true);
-          await finishTelemetry(() => store.confirmedWrite(() => api.put('/api/v1/harnesses/claude-code', { disable_telemetry: v }), () => store.harness(), value => value.disable_telemetry === v), true);
-        } });
-        async function finishTelemetry(run, applied) {
-          retryTelemetry.disabled = true;
           try {
-            harness = await run();
+            const saved = await store.write('PUT', '/api/v1/harnesses/claude-code', { disable_telemetry: v });
             if (disposed) return;
-            if (applied) toast(harness.active_profile_id ? 'Telemetry settings applied' : 'Telemetry preference saved');
+            harness = saved;
+            toast(harness.active_profile_id ? 'Telemetry settings applied' : 'Telemetry preference saved');
           } catch (e) {
-            if (disposed) return;
-            toast('Could not confirm telemetry: ' + (e.detail || e.message), 'bad');
-            try { harness = await store.harness(); }
-            catch (_) { retryTelemetry.hidden = false; retryTelemetry.disabled = false; return; }
+            if (!disposed) toast('Could not update telemetry: ' + (e.detail || e.message), 'bad');
+          } finally {
+            telemetryBusy = false;
+            if (!disposed) { teleSw.setChecked(harness.disable_telemetry); teleSw.setBusy(false); load(true); }
           }
-          telemetryBusy = false;
-          if (!disposed) { retryTelemetry.hidden = true; teleSw.setChecked(harness.disable_telemetry); teleSw.setBusy(false); store.invalidate(); }
-        }
+        } });
         teleSw.setAttribute('data-tip', TELE_FIELDS.map(f => f[0] + ' = "' + f[1] + '"  —  ' + f[2]).join('\n'));
-        const teleBlock = h('div', { class: 'cc-tele' }, h('div', null, teleSw, retryTelemetry, h('div', { class: 'cc-tele-fields' }, TELE_FIELDS.flatMap(([k, v, d]) => [h('code', null, k + ' = "' + v + '"'), h('span', null, d)]))));
+        const teleBlock = h('div', { class: 'cc-tele' }, h('div', null, teleSw, h('div', { class: 'cc-tele-fields' }, TELE_FIELDS.flatMap(([k, v, d]) => [h('code', null, k + ' = "' + v + '"'), h('span', null, d)]))));
 
         const statePill = pill(st.text, st.kind);
         const card = h('div', { class: 'card' },

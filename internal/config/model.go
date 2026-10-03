@@ -115,6 +115,7 @@ type ClientClaudeCodeConfig struct {
 // lock for the lifetime of the callback that receives this value. Results use
 // file-independent config types without depending on Runtime implementation.
 type HarnessMutation interface {
+	CheckConfigETag(string) error
 	Config() Config
 	UpdateHarness(func(*HarnessesConfig) error) error
 	ClearActiveProfileID() error

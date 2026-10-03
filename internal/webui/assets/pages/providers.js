@@ -27,8 +27,7 @@
       const views = new Map(), groups = new Map(), busy = new Set();
       const listHost = h('div');
       const live = h('div', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });
-      const sortRetry = h('button', { class: 'btn', type: 'button', hidden: true }, 'Check provider order');
-      replace(host, sortRetry, listHost, live);
+      replace(host, listHost, live);
       const order = CCAM.providerOrder({
         live, canStart: () => phase === 'idle' && busy.size === 0 && snapshot && !!snapshot.configETag,
         tier: id => { const tier = snapshot.tiers.find(t => t.provider_ids.includes(id)); return tier && { ids: tier.provider_ids.slice(), configETag: snapshot.configETag, rows: groups.get(tier.priority).rows }; },
@@ -41,46 +40,30 @@
       });
       function syncActions() {
         for (const [id, view] of views) { view.sw.setBusy(phase !== 'idle' || busy.has(id)); view.handle.setAttribute('aria-disabled', String((phase !== 'idle' && !(phase === 'dragging' && id === draggingID)) || busy.size > 0)); }
-        for (const [priority, group] of groups) group.hint.textContent = priority === sortingPriority && phase === 'saving' ? 'Saving provider order…' : priority === sortingPriority && phase === 'unconfirmed' ? 'Order not confirmed — check saved state' : group.caption;
+        for (const [priority, group] of groups) group.hint.textContent = priority === sortingPriority && phase === 'saving' ? 'Saving provider order…' : group.caption;
       }
       async function saveOrder(ids, etag, focused) {
         sortingPriority = snapshot.tiers.find(t => t.provider_ids.includes(focused)).priority;
         phase = 'saving'; draggingID = null; loadEpoch++; deferredData = null; syncActions();
-        const read = () => store.providerHealth();
-        const matches = data => data.tiers.some(t => store.same(t.provider_ids, ids));
-        const write = async () => {
-          await api.write('PUT', '/api/v1/providers/order', { provider_ids: ids }, { headers: { 'If-Match': etag } });
-          return read();
-        };
-        await completeOrder(() => store.confirmedWrite(write, read, matches), focused);
-      }
-      async function completeOrder(run, focused, confirmed = true) {
-        sortRetry.disabled = true;
         try {
-          const data = await run();
+          await store.write('PUT', '/api/v1/providers/order', { provider_ids: ids }, { headers: { 'If-Match': etag } });
+          const data = await store.reconnect(() => store.providerHealth());
           if (disposed) return;
-          phase = 'idle'; deferredData = null; sortRetry.hidden = true; loadEpoch++;
-          render(data); live.textContent = confirmed ? 'Provider order saved.' : 'Current provider order loaded.'; toast(live.textContent);
-          views.get(focused)?.handle.focus({ preventScroll: true }); store.invalidate();
+          phase = 'idle'; deferredData = null; loadEpoch++; render(data);
+          live.textContent = 'Provider order saved.'; toast(live.textContent);
+          views.get(focused)?.handle.focus({ preventScroll: true });
         } catch (e) {
           if (disposed) return;
-          if (e.verify) {
-            phase = 'unconfirmed'; sortRetry.hidden = false; sortRetry.disabled = false;
-            sortRetry.onclick = () => completeOrder(e.verify, focused); toast(e.detail, 'bad'); return;
-          }
+          toast(e.code === 'configuration_changed' ? 'Configuration changed. Loading the latest order.' : 'Could not save order: ' + (e.detail || e.message), 'bad');
           try {
-            const data = await store.providerHealth();
+            const data = await store.reconnect(() => store.providerHealth());
             if (disposed) return;
-            phase = 'idle'; deferredData = null; sortRetry.hidden = true; loadEpoch++; render(data);
+            phase = 'idle'; deferredData = null; loadEpoch++; render(data);
             views.get(focused)?.handle.focus({ preventScroll: true });
-            toast(e.code === 'configuration_changed' ? 'Configuration changed. The latest order is shown; try dragging again.' : 'Could not save order: ' + (e.detail || e.message), 'bad');
-          } catch (_) {
-            phase = 'unconfirmed'; sortRetry.hidden = false; sortRetry.disabled = false;
-            sortRetry.onclick = () => completeOrder(() => store.providerHealth(), focused, false);
-            toast('Order is not confirmed. Check provider order before continuing.', 'bad');
-          }
+          } catch (_) { if (!disposed) { phase = 'idle'; load(); } }
         } finally { if (!disposed) syncActions(); }
       }
+
       function place(parent, nodes) {
         nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] || null); });
         while (parent.children.length > nodes.length) CCAM.ui.remove(parent.lastElementChild);
@@ -126,26 +109,24 @@
         place(listHost, sections); syncActions();
       }
       function row(id) {
-        let p, verify = null;
+        let p;
         const dot = healthDot('unknown');
         const link = h('a', { class: 'rc-link', href: '#/providers/' + id });
         const sub = h('div', { class: 'rc-sub' });
         const tags = h('div', { class: 'rc-tags' }), meta = h('div', { class: 'rc-meta' });
-        const retry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => complete(verify) }, 'Check saved state');
         const sw = switchCtl({ onchange: async on => {
           if (busy.has(p.id) || phase !== 'idle') return;
           busy.add(p.id); loadEpoch++; sw.setBusy(true); syncActions();
           const id = p.id;
-          await complete(() => store.confirmedWrite(() => api.put('/api/v1/providers/' + id, Object.assign(stripHealth(p), { enabled: on })), async () => (await api.get('/api/v1/providers')).find(value => value.id === id), value => value && value.enabled === on));
+          await complete(() => store.write('PUT', '/api/v1/providers/' + id, Object.assign(stripHealth(p), { enabled: on })));
         } });
         sw.input.setAttribute('aria-label', 'Enabled');
         const handle = h('button', { class: 'ib pr-drag', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Reorder provider' }, icon('grip'));
         order.bind(id, handle);
         const el = h('div', { class: 'row-card pr-row', dataset: { providerId: id }, onclick: e => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
-          handle, dot, h('div', { class: 'rc-main' }, h('div', { class: 'rc-title' }, link), sub), tags, meta, retry, sw, icon('chevron-right', 'chev'));
+          handle, dot, h('div', { class: 'rc-main' }, h('div', { class: 'rc-title' }, link), sub), tags, meta, sw, icon('chevron-right', 'chev'));
         async function complete(run) {
           if (disposed || !run) return;
-          retry.disabled = true;
           try {
             const saved = await run();
             if (disposed) return;
@@ -153,11 +134,10 @@
             toast(p.name + (p.enabled ? ' enabled' : ' disabled'));
           } catch (e) {
             if (disposed) return;
-            if (e.verify) { verify = e.verify; retry.hidden = false; retry.disabled = false; toast(e.detail, 'bad'); return; }
             toast('Could not update ' + p.name + ': ' + (e.detail || e.message), 'bad');
             sw.setChecked(p.enabled);
           }
-          busy.delete(p.id); verify = null; retry.hidden = true; sw.setBusy(false); store.invalidate();
+          busy.delete(p.id); sw.setBusy(false); store.invalidate();
         }
         function update(value, priority) {
           p = value; handle.setAttribute('aria-label', 'Reorder ' + p.name);
@@ -219,7 +199,6 @@
         if (disposed || isNew || saving || duplicating || draftDirty) return;
         duplicating = true;
         syncDuplicate();
-        let posting = false;
         try {
           for (let attempt = 0; attempt < 2; attempt++) {
             const list = await api.get('/api/v1/providers');
@@ -239,9 +218,7 @@
             delete copy.id;
             copy.name = name;
             try {
-              posting = true;
-              const created = await api.post('/api/v1/providers', copy);
-              posting = false;
+              const created = await store.write('POST', '/api/v1/providers', copy);
               store.invalidate();
               if (!disposed) {
                 toast('Created ' + created.name);
@@ -250,7 +227,6 @@
               return;
             } catch (e) {
               if (attempt === 0 && e.status === 409 && e.code === 'conflict' && e.field === 'name') {
-                posting = false;
                 continue;
               }
               throw e;
@@ -258,9 +234,7 @@
           }
         } catch (e) {
           if (!disposed) {
-            const uncertain = posting && (e.isNetwork || !e.status || e.code === 'invalid_response');
-            toast(uncertain ? 'The copy result is uncertain. Refresh the provider list to check before trying again.'
-              : 'Could not duplicate provider: ' + (e.detail || e.message), 'bad');
+            toast('Could not duplicate provider: ' + (e.detail || e.message), 'bad');
           }
         } finally {
           duplicating = false;
@@ -293,7 +267,7 @@
         bar = savebar({ onSave: save, onRevert: () => { if (isNew) CCAM.router.go('/providers'); else load(); } });
         const dirty = () => JSON.stringify(draft) !== baseline;
         const check = () => { draftDirty = dirty(); syncDuplicate(); bar.show(isNew ? true : draftDirty); Object.values(fields).forEach(f => f.setError && f.setError('')); bar.setError(''); };
-        CCAM.router.setGuard(async () => { if (saving) return false; if (!dirty() && !isNew) return true; if (isNew && JSON.stringify(draft) === JSON.stringify(blankProvider())) return true; return confirm({ title: 'Discard changes?', text: 'This provider has unsaved changes.', confirmLabel: 'Discard', danger: true }); });
+        CCAM.router.setGuard(async () => { if (!saving && !dirty() && !isNew) return true; if (!saving && isNew && JSON.stringify(draft) === JSON.stringify(blankProvider())) return true; return confirm({ title: 'Discard changes?', text: saving ? 'Saving will continue after you leave. Other unsaved edits will be discarded.' : 'This provider has unsaved changes.', confirmLabel: 'Discard', danger: true }); });
 
         // --- form ---
         fields.name = field({ label: 'Name', for: 'p-name', control: input({ id: 'p-name', sans: true, value: draft.name, oninput: (e) => { draft.name = e.target.value; check(); } }), help: 'Shown in logs and health diagnostics. Must be unique.' });
@@ -357,7 +331,10 @@
           const deleteButton = h('button', { class: 'btn danger', type: 'button', onclick: async () => {
               const ok = await confirm({ title: 'Delete ' + provider.name + '?', text: 'The provider and its patches are removed from the configuration. Health history is discarded.', confirmLabel: 'Delete provider', danger: true });
               if (!ok) return;
-              try { await api.del('/api/v1/providers/' + id); toast(provider.name + ' deleted'); store.invalidate(); CCAM.router.clearGuard(); CCAM.router.go('/providers'); }
+              try {
+                await store.write('DELETE', '/api/v1/providers/' + id); toast(provider.name + ' deleted');
+                if (!disposed) { CCAM.router.clearGuard(); CCAM.router.go('/providers'); }
+              }
               catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
             } }, icon('trash'), 'Delete provider');
           const actionsCard = h('div', { class: 'card' },
@@ -376,12 +353,7 @@
           body.tls = tls.getSubmission();
           if (!isNew) body.id = id; else delete body.id;
           saving = true; formCard.inert = true; bar.busy(true); syncDuplicate();
-          const read = async () => {
-            const list = await api.get('/api/v1/providers');
-            return list.find(p => isNew ? p.name === body.name : p.id === id);
-          };
-          const matches = p => p && store.same(Object.assign({}, p, { id: undefined }), Object.assign({}, body, { id: undefined }));
-          await complete(() => store.confirmedWrite(() => isNew ? api.post('/api/v1/providers', body) : api.put('/api/v1/providers/' + id, body), read, matches));
+          await complete(() => store.write(isNew ? 'POST' : 'PUT', isNew ? '/api/v1/providers' : '/api/v1/providers/' + id, body));
         }
         async function complete(run) {
           try {
@@ -397,7 +369,6 @@
             render(saved, patches, (fresh && fresh.providers.find(p => p.id === id)) || Object.assign({}, diag, saved));
           } catch (e) {
             if (disposed) return;
-            if (e.verify) { bar.setError(e.detail); bar.pending(() => complete(e.verify)); return; }
             saving = false; formCard.inert = false; bar.busy(false); syncDuplicate();
             if (e.status === 409 && /name/.test(e.message)) { fields.name.setError('A provider with this name already exists.'); fields.name.querySelector('input').focus(); return; }
             if (e.field) {

@@ -27,11 +27,19 @@
   async function transport(method, path, body, opts) {
     const init = { method, cache: 'no-store', headers: Object.assign({ Accept: 'application/json' }, authHeaders(), opts && opts.headers), signal: opts && opts.signal };
     if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
-    let res;
-    try { res = await fetch(path, init); } catch (e) { throw new ApiError(0, 'network', 'Could not reach CC AutoMux'); }
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (opts?.signal?.aborted) controller.abort();
+    opts?.signal?.addEventListener('abort', abort, { once: true });
+    init.signal = controller.signal;
+    const timer = setTimeout(abort, 10000);
+    let res, text;
+    try { res = await fetch(path, init); text = await res.text(); }
+    catch (e) { throw new ApiError(0, 'network', 'Could not reach CC AutoMux'); }
+    finally { clearTimeout(timer); opts?.signal?.removeEventListener('abort', abort); }
     let json = null;
-    const text = await res.text();
     if (text) { try { json = JSON.parse(text); } catch (e) { throw new ApiError(res.status >= 400 ? res.status : 502, 'invalid_response', 'The service returned an invalid JSON response.'); } }
+
     return { status: res.status, json, headers: res.headers };
   }
 
@@ -47,6 +55,7 @@
       throw new ApiError(res.status, err, (res.json && res.json.message) || err, res.json && res.json.field);
     }
     if (res.status === 204) return null;
+    if (res.json === null) throw new ApiError(502, 'invalid_response', 'The service returned an empty JSON response.');
     if (opts && opts.response) return res;
     return res.json;
   }
@@ -128,10 +137,6 @@
     setKeyProvider(fn) { keyProvider = fn; },
     onUnauthorized(fn) { unauthorizedListeners.push(fn); },
     request, stream, enqueue,
-    write: (method, path, body, opts) => enqueue(() => request(method, path, body, opts)),
-    get: (path, opts) => request('GET', path, undefined, opts),
-    post: (path, body) => enqueue(() => request('POST', path, body)),
-    put: (path, body) => enqueue(() => request('PUT', path, body)),
-    del: (path) => enqueue(() => request('DELETE', path))
+    get: (path, opts) => request('GET', path, undefined, opts)
   };
 })();

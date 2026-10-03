@@ -99,3 +99,25 @@ func TestProviderOrderConditionalAtomicPermutationAndExactTiers(t *testing.T) {
 		t.Fatal("stale order accepted")
 	}
 }
+
+func TestProviderCreationRetryCannotDuplicateOrOverwrite(t *testing.T) {
+	m := testManager(t, nil)
+	h := New(m)
+	tag := m.Snapshot().ConfigETag()
+	body := `{"id":"11111111-1111-4111-8111-111111111111","name":"New","base_url":"https://provider.example"}`
+	write := func() int {
+		r := httptest.NewRequest("POST", "/api/v1/providers", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer management-key")
+		r.Header.Set("If-Match", tag)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if got := write(); got != http.StatusCreated {
+		t.Fatalf("first save = %d", got)
+	}
+	before := m.Snapshot()
+	if got := write(); got != http.StatusPreconditionFailed || m.Snapshot() != before || len(m.Config().Providers) != 1 {
+		t.Fatalf("retry = %d", got)
+	}
+}

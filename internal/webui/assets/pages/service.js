@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const CCAM = window.CCAM;
-  const { h, icon, replace, pill, field, input, secretInput, copyButton, switchCtl, kv, skeleton, errorCard, savebar, toast, confirm, overlay } = CCAM.ui;
+  const { h, icon, replace, pill, field, input, secretInput, copyButton, switchCtl, kv, skeleton, errorCard, savebar, toast, confirm } = CCAM.ui;
   const fmt = CCAM.fmt;
   const store = CCAM.store;
   const api = CCAM.api;
@@ -33,7 +33,7 @@
       ctx.subtitle(['Process binding, keys and runtime state of ', h('b', null, 'this CC AutoMux instance')]);
       const host = h('div', null, skeleton(5, 56));
       ctx.root.appendChild(host);
-      let bar = null, disposed = false;
+      let bar = null, disposed = false, saving = false;
       const disposers = [];
 
       async function load() {
@@ -52,7 +52,7 @@
         const dirty = () => JSON.stringify(draft) !== baseline;
         const restartNeeded = () => draft.port !== port || Math.round(draft.logMb * 1048576) !== config.service.log_max_bytes;
         const check = () => { bar.show(dirty()); Object.values(fields).forEach(f => f.setError && f.setError('')); bar.setError(''); if (dirty() && restartNeeded()) bar.setError(''); restartNote.hidden = !restartNeeded(); };
-        CCAM.router.setGuard(async () => dirty() ? confirm({ title: 'Discard changes?', text: 'Service settings have unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
+        CCAM.router.setGuard(async () => saving || dirty() ? confirm({ title: 'Discard changes?', text: saving ? 'Saving will continue after you leave. Other unsaved edits will be discarded.' : 'Service settings have unsaved changes.', confirmLabel: 'Discard', danger: true }) : true);
 
         // Listener
         fields.listen_addr = field({ label: 'Port', for: 'sv-port', control: input({ id: 'sv-port', type: 'number', value: String(port), attrs: { min: '1', max: '65535', step: '1' }, oninput: (e) => { draft.port = Number(e.target.value) || 0; check(); } }) });
@@ -115,6 +115,7 @@
         check();
 
         async function save() {
+          if (saving || disposed) return;
           if (!(Number.isInteger(draft.port) && draft.port >= 1 && draft.port <= 65535)) { fields.listen_addr.setError('Port must be between 1 and 65535.'); return; }
           if (!(draft.logMb >= 1)) { fields.log_max_bytes.setError('Use at least 1 MB.'); return; }
           if (draft.gateway_key && draft.gateway_key === draft.management_key) { fields.gateway_key.setError('The gateway key must differ from the management key.'); return; }
@@ -125,70 +126,84 @@
           body.auth.management_key = draft.management_key;
           if (restartNeeded()) {
             const ok = await confirm({ title: 'Restart CC AutoMux?', text: 'The new listener or log limit takes effect only after the process re-executes itself. In-flight Claude Code requests will be interrupted.', confirmLabel: 'Save and restart' });
-            if (!ok) return;
+            if (!ok || disposed || saving) return;
           }
-          bar.busy(true);
+          saving = true; listenerCard.inert = true; keysCard.inert = true; bar.busy(true);
           store.stopPolling();
           const resumeUnauthorized = api.pauseUnauthorized();
+          const oldKey = CCAM.auth.key();
           try {
-            let restartPlan;
-            const result = await store.saveConfig(config, body, (result, applied) => {
-              restartPlan = { config: applied, oldKey: CCAM.auth.key() };
-              if (!result.restart_required) CCAM.auth.adopt(applied.auth.management_key);
-            });
-            bar.busy(false);
-            if (result && result.restart_required) {
-              bar.show(false); CCAM.router.clearGuard();
-              if (await waitForRestart(restartPlan)) return;
-            } else { toast('Service settings saved'); }
-            store.invalidate(); store.startPolling(); CCAM.router.clearGuard(); load();
+            let redirected = false;
+            await store.saveConfig(config, body, async (result, applied) => {
+              if (result.restart_required) {
+                // Keep subsequent saves queued until the replacement is ready.
+                redirected = await waitForRestart({ config: applied, oldKey: CCAM.auth.key() });
+              } else {
+                CCAM.auth.adopt(applied.auth.management_key); toast('Service settings saved');
+              }
+            }, applied => ({
+              read: async () => {
+                let failure;
+                for (const key of new Set([applied.auth.management_key, oldKey])) {
+                  try { return await api.get('/api/v1/config', { response: true, silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key } }); }
+                  catch (error) { failure = error; }
+                }
+                throw failure;
+              },
+              onDisconnect: async () => {
+                const target = new URL('http://' + applied.service.listen_addr);
+                if (target.origin !== location.origin && await probeConsole(target.origin)) return { restart_required: true, restarting: true };
+                return null;
+              }
+            }));
+            if (redirected) return;
+            if (!disposed) bar.busy(false);
+            store.invalidate(); store.startPolling(); if (!disposed) { CCAM.router.clearGuard(); load(); }
           } catch (e) {
-            bar.busy(false); store.startPolling();
+            store.startPolling();
+            if (disposed) { toast(e.detail || e.message, 'bad'); return; }
+            bar.busy(false);
             if (e.field) { const f = fields[e.field.replace(/^service\./, '').replace(/^auth\./, '')]; if (f && f.setError) { f.setError(e.detail); return; } if (e.field === 'auth') { fields.gateway_key.setError(e.detail); return; } }
             bar.setError(e.code === 'restart_in_progress' ? 'CC AutoMux is already restarting — try again in a moment.' : (e.detail || e.message));
-          } finally { resumeUnauthorized(); }
+          } finally { saving = false; resumeUnauthorized(); if (!disposed) { listenerCard.inert = false; keysCard.inert = false; } }
         }
         async function waitForRestart(plan) {
           const target = new URL(location.href);
           target.hostname = '127.0.0.1'; target.port = plan.config.service.listen_addr.split(':')[1];
           target.pathname = '/management'; target.search = ''; target.hash = '#/service';
           const changedOrigin = target.origin !== location.origin;
-          const ov = overlay('Restarting CC AutoMux…', changedOrigin
-            ? 'Opening ' + target.origin + '. Sign in again at the new address.'
-            : 'Waiting for the service to apply the new configuration…');
+          toast(changedOrigin ? 'Restarting CC AutoMux at ' + target.origin + '. Sign in again at the new address.' : 'Restarting CC AutoMux…', 'warn');
           const started = Date.now();
-          try {
-            while (!disposed && Date.now() - started < 20000) {
-              await new Promise(r => setTimeout(r, 500));
-              if (changedOrigin && await probeConsole(target.origin)) {
-                CCAM.auth.logout();
-                location.replace(target.href);
-                return true;
+          while (Date.now() - started < 20000) {
+            await new Promise(r => setTimeout(r, 500));
+            if (changedOrigin && await probeConsole(target.origin)) {
+              CCAM.auth.logout();
+              location.replace(target.href);
+              return true;
+            }
+            // Poll only our current origin. Try both credentials during a
+            // pending rotation without signing out on an expected 401.
+            for (const key of new Set([plan.config.auth.management_key, plan.oldKey])) {
+              let st;
+              try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 1500);
+                try { st = await api.get('/api/v1/status', { silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key }, signal: controller.signal }); }
+                finally { clearTimeout(timer); }
+              } catch (e) { continue; }
+              if (st.restart && st.restart.last_error && !st.restart_in_progress) {
+                CCAM.auth.adopt(key);
+                throw new Error('Restart failed. The previous configuration is still active: ' + st.restart.last_error);
               }
-              // Poll only our current origin. Try both credentials during a
-              // pending rotation without signing out on an expected 401.
-              for (const key of new Set([plan.config.auth.management_key, plan.oldKey])) {
-                let st;
-                try {
-                  const controller = new AbortController();
-                  const timer = setTimeout(() => controller.abort(), 1500);
-                  try { st = await api.get('/api/v1/status', { silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key }, signal: controller.signal }); }
-                  finally { clearTimeout(timer); }
-                } catch (e) { continue; }
-                if (st.restart && st.restart.last_error && !st.restart_in_progress) {
-                  CCAM.auth.adopt(key);
-                  throw new Error('Restart failed. The previous configuration is still active: ' + st.restart.last_error);
-                }
-                // For a same-port restart, the changed startup-bound log limit
-                // proves promotion even when two starts share one timestamp second.
-                if (!changedOrigin && !st.restart_in_progress && !st.pending &&
-                    st.listen_addr === plan.config.service.listen_addr && st.log_max_bytes === plan.config.service.log_max_bytes && key === plan.config.auth.management_key) {
-                  CCAM.auth.adopt(key); toast('Restarted with the new configuration'); return false;
-                }
+              // For a same-port restart, the changed startup-bound log limit
+              // proves promotion even when two starts share one timestamp second.
+              if (!changedOrigin && !st.restart_in_progress && !st.pending &&
+                  st.listen_addr === plan.config.service.listen_addr && st.log_max_bytes === plan.config.service.log_max_bytes && key === plan.config.auth.management_key) {
+                CCAM.auth.adopt(key); toast('Restarted with the new configuration'); return false;
               }
             }
-            throw new Error('The service did not restart within 20 seconds. ' + (changedOrigin ? 'Open ' + target.href + ' to reconnect.' : 'Retry after checking the service.'));
-          } finally { ov.close(); }
+          }
+          throw new Error('The service did not restart within 20 seconds. ' + (changedOrigin ? 'Open ' + target.href + ' to reconnect.' : 'Retry after checking the service.'));
         }
 
       }
