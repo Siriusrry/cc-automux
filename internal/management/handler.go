@@ -563,7 +563,7 @@ func (h *Handler) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
 			healthByProvider[item.ProviderID] = item
 		}
 	}
-	w.Header().Set("ETag", snapshot.ConfigETag())
+	w.Header().Set("Config-ETag", snapshot.ConfigETag())
 	result := providerHealthListResponse{
 		Tiers:       providerTiers(snapshot.Config().Providers),
 		Revision:    snapshot.Revision(),

@@ -125,7 +125,7 @@
     providerHealth: async () => {
       const response = await api.get('/api/v1/provider-health', { response: true });
       const data = response.json;
-      data.etag = response.headers.get('ETag');
+      data.configETag = response.headers.get('Config-ETag');
       data.providers = (data.providers || []).map(p => Object.assign({}, p, { models: p.models || [], patches: p.patches || [], channels: p.channels || [], sessions: p.sessions || [] }));
       return data;
     },

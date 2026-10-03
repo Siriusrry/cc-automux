@@ -31,7 +31,10 @@ func TestProviderOrderConditionalAtomicPermutationAndExactTiers(t *testing.T) {
 	if len(health.Tiers) != 3 || health.Tiers[0].Priority != "9223372036854775807" || health.Tiers[1].Priority != "9223372036854775806" || health.Tiers[2].Priority != "-9223372036854775808" {
 		t.Fatalf("tiers: %+v", health.Tiers)
 	}
-	tag := get.Header().Get("ETag")
+	if get.Header().Get("ETag") != "" {
+		t.Fatal("health representation must not use the configuration ETag")
+	}
+	tag := get.Header().Get("Config-ETag")
 	if tag != m.Snapshot().ConfigETag() {
 		t.Fatal("validator mismatch")
 	}

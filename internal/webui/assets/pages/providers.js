@@ -30,8 +30,8 @@
       const sortRetry = h('button', { class: 'btn', type: 'button', hidden: true }, 'Check provider order');
       replace(host, sortRetry, listHost, live);
       const order = CCAM.providerOrder({
-        live, canStart: () => phase === 'idle' && busy.size === 0 && snapshot && !!snapshot.etag,
-        tier: id => { const tier = snapshot.tiers.find(t => t.provider_ids.includes(id)); return tier && { ids: tier.provider_ids.slice(), etag: snapshot.etag, rows: groups.get(tier.priority).rows }; },
+        live, canStart: () => phase === 'idle' && busy.size === 0 && snapshot && !!snapshot.configETag,
+        tier: id => { const tier = snapshot.tiers.find(t => t.provider_ids.includes(id)); return tier && { ids: tier.provider_ids.slice(), configETag: snapshot.configETag, rows: groups.get(tier.priority).rows }; },
         row: id => views.get(id).el, name: id => snapshot.providers.find(p => p.id === id).name,
         onState(id) {
           draggingID = id; phase = id === null ? 'idle' : 'dragging'; syncActions();

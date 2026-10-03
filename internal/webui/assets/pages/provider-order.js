@@ -91,7 +91,7 @@
       if (d.pointer && d.handle.hasPointerCapture(d.pointer.id)) d.handle.releasePointerCapture(d.pointer.id);
       d.handle.focus({ preventScroll: true });
       animateFrom(before, nodes);
-      if (changed) { announce('Saving provider order.'); opts.onCommit(order, d.tier.etag, d.id); }
+      if (changed) { announce('Saving provider order.'); opts.onCommit(order, d.tier.configETag, d.id); }
       else { announce('Order unchanged.'); opts.onState(null); }
     }
     function bind(id, handle) {
