@@ -83,17 +83,23 @@ claude
 
 带保存条的表单通过 **Save changes** 提交，**Revert** 放弃草稿。行内开关和 Profile 操作按界面提示立即生效；配置路径通过 **Apply path** 提交。保存失败时保留输入并显示错误。其他窗口修改了同一配置字段时，先重新加载当前值再提交；无关字段的并发变化会保留。
 
+Auto Mode、TLS 和 Claude Code 路径表单在同页切换选项时，会保留各选项的未应用草稿，切回来可继续编辑。成功应用一个选项后，会丢弃该表单其他未应用草稿；再切回来显示上次已应用的内容。确认离开页面也会丢弃草稿。已应用的内容在刷新和服务重启后仍保留。保存失败保留草稿，结果不确定时先只读核对，再允许下一次写入。遥测切换不会清除独立路径表单的草稿。
+
 ### Provider 与路由
 
 Provider 请求采用 Anthropic Messages API。填写基础 URL，CC AutoMux 会追加 `/v1/messages`，不要重复填写该 endpoint。模型按大小写敏感的完整名称匹配。
 
 为更偏好的 Provider 设置更高优先级。CC AutoMux 使用最高可用层，在同级 Provider 间分配新会话，并尽可能让已有会话继续使用原 Provider。请求失败后可以在尝试上限内继续调用；替代 Provider 成功后才接管会话。
 
+拖动 Provider 行左侧的手柄，可在同一优先级内排序，松开时自动保存。键盘操作：聚焦手柄后按 Space 或 Enter 拾取，上下方向键移动，再按 Space 或 Enter 保存，Esc 取消。排序改变同层轮询的基础顺序，不改变优先级，也不迁移已有粘性会话。其他窗口修改配置时，列表会先更新，再重新排序。
+
 希望 Provider 即使出错也继续接收请求时，可以关闭 **Health cooldown**。它仍然参与调度，因此高优先级 Provider 关闭冷却后，会继续优先于低优先级 Provider；错误仍会记录，方便排查。
 
 同一个上游有多个 key 时，打开已有 Provider，在 **Provider actions** 卡片中点击 **Duplicate**。有未保存修改时，先保存或撤销。副本会自动命名并打开详情页，修改名称和 API key 即可。复制使用已保存的设置，修改副本不影响原 Provider。已启用的 Provider 会产生同样已启用、可立即接收请求的副本。
 
-TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼容补丁必须显式选择并按配置顺序执行，不会因 Provider 名称或 URL 自动启用。
+TLS 默认使用系统根证书；选择 **Custom CA file** 将 PEM 证书加入系统证书池，或为自己控制的本地上游选择 **Skip verification**。切离自定义模式后会保留上次应用的 CA 路径，但不读取该文件。兼容补丁必须显式选择并按配置顺序执行，不会因 Provider 名称或 URL 自动启用。
+
+JSON 中 TLS 使用 `{"mode":"system","ca_file":""}`，mode 可为 `system`、`custom` 或 `skip`；保留的 `ca_file` 仅在 custom 模式生效。已发布的 `ca_file/insecure_skip_verify` 配置仍可读取，后续保存统一使用显式 mode，不能混用两种 selector。旧版程序无法读取新写出的表示。
 
 ### Auto mode
 
@@ -103,9 +109,11 @@ TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼
 
 固定分类器目标可使用 Anthropic Messages、OpenAI Responses 和 OpenAI-compatible。选择与上游接口一致的协议，并指定需要使用的模型。
 
+分类器模型仍由 Provider pool 与 Fixed provider 共用；切到 Off 后保留该模型和此前已应用的固定 Provider 全部配置。
+
 ### Claude Code 文件与 Profile
 
-默认目标是当前用户的 `.claude/settings.json`，也可选择自定义绝对路径。激活只更新受管的网关、模型和遥测字段，保留其他值。首次修改已有文件前建立同目录 `.cc-automux.bak`，已有备份不覆盖；首次创建配置文件不生成备份。
+默认目标是当前用户的 `.claude/settings.json`，也可选择自定义绝对路径。切回 Default location 后保留上次应用的自定义路径，便于以后恢复。激活只更新受管的网关、模型和遥测字段，保留其他值。首次修改已有文件前建立同目录 `.cc-automux.bak`，已有备份不覆盖；首次创建配置文件不生成备份。
 
 在 Profile 的“单请求尝试上限”（**Max attempts per request**）中，设置普通请求最多尝试几次上游。如果临时故障通常能通过再次尝试恢复，可以调高；如果希望更快返回错误，可以调低。
 
@@ -117,7 +125,7 @@ TLS 默认使用系统根证书；自定义 CA 与跳过证书验证互斥。兼
 
 修改网关地址、密钥或模型映射后，可能需要重新激活。重启期间暂时无法检查时，等待服务恢复即可，当前尝试设置仍会保留。清空网关密钥后，需要重新设置密钥并激活 Profile，再连接 Claude Code。
 
-**Disable Claude Code telemetry** 控制开关旁展示的四个字段，激活 Profile 时写入。
+**Disable Claude Code telemetry** 控制开关旁展示的四个字段。有有效 active Profile 时，切换会立即更新配置文件并保持该 Profile 激活；无 active 时只保存供下次激活使用的偏好，不读写目标文件。若目标已被外部修改，需先检查并重新激活。已运行的 Claude Code 会话可能需要重新启动才能加载新的环境值。
 
 ### 日志与重启
 

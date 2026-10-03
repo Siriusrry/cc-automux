@@ -83,17 +83,23 @@ The overview uses `/management`; other pages use `/management#/providers`, `/man
 
 Forms with a save bar require **Save changes**; **Revert** discards the draft. Inline switches and Profile actions apply immediately as indicated. The settings path uses **Apply path**. Failed saves retain the input and show an error. If another window changes the same configuration field, reload the current values before retrying; unrelated concurrent changes are preserved.
 
+When switching options within Auto Mode, TLS, or the Claude Code path form, unfinished inputs remain as page drafts. Returning to the option restores that draft. Successfully applying one option discards the other unsubmitted drafts in that form; returning then shows the last applied values. Confirming that you want to leave the page also discards its drafts. Applied values remain available after reloading or restarting the service. A failed save keeps drafts; an uncertain result offers a read-only check before another write. Telemetry changes leave the independent path draft intact.
+
 ### Providers and routing
 
 Provider requests use the Anthropic Messages API. Enter the base URL; CC AutoMux appends `/v1/messages`. Do not append that endpoint yourself. Model names are case-sensitive and matched exactly.
 
 Set higher priorities for the providers you prefer. CC AutoMux uses the highest available tier, shares new sessions across providers at the same priority, and keeps an existing session on its provider when possible. A failed request can try again within its attempt limit; a replacement takes over the session after it succeeds.
 
+Drag the handle at the left of a provider row to reorder it within its priority group. The order is saved when you drop it. With a keyboard, focus the handle, press Space or Enter, move with the arrow keys, and press Space or Enter to save; Escape cancels. This changes the same-priority round-robin order. It does not change priorities or move existing sticky sessions. If another window changes the configuration, the list reloads before you try again.
+
 Turn off **Health cooldown** only when you want a provider to keep receiving requests despite failures. It remains available for routing, so a higher-priority provider with cooldown off will continue to take precedence over lower-priority providers. Its errors are still recorded for inspection.
 
 If you use multiple keys for the same upstream, open an existing provider and choose **Duplicate** in the **Provider actions** card. Save or revert any unsaved changes first. The copy receives a new name automatically, and its detail page opens so you can change the name and API key. The saved settings are copied; editing the copy does not change the original. An enabled provider produces an enabled copy that can receive requests immediately.
 
-TLS uses system roots by default. A custom CA file and skipping certificate verification are mutually exclusive. Compatibility patches are selected explicitly and run in the chosen order; provider names and URLs do not enable them automatically.
+TLS uses system roots by default. Choose **Custom CA file** to add a PEM bundle to the system roots, or **Skip verification** for a local upstream you control. Switching away from custom trust retains the last applied CA path without reading that file. Compatibility patches are selected explicitly and run in the chosen order; provider names and URLs do not enable them automatically.
+
+In JSON, TLS uses `{"mode":"system","ca_file":""}` with mode `system`, `custom`, or `skip`. A retained `ca_file` is used only in custom mode. Published configurations using `ca_file` and `insecure_skip_verify` remain readable; subsequent saves use the explicit mode. Do not combine `mode` with `insecure_skip_verify`. Older binaries cannot read the new representation.
 
 ### Auto mode
 
@@ -103,9 +109,11 @@ TLS uses system roots by default. A custom CA file and skipping certificate veri
 
 Fixed classifier targets can use Anthropic Messages, OpenAI Responses, or OpenAI-compatible APIs. Choose the protocol matching the upstream endpoint and specify the model you want to use.
 
+The classifier model remains shared between Provider pool and Fixed provider. Switching to Off retains that model and all previously applied fixed-provider settings.
+
 ### Claude Code files and profiles
 
-The default target is the current user's `.claude/settings.json`; you can select an absolute custom path. Activation updates only the managed gateway, model, and telemetry fields and preserves other values. Before the first modification of an existing file, CC AutoMux creates a sibling `.cc-automux.bak`; an existing backup is never overwritten. Creating a new settings file does not create a backup.
+The default target is the current user's `.claude/settings.json`; you can select an absolute custom path. Returning to Default location keeps the last applied custom path for later use. Activation updates only the managed gateway, model, and telemetry fields and preserves other values. Before the first modification of an existing file, CC AutoMux creates a sibling `.cc-automux.bak`; an existing backup is never overwritten. Creating a new settings file does not create a backup.
 
 Use **Max attempts per request** in a profile to choose how many upstream calls a normal request may make. Increase it when another attempt is likely to recover from a temporary failure; lower it when you prefer to return an error sooner.
 
@@ -117,7 +125,7 @@ Saving an inactive profile does not activate it. **Active** means the selected C
 
 Changes to the gateway address, key or model mappings may require reactivation. During a restart, wait for the check to become available again; the current attempt settings are retained. If you clear the gateway key, set it again and reactivate the profile before reconnecting Claude Code.
 
-**Disable Claude Code telemetry** controls the four fields shown beside the switch. Its value is written when a profile is activated.
+**Disable Claude Code telemetry** controls the four fields shown beside the switch. With a valid active profile, switching it immediately updates the settings file and keeps that profile active. Without an active profile, it saves the preference for the next activation and leaves the settings file untouched. Externally changed settings must be checked and reactivated first. A running Claude Code session may need to be restarted to load the new environment values.
 
 ### Logs and restarts
 
