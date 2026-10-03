@@ -50,8 +50,10 @@ type Options struct {
 	// carries the sole Patch Registry/shared AliasStore for this process.
 	// Manager requires it explicitly and reuses it for every published
 	// snapshot; it never constructs replacement runtime state.
-	RuntimeContext          provider.RuntimeContext
-	ScanRequirements        ScanRequirements
+	RuntimeContext   provider.RuntimeContext
+	ScanRequirements ScanRequirements
+	// HarnessValidator and HarnessUpdater must be supplied together. Without
+	// both, this runtime cannot activate or manage an active harness profile.
 	HarnessValidator        config.HarnessValidator
 	HarnessUpdater          config.HarnessUpdatePreparer
 	ClassifierAttemptPolicy scheduler.AttemptPolicy
@@ -266,6 +268,12 @@ func NewManager(store ConfigStore, initial config.Config, options Options) (*Man
 	context := options.RuntimeContext
 	if err := context.Validate(); err != nil {
 		return nil, fmt.Errorf("runtime context: %w", err)
+	}
+	if (options.HarnessValidator == nil) != (options.HarnessUpdater == nil) {
+		return nil, errors.New("harness validator and updater must be supplied together")
+	}
+	if initial.Harnesses.ClaudeCode.ActiveProfileID != "" && options.HarnessValidator == nil {
+		return nil, errors.New("active harness profile requires a validator and updater")
 	}
 	catalog, err := provider.CompileCatalog(initial.Providers, context)
 	if err != nil {
@@ -556,9 +564,6 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 	if checked {
 		var err error
 		if telemetry {
-			if m.harnessUpdater == nil {
-				return ApplyResult{}, check, fmt.Errorf("%w: harness updater is required", config.ErrActiveProfileStateFailed)
-			}
 			fileUpdate, check, err = m.harnessUpdater.PrepareTelemetry(currentConfig, next)
 		} else {
 			check, err = m.checkHarness(next)
@@ -590,6 +595,9 @@ func (m *Manager) applyValidatedLocked(next config.Config, forceCheck bool) (App
 			return ApplyResult{}, check, err
 		}
 		if fileUpdate != nil {
+			// Keep mutation ownership across the external file write and config
+			// persistence so activation and telemetry cannot interleave. The
+			// updater does not acquire this lock; data-plane snapshot reads do not wait.
 			if err := fileUpdate.Commit(); err != nil {
 				return ApplyResult{}, check, m.recoverHarnessUpdateLocked(fileUpdate, err)
 			}
@@ -655,6 +663,9 @@ func (m *Manager) recoverHarnessUpdateLocked(update config.HarnessFileUpdate, ca
 	}
 	m.activeProfileInvalid = true
 	m.harnessInvalidationReason = check.Reason
+	if checkErr != nil || check.Reason == "" {
+		m.harnessInvalidationReason = config.HarnessReasonRecoveryFailed
+	}
 	cfg.Harnesses.ClaudeCode.ActiveProfileID = ""
 	if err := m.store.Save(cfg); err != nil {
 		m.invalidatePolicyLocked()

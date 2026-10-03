@@ -142,6 +142,9 @@ type HarnessValidation struct {
 // HarnessReasonGatewayMissing identifies activation invalidated by a missing key.
 const HarnessReasonGatewayMissing = "gateway_not_configured"
 
+// HarnessReasonRecoveryFailed means a failed update could not be restored and verified.
+const HarnessReasonRecoveryFailed = "telemetry_recovery_failed"
+
 // HarnessValidator owns external-file verification without runtime mutations.
 type HarnessValidator interface {
 	Check(Config) (HarnessValidation, error)

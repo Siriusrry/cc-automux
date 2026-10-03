@@ -386,7 +386,7 @@ func TestManagerHomeResolutionFailureClearsActiveState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	brokenRuntime, err := runtimeconfig.NewManager(fixture.store, fixture.runtime.Config(), runtimeconfig.Options{RuntimeContext: fixture.runtime.RuntimeContext(), HarnessValidator: validator})
+	brokenRuntime, err := runtimeconfig.NewManager(fixture.store, fixture.runtime.Config(), runtimeconfig.Options{RuntimeContext: fixture.runtime.RuntimeContext(), HarnessValidator: validator, HarnessUpdater: NewTelemetryUpdater(validator)})
 	if err != nil {
 		t.Fatal(err)
 	}

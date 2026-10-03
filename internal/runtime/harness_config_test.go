@@ -106,3 +106,49 @@ func TestHarnessRuntimeRejectsClientAndServerActiveIDReplacement(t *testing.T) {
 		t.Fatalf("server active ID replacement error = %v", err)
 	}
 }
+
+func TestManagerRequiresPairedHarnessDependencies(t *testing.T) {
+	_, store, cfg := newRuntimeManager(t, Options{})
+	for _, options := range []Options{
+		{HarnessValidator: testHarnessValidator{}},
+		{HarnessUpdater: testHarnessValidator{}},
+	} {
+		options.RuntimeContext = testRuntimeContext(t)
+		if _, err := NewManager(store, cfg, options); err == nil {
+			t.Fatal("accepted incomplete harness composition")
+		}
+	}
+}
+
+type failingRecoveryValidator struct{ err error }
+
+func (v failingRecoveryValidator) Check(config.Config) (config.HarnessValidation, error) {
+	return config.HarnessValidation{}, v.err
+}
+
+type failedHarnessUpdate struct{}
+
+func (failedHarnessUpdate) Commit() error   { return errors.New("write failed") }
+func (failedHarnessUpdate) Rollback() error { return errors.New("restore failed") }
+
+func TestHarnessRecoveryAlwaysRetainsAnInvalidationReason(t *testing.T) {
+	for _, checkErr := range []error{nil, errors.New("verification unavailable")} {
+		manager, _, _ := newRuntimeManager(t, Options{HarnessValidator: failingRecoveryValidator{err: checkErr}})
+		manager.mu.Lock()
+		err := manager.recoverHarnessUpdateLocked(failedHarnessUpdate{}, errors.New("save failed"))
+		manager.mu.Unlock()
+		if err == nil {
+			t.Fatal("recovery reported success")
+		}
+		manager.harnessValidator = testHarnessValidator{}
+		if err := manager.WithHarnessMutation(func(tx config.HarnessMutation) error {
+			check, err := tx.ReconcileActiveProfile()
+			if check.Reason != config.HarnessReasonRecoveryFailed {
+				t.Fatalf("missing recovery reason: %+v", check)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

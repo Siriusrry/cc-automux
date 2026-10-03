@@ -51,6 +51,9 @@ func newRuntimeManager(t *testing.T, options Options) (*Manager, *config.Store, 
 	if options.HarnessValidator == nil {
 		options.HarnessValidator = testHarnessValidator{}
 	}
+	if options.HarnessUpdater == nil {
+		options.HarnessUpdater = testHarnessValidator{}
+	}
 	manager, err := NewManager(store, cfg, options)
 	if err != nil {
 		t.Fatal(err)
@@ -754,4 +757,8 @@ func TestSnapshotConstructionRequiresPolicySource(t *testing.T) {
 			t.Fatalf("invalid source %q accepted", source)
 		}
 	}
+}
+
+func (testHarnessValidator) PrepareTelemetry(config.Config, config.Config) (config.HarnessFileUpdate, config.HarnessValidation, error) {
+	return nil, config.HarnessValidation{}, errors.New("telemetry update not provided by this test fixture")
 }

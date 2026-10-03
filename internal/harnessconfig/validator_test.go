@@ -47,7 +47,7 @@ func TestCandidateValidationUsesOneReadWriteAndRevision(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			manager, err := runtimeconfig.NewManager(store, base.runtime.Config(), runtimeconfig.Options{RuntimeContext: base.runtime.RuntimeContext(), HarnessValidator: validator})
+			manager, err := runtimeconfig.NewManager(store, base.runtime.Config(), runtimeconfig.Options{RuntimeContext: base.runtime.RuntimeContext(), HarnessValidator: validator, HarnessUpdater: NewTelemetryUpdater(validator)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -132,7 +132,7 @@ func TestStartupUnreadableAndInvalidTargetsUseDefaultBudget(t *testing.T) {
 				files = NewFileStore(FileStoreOptions{FS: &faultOps{failTargetOpen: errors.New("unreadable")}})
 			}
 			validator, _ := NewValidator(f.harness.registry, files, []string{filepath.Join(f.home, "unused")})
-			manager, err := runtimeconfig.NewManager(f.store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: validator})
+			manager, err := runtimeconfig.NewManager(f.store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: validator, HarnessUpdater: NewTelemetryUpdater(validator)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -171,7 +171,7 @@ func TestRestoredFileLiftsFailedClearGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &countingSaveStore{Store: f.store}
-	manager, err := runtimeconfig.NewManager(store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: f.harness.Validator})
+	manager, err := runtimeconfig.NewManager(store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: f.harness.Validator, HarnessUpdater: NewTelemetryUpdater(f.harness.Validator)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestFailedKeyRemovalDoesNotRecordInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &countingSaveStore{Store: f.store}
-	manager, err := runtimeconfig.NewManager(store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: f.harness.Validator})
+	manager, err := runtimeconfig.NewManager(store, f.runtime.Config(), runtimeconfig.Options{RuntimeContext: f.runtime.RuntimeContext(), HarnessValidator: f.harness.Validator, HarnessUpdater: NewTelemetryUpdater(f.harness.Validator)})
 	if err != nil {
 		t.Fatal(err)
 	}

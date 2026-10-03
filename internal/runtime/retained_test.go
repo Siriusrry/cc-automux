@@ -47,7 +47,7 @@ func TestRetainedSettingsPersistWithoutDormantRuntimeEffects(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(disk, manager.Config()) {
 		t.Fatalf("disk mismatch: %v", err)
 	}
-	restarted, err := NewManager(store, disk, Options{RuntimeContext: testRuntimeContext(t), HarnessValidator: testHarnessValidator{}})
+	restarted, err := NewManager(store, disk, Options{RuntimeContext: testRuntimeContext(t), HarnessValidator: testHarnessValidator{}, HarnessUpdater: testHarnessValidator{}})
 	if err != nil || restarted.Config().AutoMode.Model != "classifier" {
 		t.Fatalf("reload: %v", err)
 	}
