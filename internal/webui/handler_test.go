@@ -44,8 +44,8 @@ func TestEmbeddedConsole(t *testing.T) {
 		t.Fatal("console headers")
 	}
 	refs := regexp.MustCompile("(?:src|href)=\"(/management/assets/[^\"]+)\"").FindAllStringSubmatch(r.Body.String(), -1)
-	if len(refs) != 26 {
-		t.Fatalf("asset references = %d, want 26", len(refs))
+	if len(refs) != 27 {
+		t.Fatalf("asset references = %d, want 27", len(refs))
 	}
 	for _, ref := range refs {
 		asset := httptest.NewRecorder()

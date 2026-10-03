@@ -109,6 +109,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case apiPrefix + "/config":
 		h.handleConfig(w, r)
+	case apiPrefix + "/providers/order":
+		h.handleProviderOrder(w, r)
 	case apiPrefix + "/providers":
 		h.handleProviders(w, r)
 	case apiPrefix + "/provider-patches":
@@ -536,6 +538,7 @@ type providerHealthResponse struct {
 }
 
 type providerHealthListResponse struct {
+	Tiers       []providerTierResponse   `json:"tiers"`
 	Revision    uint64                   `json:"revision"`
 	GeneratedAt time.Time                `json:"generated_at"`
 	Providers   []providerHealthResponse `json:"providers"`
@@ -560,7 +563,9 @@ func (h *Handler) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
 			healthByProvider[item.ProviderID] = item
 		}
 	}
+	w.Header().Set("ETag", snapshot.ConfigETag())
 	result := providerHealthListResponse{
+		Tiers:       providerTiers(snapshot.Config().Providers),
 		Revision:    snapshot.Revision(),
 		GeneratedAt: generatedAt,
 		Providers:   make([]providerHealthResponse, 0, len(providers)),
@@ -732,6 +737,10 @@ func (h *Handler) writeSemanticError(w http.ResponseWriter, err error) {
 }
 
 func (h *Handler) writeApplyError(w http.ResponseWriter, err error) {
+	if errors.Is(err, runtime.ErrPreconditionRequired) {
+		writeError(w, http.StatusPreconditionRequired, "precondition_required", "A configuration validator is required.")
+		return
+	}
 	if errors.Is(err, config.ErrActiveProfileStateFailed) {
 		writeError(w, http.StatusInternalServerError, "active_profile_state_failed", "active profile state could not be persisted")
 		return

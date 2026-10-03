@@ -123,7 +123,9 @@
     config: () => cached('config', () => api.get('/api/v1/config')),
     providers: () => cached('providers', async () => (await api.get('/api/v1/providers')) || []),
     providerHealth: async () => {
-      const data = await api.get('/api/v1/provider-health');
+      const response = await api.get('/api/v1/provider-health', { response: true });
+      const data = response.json;
+      data.etag = response.headers.get('ETag');
       data.providers = (data.providers || []).map(p => Object.assign({}, p, { models: p.models || [], patches: p.patches || [], channels: p.channels || [], sessions: p.sessions || [] }));
       return data;
     },

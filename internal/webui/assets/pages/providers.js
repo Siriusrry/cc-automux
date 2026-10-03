@@ -10,11 +10,9 @@
 
   const STATIC_TEXT = { disabled_provider: 'Disabled', no_models: 'No models' };
 
-  function tiersOf(list) {
-    const sorted = list.slice().sort((a, b) => b.priority - a.priority);
-    const tiers = [];
-    sorted.forEach(p => { let t = tiers.find(x => x.priority === p.priority); if (!t) { t = { priority: p.priority, items: [] }; tiers.push(t); } t.items.push(p); });
-    return tiers;
+  function tiersOf(data) {
+    const byID = new Map(data.providers.map(p => [p.id, p]));
+    return data.tiers.map(tier => ({ priority: tier.priority, items: tier.provider_ids.map(id => byID.get(id)).filter(Boolean) }));
   }
 
   // ---------- list ----------
@@ -24,11 +22,65 @@
       ctx.actions([h('a', { class: 'btn primary', href: '#/providers/new' }, icon('plus'), 'Add provider')]);
       const host = h('div', null, skeleton(4, 68));
       ctx.root.appendChild(host);
-      let disposed = false, loadEpoch = 0;
+      let disposed = false, loadEpoch = 0, phase = 'idle', snapshot = null, deferredData = null, sortingPriority = null;
       let patchIndex = {};
       const views = new Map(), groups = new Map(), busy = new Set();
       const listHost = h('div');
-      replace(host, listHost);
+      const live = h('div', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });
+      const sortRetry = h('button', { class: 'btn', type: 'button', hidden: true }, 'Check provider order');
+      replace(host, sortRetry, listHost, live);
+      const order = CCAM.providerOrder({
+        live, canStart: () => phase === 'idle' && busy.size === 0 && snapshot && !!snapshot.etag,
+        tier: id => { const tier = snapshot.tiers.find(t => t.provider_ids.includes(id)); return tier && { ids: tier.provider_ids.slice(), etag: snapshot.etag, rows: groups.get(tier.priority).rows }; },
+        row: id => views.get(id).el, name: id => snapshot.providers.find(p => p.id === id).name,
+        onState(active) {
+          phase = active ? 'dragging' : 'idle'; syncActions();
+          if (!active && deferredData && !disposed) { const data = deferredData; deferredData = null; render(data); }
+        },
+        onCommit: saveOrder
+      });
+      function syncActions() {
+        for (const [id, view] of views) { view.sw.setBusy(phase !== 'idle' || busy.has(id)); view.handle.setAttribute('aria-disabled', String((phase !== 'idle' && !(phase === 'dragging' && view.handle.getAttribute('aria-pressed') === 'true')) || busy.size > 0)); }
+        for (const [priority, group] of groups) group.hint.textContent = priority === sortingPriority && phase === 'saving' ? 'Saving provider order…' : priority === sortingPriority && phase === 'unconfirmed' ? 'Order not confirmed — check saved state' : group.caption;
+      }
+      async function saveOrder(ids, etag, focused) {
+        sortingPriority = snapshot.tiers.find(t => t.provider_ids.includes(focused)).priority;
+        phase = 'saving'; loadEpoch++; deferredData = null; syncActions();
+        const read = () => store.providerHealth();
+        const matches = data => data.tiers.some(t => store.same(t.provider_ids, ids));
+        const write = async () => {
+          await api.write('PUT', '/api/v1/providers/order', { provider_ids: ids }, { headers: { 'If-Match': etag } });
+          return read();
+        };
+        await completeOrder(() => store.confirmedWrite(write, read, matches), focused);
+      }
+      async function completeOrder(run, focused, confirmed = true) {
+        sortRetry.disabled = true;
+        try {
+          const data = await run();
+          if (disposed) return;
+          phase = 'idle'; deferredData = null; sortRetry.hidden = true; loadEpoch++;
+          render(data); live.textContent = confirmed ? 'Provider order saved.' : 'Current provider order loaded.'; toast(live.textContent);
+          views.get(focused)?.handle.focus({ preventScroll: true }); store.invalidate();
+        } catch (e) {
+          if (disposed) return;
+          if (e.verify) {
+            phase = 'unconfirmed'; sortRetry.hidden = false; sortRetry.disabled = false;
+            sortRetry.onclick = () => completeOrder(e.verify, focused); toast(e.detail, 'bad'); return;
+          }
+          try {
+            const data = await store.providerHealth();
+            if (disposed) return;
+            phase = 'idle'; deferredData = null; sortRetry.hidden = true; loadEpoch++; render(data);
+            views.get(focused)?.handle.focus({ preventScroll: true });
+            toast(e.code === 'configuration_changed' ? 'Configuration changed. The latest order is shown; try dragging again.' : 'Could not save order: ' + (e.detail || e.message), 'bad');
+          } catch (_) {
+            phase = 'unconfirmed'; sortRetry.hidden = false; sortRetry.disabled = false;
+            sortRetry.onclick = () => completeOrder(() => store.providerHealth(), focused, false);
+            toast('Order is not confirmed. Check provider order before continuing.', 'bad');
+          }
+        } finally { if (!disposed) syncActions(); }
+      }
       function place(parent, nodes) {
         nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] || null); });
         while (parent.children.length > nodes.length) parent.lastElementChild.remove();
@@ -40,10 +92,11 @@
           if (disposed || epoch !== loadEpoch) return;
           patchIndex = {};
           (Array.isArray(patchList) ? patchList : (patchList && patchList.patches) || []).forEach(x => { patchIndex[x.id] = x; });
-          render(data.providers);
-        } catch (e) { if (!disposed && epoch === loadEpoch) toast('Could not refresh providers: ' + (e.detail || e.message), 'bad'); }
+          if (phase === 'idle') render(data); else deferredData = data;
+        } catch (e) { if (!disposed && epoch === loadEpoch) { if (!views.size) replace(listHost, errorCard(e.detail || e.message, load)); else toast('Could not refresh providers: ' + (e.detail || e.message), 'bad'); } }
       }
-      function render(list) {
+      function render(data) {
+        snapshot = data; const list = data.providers;
         ctx.subtitle([h('b', null, fmt.plural(list.length, 'provider')), ' · upstreams that speak the Anthropic Messages API, scheduled by priority']);
         if (!list.length) {
           views.clear(); groups.clear();
@@ -52,7 +105,7 @@
         }
         const ids = new Set(list.map(p => p.id));
         for (const [id, view] of views) if (!ids.has(id)) { view.el.remove(); views.delete(id); }
-        const tiers = tiersOf(list);
+        const tiers = tiersOf(data);
         const sections = tiers.map((t, i) => {
           let group = groups.get(t.priority);
           if (!group) {
@@ -60,16 +113,17 @@
             group = { rows, hint, el: h('section', { class: 'pr-tier' }, h('div', { class: 'pr-tier-head' }, h('p', { class: 'eyebrow' }, 'Priority ' + fmt.priorityLabel(t.priority)), hint), rows) };
             groups.set(t.priority, group);
           }
-          group.hint.textContent = tiers.length === 1 ? 'new sessions round-robin across this tier' : i === 0 ? 'tried first · round-robin within the tier' : 'used only while every higher tier is unavailable';
-          place(group.rows, t.items.map(p => {
+          group.caption = tiers.length === 1 ? 'new sessions round-robin across this tier' : i === 0 ? 'tried first · round-robin within the tier' : 'used only while every higher tier is unavailable';
+          const nodes = t.items.map(p => {
             let view = views.get(p.id);
             if (!view) { view = row(p); views.set(p.id, view); }
-            view.update(p); return view.el;
-          }));
+            view.update(p, t.priority); view.handle.disabled = t.items.length < 2; return view.el;
+          });
+          order.reconcile(nodes, () => place(group.rows, nodes));
           return group.el;
         });
         for (const [priority] of groups) if (!tiers.some(t => t.priority === priority)) groups.delete(priority);
-        place(listHost, sections);
+        place(listHost, sections); syncActions();
       }
       function row(initial) {
         let p = initial, verify = null;
@@ -79,14 +133,16 @@
         const tags = h('div', { class: 'rc-tags' }), meta = h('div', { class: 'rc-meta' });
         const retry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => complete(verify) }, 'Check saved state');
         const sw = switchCtl({ checked: p.enabled, onchange: async on => {
-          if (busy.has(p.id)) return;
-          busy.add(p.id); loadEpoch++; sw.setBusy(true);
+          if (busy.has(p.id) || phase !== 'idle') return;
+          busy.add(p.id); loadEpoch++; sw.setBusy(true); syncActions();
           const id = p.id;
           await complete(() => store.confirmedWrite(() => api.put('/api/v1/providers/' + id, Object.assign(stripHealth(p), { enabled: on })), async () => (await api.get('/api/v1/providers')).find(value => value.id === id), value => value && value.enabled === on));
         } });
         sw.input.setAttribute('aria-label', 'Enabled');
+        const handle = h('button', { class: 'ib pr-drag', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Reorder ' + p.name, 'data-tip': 'Drag within this priority. Keyboard: Space, arrow keys, Space.' }, icon('grip'));
+        order.bind(p.id, handle);
         const el = h('div', { class: 'row-card pr-row', dataset: { providerId: p.id }, onclick: e => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
-          dot, h('div', { class: 'rc-main' }, h('div', { class: 'rc-title' }, link), sub), tags, meta, retry, sw, icon('chevron-right', 'chev'));
+          handle, dot, h('div', { class: 'rc-main' }, h('div', { class: 'rc-title' }, link), sub), tags, meta, retry, sw, icon('chevron-right', 'chev'));
         async function complete(run) {
           if (disposed || !run) return;
           retry.disabled = true;
@@ -103,8 +159,8 @@
           }
           busy.delete(p.id); verify = null; retry.hidden = true; sw.setBusy(false); store.invalidate();
         }
-        function update(value) {
-          p = value;
+        function update(value, priority) {
+          p = value; handle.setAttribute('aria-label', 'Reorder ' + p.name);
           const stat = p.static_availability, state = p.global_health ? p.global_health.state : 'unknown', n = p.models.length;
           el.classList.toggle('dim', stat !== 'active');
           const nextDot = healthDot(stat === 'active' ? state : 'unknown'); dot.className = nextDot.className;
@@ -116,19 +172,19 @@
           tip(healthCell, healthSummary(p), { live: state === 'cooldown' });
           const patchNames = p.patches.map(id => patchIndex[id] ? patchIndex[id].name : id);
           replace(meta,
-            tip(h('span', { class: 'prio' }, 'P ' + fmt.priorityLabel(p.priority)), priorityTip(p.priority)),
+            tip(h('span', { class: 'prio' }, 'P ' + priority), priorityTip(priority)),
             tip(h('span', { class: 'm' }, icon('patch'), String(p.patches.length)), () => tipBlock({ title: 'Provider patches · ' + p.patches.length, list: patchNames, note: patchNames.length ? 'Request rewrites applied in this order.' : 'No patches — requests are forwarded exactly as received.' })),
             tip(h('span', { class: 'm' }, icon('sessions'), String(p.active_session_count)), () => tipBlock({ title: 'Sticky bindings · ' + p.active_session_count, note: 'A session keeps its provider for one hour after its last request.' })), h('span', { class: 'hs' }, healthCell));
           sw.setAttribute('data-tip', p.enabled ? 'Enabled — in rotation. Turn off to stop routing here without deleting the provider.' : 'Disabled — receives no traffic. Turn on to put it back in rotation.');
           if (!busy.has(p.id)) sw.setChecked(p.enabled);
           sw.setBusy(busy.has(p.id));
         }
-        return { el, sw, update };
+        return { el, sw, handle, update };
       }
       load();
       const off = store.on('invalidate', load);
       const tick = setInterval(() => { if (!disposed) load(); }, 15000);
-      return () => { disposed = true; off(); clearInterval(tick); };
+      return () => { disposed = true; order.destroy(); off(); clearInterval(tick); };
     }
   };
 

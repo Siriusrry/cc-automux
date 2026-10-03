@@ -1704,3 +1704,36 @@ func TestStickyRetryQualificationIsSeparateByModelAndType(t *testing.T) {
 		})
 	}
 }
+
+func TestReorderKeepsCursorIdentityStickyAndCapturedCandidates(t *testing.T) {
+	h := newFakeHealth()
+	s := newTestScheduler(t, h, Policy{}, nil)
+	a, b, c := compileProvider(t, providerA, "a", []string{"m"}, 0), compileProvider(t, providerB, "b", []string{"m"}, 0), compileProvider(t, providerC, "c", []string{"m"}, 0)
+	old := &fakeSnapshot{revision: 1, providers: []*provider.CompiledProvider{a, b, c}}
+	s.Reconcile(old)
+	take := func(snapshot *fakeSnapshot, session string, kind traffic.RequestType, selection *RequestSelection) AttemptLease {
+		lease, err := s.Acquire(snapshot, StickyKey{SessionID: session, Model: "m", RequestType: kind}, selection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lease
+	}
+	take(old, "sticky-a", traffic.RequestTypeNormal, NewRequestSelection(old.AttemptPolicy()))
+	take(old, "sticky-b", traffic.RequestTypeNormal, NewRequestSelection(old.AttemptPolicy()))
+	captured := NewRequestSelection(old.AttemptPolicy())
+	take(old, "", traffic.RequestTypeClassifier, captured)
+	next := &fakeSnapshot{revision: 2, providers: []*provider.CompiledProvider{c, b, a}}
+	s.Reconcile(next)
+	if got := take(next, "new", traffic.RequestTypeNormal, NewRequestSelection(next.AttemptPolicy())).Provider.ID; got != providerA {
+		t.Fatalf("cursor B successor = %s", got)
+	}
+	if got := take(next, "sticky-b", traffic.RequestTypeNormal, NewRequestSelection(next.AttemptPolicy())); got.Provider.ID != providerB || !got.FromSticky {
+		t.Fatal("sticky changed")
+	}
+	if got := take(next, "", traffic.RequestTypeClassifier, NewRequestSelection(next.AttemptPolicy())).Provider.ID; got != providerC {
+		t.Fatalf("independent classifier cursor = %s", got)
+	}
+	if got := take(old, "", traffic.RequestTypeClassifier, captured).Provider.ID; got != providerB {
+		t.Fatalf("captured sequence changed: %s", got)
+	}
+}
