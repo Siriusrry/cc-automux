@@ -17,7 +17,7 @@
       drag = { id, handle, tier, rects, order: tier.ids.slice(), pointer, startY: pointer ? pointer.y + window.scrollY : 0, startX: pointer ? pointer.x : 0,
         scrollY: window.scrollY, top: rect.top + window.scrollY, bounds, lifted: !pointer, valid: true, delta: 0 };
       if (!pointer) lift();
-      opts.onState(true);
+      opts.onState(id);
       return true;
     }
     function lift() {
@@ -92,7 +92,7 @@
       d.handle.focus({ preventScroll: true });
       animateFrom(before, nodes);
       if (changed) { announce('Saving provider order.'); opts.onCommit(order, d.tier.etag, d.id); }
-      else { announce('Order unchanged.'); opts.onState(false); }
+      else { announce('Order unchanged.'); opts.onState(null); }
     }
     function bind(id, handle) {
       handle.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); });

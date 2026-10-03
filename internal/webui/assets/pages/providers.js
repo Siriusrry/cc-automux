@@ -22,7 +22,7 @@
       ctx.actions([h('a', { class: 'btn primary', href: '#/providers/new' }, icon('plus'), 'Add provider')]);
       const host = h('div', null, skeleton(4, 68));
       ctx.root.appendChild(host);
-      let disposed = false, loadEpoch = 0, phase = 'idle', snapshot = null, deferredData = null, sortingPriority = null;
+      let disposed = false, loadEpoch = 0, phase = 'idle', draggingID = null, snapshot = null, deferredData = null, sortingPriority = null;
       let patchIndex = {};
       const views = new Map(), groups = new Map(), busy = new Set();
       const listHost = h('div');
@@ -33,19 +33,19 @@
         live, canStart: () => phase === 'idle' && busy.size === 0 && snapshot && !!snapshot.etag,
         tier: id => { const tier = snapshot.tiers.find(t => t.provider_ids.includes(id)); return tier && { ids: tier.provider_ids.slice(), etag: snapshot.etag, rows: groups.get(tier.priority).rows }; },
         row: id => views.get(id).el, name: id => snapshot.providers.find(p => p.id === id).name,
-        onState(active) {
-          phase = active ? 'dragging' : 'idle'; syncActions();
-          if (!active && deferredData && !disposed) { const data = deferredData; deferredData = null; render(data); }
+        onState(id) {
+          draggingID = id; phase = id === null ? 'idle' : 'dragging'; syncActions();
+          if (id === null && deferredData && !disposed) { const data = deferredData; deferredData = null; render(data); }
         },
         onCommit: saveOrder
       });
       function syncActions() {
-        for (const [id, view] of views) { view.sw.setBusy(phase !== 'idle' || busy.has(id)); view.handle.setAttribute('aria-disabled', String((phase !== 'idle' && !(phase === 'dragging' && view.handle.getAttribute('aria-pressed') === 'true')) || busy.size > 0)); }
+        for (const [id, view] of views) { view.sw.setBusy(phase !== 'idle' || busy.has(id)); view.handle.setAttribute('aria-disabled', String((phase !== 'idle' && !(phase === 'dragging' && id === draggingID)) || busy.size > 0)); }
         for (const [priority, group] of groups) group.hint.textContent = priority === sortingPriority && phase === 'saving' ? 'Saving provider order…' : priority === sortingPriority && phase === 'unconfirmed' ? 'Order not confirmed — check saved state' : group.caption;
       }
       async function saveOrder(ids, etag, focused) {
         sortingPriority = snapshot.tiers.find(t => t.provider_ids.includes(focused)).priority;
-        phase = 'saving'; loadEpoch++; deferredData = null; syncActions();
+        phase = 'saving'; draggingID = null; loadEpoch++; deferredData = null; syncActions();
         const read = () => store.providerHealth();
         const matches = data => data.tiers.some(t => store.same(t.provider_ids, ids));
         const write = async () => {
@@ -139,7 +139,7 @@
           await complete(() => store.confirmedWrite(() => api.put('/api/v1/providers/' + id, Object.assign(stripHealth(p), { enabled: on })), async () => (await api.get('/api/v1/providers')).find(value => value.id === id), value => value && value.enabled === on));
         } });
         sw.input.setAttribute('aria-label', 'Enabled');
-        const handle = h('button', { class: 'ib pr-drag', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Reorder ' + p.name, 'data-tip': 'Drag within this priority. Keyboard: Space, arrow keys, Space.' }, icon('grip'));
+        const handle = h('button', { class: 'ib pr-drag', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Reorder ' + p.name }, icon('grip'));
         order.bind(p.id, handle);
         const el = h('div', { class: 'row-card pr-row', dataset: { providerId: p.id }, onclick: e => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
           handle, dot, h('div', { class: 'rc-main' }, h('div', { class: 'rc-title' }, link), sub), tags, meta, retry, sw, icon('chevron-right', 'chev'));
