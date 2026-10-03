@@ -132,20 +132,14 @@ type targetState struct {
 // checks used by Apply. A missing target returns an error matching
 // os.ErrNotExist.
 func (s *FileStore) Read(path string) ([]byte, error) {
-	if s == nil || s.fs == nil {
-		return nil, ErrNilFileSystem
-	}
-	if err := validateTargetPath(path); err != nil {
-		return nil, err
-	}
-	data, exists, err := s.readExisting(path)
+	state, err := s.readState(path)
 	if err != nil {
 		return nil, err
 	}
-	if !exists {
+	if !state.exists {
 		return nil, os.ErrNotExist
 	}
-	return data, nil
+	return state.data, nil
 }
 
 // Apply rereads the target, merges the complete managed projection, creates a
@@ -172,34 +166,7 @@ type PreparedFile struct {
 	written    *targetState
 }
 
-func (s *FileStore) readState(path string) (targetState, error) {
-	if s == nil || s.fs == nil {
-		return targetState{}, ErrNilFileSystem
-	}
-	if err := validateTargetPath(path); err != nil {
-		return targetState{}, err
-	}
-	data, exists, err := s.readExisting(path)
-	if err != nil {
-		return targetState{}, err
-	}
-	state := targetState{exists: exists, data: data}
-	if exists {
-		state.info, err = s.fs.Lstat(path)
-		if err != nil {
-			return targetState{}, fileError("inspect target", path, ErrTargetIO, err)
-		}
-	}
-	return state, nil
-}
-
 func (s *FileStore) Prepare(path string, adapter Adapter, projection ManagedProjection) (*PreparedFile, error) {
-	if s == nil || s.fs == nil {
-		return nil, ErrNilFileSystem
-	}
-	if err := validateTargetPath(path); err != nil {
-		return nil, err
-	}
 	state, err := s.readState(path)
 	if err != nil {
 		return nil, err
@@ -291,15 +258,11 @@ func (p *PreparedFile) Rollback() error {
 // verification outside this function fails.
 func (s *FileStore) replacePrepared(path string, expected targetState, data []byte) (*targetState, error) {
 	directory := filepath.Dir(path)
-	temporaryPath, err := s.writeTemporary(directory, data)
+	temporaryPath, info, err := s.writeTemporary(directory, data)
 	if err != nil {
 		return nil, err
 	}
 	defer s.fs.Remove(temporaryPath)
-	info, err := s.fs.Lstat(temporaryPath)
-	if err != nil {
-		return nil, fileError("inspect temporary target", temporaryPath, ErrTargetIO, err)
-	}
 	if err := s.checkTargetBeforeReplace(path, expected); err != nil {
 		return nil, err
 	}
@@ -389,58 +352,74 @@ func samePath(first, second string) bool {
 	return false
 }
 
-func (s *FileStore) readExisting(path string) ([]byte, bool, error) {
+func (s *FileStore) readState(path string) (targetState, error) {
+	if s == nil || s.fs == nil {
+		return targetState{}, ErrNilFileSystem
+	}
+	if err := validateTargetPath(path); err != nil {
+		return targetState{}, err
+	}
 	info, err := s.fs.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
+		return targetState{}, nil
 	}
 	if err != nil {
-		return nil, false, fileError("inspect target", path, ErrTargetIO, err)
+		return targetState{}, fileError("inspect target", path, ErrTargetIO, err)
 	}
 	if info == nil {
-		return nil, false, fileError("inspect target", path, ErrTargetIO, errors.New("filesystem returned nil target info"))
+		return targetState{}, fileError("inspect target", path, ErrTargetIO, errors.New("filesystem returned nil target info"))
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, false, fileError("inspect target", path, ErrTargetSymlink, nil)
+		return targetState{}, fileError("inspect target", path, ErrTargetSymlink, nil)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, false, fileError("inspect target", path, ErrTargetNotRegular, nil)
+		return targetState{}, fileError("inspect target", path, ErrTargetNotRegular, nil)
 	}
 	if info.Size() > MaxExistingTargetBytes {
-		return nil, false, fileError("read target", path, ErrTargetTooLarge, nil)
+		return targetState{}, fileError("read target", path, ErrTargetTooLarge, nil)
 	}
 	file, err := s.fs.Open(path)
 	if err != nil {
-		return nil, false, fileError("open target", path, ErrTargetIO, err)
+		return targetState{}, fileError("open target", path, ErrTargetIO, err)
 	}
 	openedInfo, statErr := file.Stat()
 	if statErr != nil {
 		closeErr := file.Close()
-		return nil, false, joinFileErrors("stat target", path, ErrTargetIO, statErr, closeErr)
+		return targetState{}, joinFileErrors("stat target", path, ErrTargetIO, statErr, closeErr)
+	}
+	if openedInfo == nil {
+		_ = file.Close()
+		return targetState{}, fileError("stat target", path, ErrTargetIO, errors.New("filesystem returned nil target info"))
 	}
 	if openedInfo.Mode()&os.ModeSymlink != 0 || !openedInfo.Mode().IsRegular() {
 		closeErr := file.Close()
-		return nil, false, joinFileErrors("inspect opened target", path, ErrTargetNotRegular, nil, closeErr)
+		return targetState{}, joinFileErrors("inspect opened target", path, ErrTargetNotRegular, nil, closeErr)
 	}
 	if openedInfo.Size() > MaxExistingTargetBytes {
 		closeErr := file.Close()
-		return nil, false, joinFileErrors("read target", path, ErrTargetTooLarge, nil, closeErr)
+		return targetState{}, joinFileErrors("read target", path, ErrTargetTooLarge, nil, closeErr)
+	}
+	if !os.SameFile(info, openedInfo) {
+		_ = file.Close()
+		return targetState{}, fileError("open target", path, ErrTargetChanged, nil)
 	}
 	data, readErr := io.ReadAll(io.LimitReader(file, MaxExistingTargetBytes+1))
 	closeErr := file.Close()
 	if readErr != nil {
-		return nil, false, joinFileErrors("read target", path, ErrTargetIO, readErr, closeErr)
+		return targetState{}, joinFileErrors("read target", path, ErrTargetIO, readErr, closeErr)
 	}
 	if closeErr != nil {
-		return nil, false, fileError("close target", path, ErrTargetIO, closeErr)
+		return targetState{}, fileError("close target", path, ErrTargetIO, closeErr)
 	}
 	if int64(len(data)) > MaxExistingTargetBytes {
-		return nil, false, fileError("read target", path, ErrTargetTooLarge, nil)
+		return targetState{}, fileError("read target", path, ErrTargetTooLarge, nil)
 	}
-	if info.Size() >= 0 && int64(len(data)) != info.Size() {
-		return nil, false, fileError("read target", path, ErrTargetChanged, nil)
+	if openedInfo.Size() >= 0 && int64(len(data)) != openedInfo.Size() {
+		return targetState{}, fileError("read target", path, ErrTargetChanged, nil)
 	}
-	return data, true, nil
+	// Handle-based Stat captures identity eagerly on Windows; path-based
+	// FileInfo may try to resolve identity after a later rename or replacement.
+	return targetState{exists: true, info: openedInfo, data: data}, nil
 }
 
 func (s *FileStore) inspectBackup(path string) (bool, error) {
@@ -524,7 +503,7 @@ func (s *FileStore) createBackup(path string, original []byte) (bool, error) {
 	return true, nil
 }
 
-func (s *FileStore) writeTemporary(directory string, data []byte) (string, error) {
+func (s *FileStore) writeTemporary(directory string, data []byte) (string, fs.FileInfo, error) {
 	stamp := int64(0)
 	if s.clock != nil {
 		stamp = s.clock.Now().UnixNano()
@@ -532,15 +511,15 @@ func (s *FileStore) writeTemporary(directory string, data []byte) (string, error
 	pattern := ".cc-automux-" + strconv.FormatInt(stamp, 10) + "-tmp-*"
 	file, err := s.fs.CreateTemp(directory, pattern)
 	if err != nil {
-		return "", fileError("create temporary target", directory, ErrTemporaryIO, err)
+		return "", nil, fileError("create temporary target", directory, ErrTemporaryIO, err)
 	}
 	if file == nil {
-		return "", fileError("create temporary target", directory, ErrTemporaryIO, errors.New("filesystem returned a nil file"))
+		return "", nil, fileError("create temporary target", directory, ErrTemporaryIO, errors.New("filesystem returned a nil file"))
 	}
 	path := file.Name()
 	if path == "" {
 		_ = file.Close()
-		return "", fileError("create temporary target", directory, ErrTemporaryIO, errors.New("temporary file has no name"))
+		return "", nil, fileError("create temporary target", directory, ErrTemporaryIO, errors.New("temporary file has no name"))
 	}
 	closed := false
 	committed := false
@@ -553,73 +532,71 @@ func (s *FileStore) writeTemporary(directory string, data []byte) (string, error
 		}
 	}()
 	if err := setPrivateFileMode(file); err != nil {
-		return "", fileError("chmod temporary target", path, ErrTemporaryIO, err)
+		return "", nil, fileError("chmod temporary target", path, ErrTemporaryIO, err)
 	}
 	if err := writeAll(file, data); err != nil {
-		return "", fileError("write temporary target", path, ErrTemporaryIO, err)
+		return "", nil, fileError("write temporary target", path, ErrTemporaryIO, err)
 	}
 	if err := file.Sync(); err != nil {
-		return "", fileError("sync temporary target", path, ErrTemporaryIO, err)
+		return "", nil, fileError("sync temporary target", path, ErrTemporaryIO, err)
+	}
+	// Capture identity from the open handle before closing and renaming it.
+	info, err := file.Stat()
+	if err != nil {
+		return "", nil, fileError("stat temporary target", path, ErrTemporaryIO, err)
+	}
+	if info == nil {
+		return "", nil, fileError("stat temporary target", path, ErrTemporaryIO, errors.New("filesystem returned nil temporary info"))
 	}
 	if err := file.Close(); err != nil {
 		closed = true
-		return "", fileError("close temporary target", path, ErrTemporaryIO, err)
+		return "", nil, fileError("close temporary target", path, ErrTemporaryIO, err)
 	}
 	closed = true
-	info, err := s.fs.Lstat(path)
+	pathInfo, err := s.fs.Lstat(path)
 	if err != nil {
-		return "", fileError("verify temporary target", path, ErrTemporaryIO, err)
+		return "", nil, fileError("verify temporary target", path, ErrTemporaryIO, err)
 	}
-	if info == nil {
-		return "", fileError("verify temporary target", path, ErrTemporaryIO, errors.New("filesystem returned nil temporary info"))
+	if pathInfo == nil {
+		return "", nil, fileError("verify temporary target", path, ErrTemporaryIO, errors.New("filesystem returned nil temporary info"))
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", fileError("verify temporary target", path, ErrTempNotRegular, nil)
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return "", nil, fileError("verify temporary target", path, ErrTempNotRegular, nil)
 	}
-	if err := verifyPrivateFileMode(info); err != nil {
-		return "", fileError("verify temporary target", path, ErrTemporaryIO, err)
+	if !os.SameFile(info, pathInfo) {
+		return "", nil, fileError("verify temporary target", path, ErrTargetChanged, nil)
+	}
+	if err := verifyPrivateFileMode(pathInfo); err != nil {
+		return "", nil, fileError("verify temporary target", path, ErrTemporaryIO, err)
 	}
 	committed = true
-	return path, nil
+	return path, info, nil
 }
 
 func (s *FileStore) checkTargetBeforeReplace(path string, expected targetState) error {
-	current, exists, err := s.readExisting(path)
+	current, err := s.readState(path)
 	if err != nil {
 		if errors.Is(err, ErrTargetSymlink) || errors.Is(err, ErrTargetNotRegular) || errors.Is(err, ErrTargetTooLarge) {
 			return err
 		}
 		return fileError("check target", path, ErrTargetIO, err)
 	}
-	if !exists {
+	if !current.exists {
 		if expected.exists {
 			return fileError("check target", path, ErrTargetChanged, os.ErrNotExist)
 		}
 		return nil
 	}
-	info, statErr := s.fs.Lstat(path)
-	if statErr != nil {
-		return fileError("check target", path, ErrTargetIO, statErr)
-	}
-	if info == nil {
-		return fileError("check target", path, ErrTargetIO, errors.New("filesystem returned nil target info"))
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fileError("check target", path, ErrTargetSymlink, nil)
-	}
-	if !info.Mode().IsRegular() {
-		return fileError("check target", path, ErrTargetNotRegular, nil)
-	}
 	if !expected.exists {
 		return fileError("check target", path, ErrTargetChanged, errors.New("target appeared during write"))
 	}
-	if expected.info != nil && !os.SameFile(expected.info, info) {
-		return fileError("check target", path, ErrTargetChanged, errors.New("target inode changed during write"))
+	if !os.SameFile(expected.info, current.info) {
+		return fileError("check target", path, ErrTargetChanged, errors.New("target identity changed during write"))
 	}
-	if !bytes.Equal(current, expected.data) {
+	if !bytes.Equal(current.data, expected.data) {
 		return fileError("check target", path, ErrTargetChanged, errors.New("target contents changed during write"))
 	}
-	if expected.info != nil && fileModeChanged(expected.info, info) {
+	if fileModeChanged(expected.info, current.info) {
 		return fileError("check target", path, ErrTargetChanged, errors.New("target permissions changed during write"))
 	}
 	return nil
