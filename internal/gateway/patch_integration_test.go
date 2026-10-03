@@ -443,7 +443,7 @@ func TestGatewayPlannerReceivesOriginalFlowSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantAttempts := scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1}
-	wantAuto := flow.AutoModeSnapshot{Mode: "test-mode", ClassifierModel: "test-classifier"}
+	wantAuto := flow.AutoModeSnapshot{Mode: "test-mode", EffectiveClassifierModel: "test-classifier"}
 	flows, err := flow.NewRegistry(snapshotCheckingClassifierPlanner{wantAttempts: wantAttempts, wantAuto: wantAuto})
 	if err != nil {
 		t.Fatal(err)

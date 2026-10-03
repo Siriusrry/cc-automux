@@ -55,7 +55,7 @@ func (p *ClassifierPlanner) Build(ctx context.Context, snapshot flow.SnapshotVie
 	default:
 		return flow.ExecutionPlan{}, fmt.Errorf("%w: unsupported mode %q", ErrInvalidClassifierPlan, auto.Mode)
 	}
-	if auto.ClassifierModel == "" {
+	if auto.EffectiveClassifierModel == "" {
 		return flow.ExecutionPlan{}, ErrClassifierModelEmpty
 	}
 	policy := snapshot.ClassifierAttemptPolicy()
@@ -70,7 +70,7 @@ func (p *ClassifierPlanner) Build(ctx context.Context, snapshot flow.SnapshotVie
 	if !ok || modelField.Type != bodyfile.JSONString {
 		return flow.ExecutionPlan{}, fmt.Errorf("%w: top-level model field is unavailable", ErrInvalidClassifierPlan)
 	}
-	replacement, err := json.Marshal(auto.ClassifierModel)
+	replacement, err := json.Marshal(auto.EffectiveClassifierModel)
 	if err != nil {
 		return flow.ExecutionPlan{}, fmt.Errorf("%w: encode classifier model: %v", ErrInvalidClassifierPlan, err)
 	}
@@ -86,7 +86,7 @@ func (p *ClassifierPlanner) Build(ctx context.Context, snapshot flow.SnapshotVie
 		_ = base.Close()
 		return flow.ExecutionPlan{}, err
 	}
-	planFacts, err := traffic.NewRequestPlan(ingress.OriginalModel, auto.ClassifierModel, ingress.OriginalSessionID, traffic.RequestTypeClassifier)
+	planFacts, err := traffic.NewRequestPlan(ingress.OriginalModel, auto.EffectiveClassifierModel, ingress.OriginalSessionID, traffic.RequestTypeClassifier)
 	if err != nil {
 		_ = base.Close()
 		return flow.ExecutionPlan{}, fmt.Errorf("%w: %w", ErrInvalidClassifierPlan, err)

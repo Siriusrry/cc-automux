@@ -32,7 +32,7 @@ func TestClassifierPlannerOverridesOnlyModelAndBuildsPoolPlan(t *testing.T) {
 	defer closeIngress()
 
 	plan, err := NewClassifierPlanner().Build(context.Background(), plannerSnapshot{
-		auto:       flow.AutoModeSnapshot{Mode: "provider_pool", ClassifierModel: "classifier/model"},
+		auto:       flow.AutoModeSnapshot{Mode: "provider_pool", EffectiveClassifierModel: "classifier/model"},
 		classifier: scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1},
 	}, ingress)
 	if err != nil {
@@ -64,9 +64,9 @@ func TestClassifierPlannerBuildsFixedPlanFromSnapshotTarget(t *testing.T) {
 	target := &provider.CompiledFixedTarget{ID: provider.FixedTargetID, Protocol: "openai_responses"}
 	plan, err := NewClassifierPlanner().Build(context.Background(), plannerSnapshot{
 		auto: flow.AutoModeSnapshot{
-			Mode:            "fixed_provider",
-			ClassifierModel: "fixed-classifier",
-			FixedTarget:     target,
+			Mode:                     "fixed_provider",
+			EffectiveClassifierModel: "fixed-classifier",
+			FixedTarget:              target,
 		},
 		classifier: scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1},
 	}, ingress)
@@ -94,13 +94,13 @@ func TestClassifierPlannerFailsClosedForDisabledInvalidOrCanceledPlans(t *testin
 		t.Fatalf("disabled error = %v", err)
 	}
 	if _, err := planner.Build(context.Background(), plannerSnapshot{
-		auto:       flow.AutoModeSnapshot{Mode: "provider_pool", ClassifierModel: "classifier"},
+		auto:       flow.AutoModeSnapshot{Mode: "provider_pool", EffectiveClassifierModel: "classifier"},
 		classifier: scheduler.AttemptPolicy{MaxAttempts: 2, StickyNoCooldownAttempts: 1},
 	}, ingress); !errors.Is(err, ErrInvalidClassifierPlan) {
 		t.Fatalf("invalid budget error = %v", err)
 	}
 	if _, err := planner.Build(context.Background(), plannerSnapshot{
-		auto:       flow.AutoModeSnapshot{Mode: "fixed_provider", ClassifierModel: "classifier"},
+		auto:       flow.AutoModeSnapshot{Mode: "fixed_provider", EffectiveClassifierModel: "classifier"},
 		classifier: scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1},
 	}, ingress); !errors.Is(err, ErrInvalidClassifierPlan) {
 		t.Fatalf("missing fixed target error = %v", err)
@@ -108,7 +108,7 @@ func TestClassifierPlannerFailsClosedForDisabledInvalidOrCanceledPlans(t *testin
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := planner.Build(canceled, plannerSnapshot{
-		auto:       flow.AutoModeSnapshot{Mode: "provider_pool", ClassifierModel: "classifier"},
+		auto:       flow.AutoModeSnapshot{Mode: "provider_pool", EffectiveClassifierModel: "classifier"},
 		classifier: scheduler.AttemptPolicy{MaxAttempts: 1, StickyNoCooldownAttempts: 1},
 	}, ingress); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled error = %v", err)

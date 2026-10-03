@@ -40,7 +40,7 @@ func TestRetainedSettingsPersistWithoutDormantRuntimeEffects(t *testing.T) {
 	if _, err := manager.Apply(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if manager.Snapshot().AutoMode().ClassifierModel != "" {
+	if manager.Snapshot().AutoMode().EffectiveClassifierModel != "" {
 		t.Fatal("disabled model remained effective")
 	}
 	disk, err := store.Load()

@@ -328,6 +328,23 @@ func TestManagementErrorsAndMethodContracts(t *testing.T) {
 	}
 }
 
+func TestStatusExcludesRetainedDisabledClassifierModel(t *testing.T) {
+	manager := testManager(t, nil)
+	next := manager.Config()
+	next.AutoMode = config.AutoModeConfig{Mode: config.AutoModeDisabled, Model: "retained-model"}
+	if _, err := manager.Apply(next); err != nil {
+		t.Fatal(err)
+	}
+	status := request(New(manager), http.MethodGet, "/api/v1/status", "Bearer management-key", "")
+	var decoded statusResponse
+	if status.Code != http.StatusOK || json.Unmarshal(status.Body.Bytes(), &decoded) != nil {
+		t.Fatalf("status = %d %s", status.Code, status.Body.String())
+	}
+	if decoded.AutoMode.Model != "" || manager.Config().AutoMode.Model != "retained-model" {
+		t.Fatal("runtime status must exclude the retained disabled model")
+	}
+}
+
 func TestLogHistoryEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	contents := strings.Join([]string{

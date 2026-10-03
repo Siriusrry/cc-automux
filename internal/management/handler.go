@@ -439,7 +439,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	restart := h.manager.RestartStatus()
 	autoStatus := autoModeStatusResponse{
 		Mode:                    cfg.AutoMode.Mode,
-		Model:                   snapshot.AutoMode().ClassifierModel,
+		Model:                   snapshot.AutoMode().EffectiveClassifierModel,
 		FixedProviderConfigured: snapshot.AutoMode().FixedTarget != nil,
 	}
 	if autoStatus.FixedProviderConfigured {

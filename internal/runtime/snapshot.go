@@ -33,11 +33,7 @@ func compileAutoMode(auto config.AutoModeConfig, context provider.RuntimeContext
 	if err != nil {
 		return CompiledAutoMode{}, fmt.Errorf("compile auto_mode.fixed_provider: %w", err)
 	}
-	compiled := CompiledAutoMode{Mode: auto.Mode, ClassifierModel: auto.Model, FixedTarget: target}
-	if auto.Mode == config.AutoModeDisabled {
-		compiled.ClassifierModel = ""
-	}
-	return compiled, nil
+	return CompiledAutoMode{Mode: auto.Mode, configuredModel: auto.Model, FixedTarget: target}, nil
 }
 
 // CompileAutoMode validates and compiles the Auto Mode portion of a runtime
@@ -77,13 +73,25 @@ type Snapshot struct {
 }
 
 // CompiledAutoMode is the immutable runtime representation of Auto Mode.  It
-// carries the one shared classifier model and, only for fixed-provider mode,
-// the precompiled pool-external target.  The target is compiled before a
-// snapshot is published and is never constructed on a request path.
+// retains the configured model separately from its effective value and carries
+// the precompiled pool-external target only in fixed-provider mode. The target
+// is compiled before publication and never constructed on a request path.
 type CompiledAutoMode struct {
 	Mode            string
-	ClassifierModel string
+	configuredModel string
 	FixedTarget     *provider.CompiledFixedTarget
+}
+
+// EffectiveClassifierModel is empty unless classifier routing is enabled.
+// Retaining a configured model while disabled must not activate request scans,
+// classifier plans or the model reported by runtime status.
+func (a CompiledAutoMode) EffectiveClassifierModel() string {
+	switch a.Mode {
+	case config.AutoModeProviderPool, config.AutoModeFixedProvider:
+		return a.configuredModel
+	default:
+		return ""
+	}
 }
 
 func (a CompiledAutoMode) Clone() CompiledAutoMode {
@@ -186,9 +194,9 @@ func (s *Snapshot) AutoMode() flow.AutoModeSnapshot {
 	// flow boundary is read-only, so return that immutable runtime object
 	// directly instead of deep-copying its URL/TLS state on every request.
 	return flow.AutoModeSnapshot{
-		Mode:            s.autoMode.Mode,
-		ClassifierModel: s.autoMode.ClassifierModel,
-		FixedTarget:     s.autoMode.FixedTarget,
+		Mode:                     s.autoMode.Mode,
+		EffectiveClassifierModel: s.autoMode.EffectiveClassifierModel(),
+		FixedTarget:              s.autoMode.FixedTarget,
 	}
 }
 

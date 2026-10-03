@@ -42,7 +42,7 @@ func compileRequestScan(catalog *provider.Catalog, auto CompiledAutoMode, requir
 		if err != nil {
 			return nil, fmt.Errorf("compile provider %q normal request scan: %w", item.ID, err)
 		}
-		if auto.Mode != config.AutoModeProviderPool || !item.SupportsModel(auto.ClassifierModel) {
+		if auto.Mode != config.AutoModeProviderPool || !item.SupportsModel(auto.EffectiveClassifierModel()) {
 			continue
 		}
 		paths, err = appendPlanRequestPaths(paths, item.PatchPlan, traffic.RequestTypeClassifier)

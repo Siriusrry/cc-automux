@@ -138,7 +138,7 @@ func TestSnapshotCarriesAttemptPolicyAcrossRevisions(t *testing.T) {
 func TestSnapshotCompilesAutoModeAndFixedTargetAcrossHotUpdates(t *testing.T) {
 	manager, _, cfg := newRuntimeManager(t, Options{})
 	// Disabled is represented explicitly in every persisted v1 configuration.
-	if got := manager.Snapshot().AutoMode(); got.Mode != config.AutoModeDisabled || got.ClassifierModel != "" || got.FixedTarget != nil {
+	if got := manager.Snapshot().AutoMode(); got.Mode != config.AutoModeDisabled || got.EffectiveClassifierModel != "" || got.FixedTarget != nil {
 		t.Fatalf("disabled Auto Mode snapshot = %#v", got)
 	}
 	context := manager.RuntimeContext()
@@ -154,7 +154,7 @@ func TestSnapshotCompilesAutoModeAndFixedTargetAcrossHotUpdates(t *testing.T) {
 	}
 	snapshot := manager.Snapshot()
 	auto := snapshot.AutoMode()
-	if auto.Mode != config.AutoModeFixedProvider || auto.ClassifierModel != "classifier-model" || auto.FixedTarget == nil {
+	if auto.Mode != config.AutoModeFixedProvider || auto.EffectiveClassifierModel != "classifier-model" || auto.FixedTarget == nil {
 		t.Fatalf("fixed Auto Mode snapshot = %#v", auto)
 	}
 	if auto.FixedTarget.Protocol != config.ProtocolOpenAIResponses || auto.FixedTarget.URLString() != next.AutoMode.FixedProvider.BaseURL {

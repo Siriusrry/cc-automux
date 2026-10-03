@@ -24,9 +24,10 @@ const (
 // does not inspect it; classifier flows can use the same contract
 // without making flow depend on the runtime implementation package.
 type AutoModeSnapshot struct {
-	Mode            string
-	ClassifierModel string
-	FixedTarget     *provider.CompiledFixedTarget
+	Mode string
+	// EffectiveClassifierModel excludes retained settings while disabled.
+	EffectiveClassifierModel string
+	FixedTarget              *provider.CompiledFixedTarget
 }
 
 // SnapshotView is the read-only part of a runtime snapshot needed while

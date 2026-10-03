@@ -72,7 +72,7 @@ func TestClassifierAndUnconfiguredModelStream(t *testing.T) {
 		}))
 		defer upstream.Close()
 		target := fixedTestTarget(t, upstream.URL, config.ProtocolAnthropicMessages, patch.Plan{})
-		snapshot := &flowAwareSnapshot{classifierAttempts: scheduler.DefaultClassifierAttemptPolicy(), fakeSnapshot: &fakeSnapshot{revision: 1, gatewayKey: "gateway", scanPaths: []string{"/system", "/system/0", "/system/0/text"}, rawMarkers: []string{automode.SecurityMarker}}, auto: flow.AutoModeSnapshot{Mode: config.AutoModeProviderPool, ClassifierModel: "m"}}
+		snapshot := &flowAwareSnapshot{classifierAttempts: scheduler.DefaultClassifierAttemptPolicy(), fakeSnapshot: &fakeSnapshot{revision: 1, gatewayKey: "gateway", scanPaths: []string{"/system", "/system/0", "/system/0/text"}, rawMarkers: []string{automode.SecurityMarker}}, auto: flow.AutoModeSnapshot{Mode: config.AutoModeProviderPool, EffectiveClassifierModel: "m"}}
 		if fixed {
 			snapshot.auto.Mode = config.AutoModeFixedProvider
 			snapshot.auto.FixedTarget = target
