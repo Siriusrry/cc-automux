@@ -26,7 +26,7 @@
       async function load() {
         const gen = ++generation;
         try {
-          const [config, providers, patches] = await Promise.all([store.config(), store.providers(), store.patches()]);
+          const [config, providers, patches] = await Promise.all([api.get('/api/v1/config'), store.providers(), store.patches()]);
           if (disposed || gen !== generation) return;
           render(config, providers, patches);
         } catch (e) { if (!disposed) replace(host, errorCard(e.detail || e.message, load)); }

@@ -37,7 +37,7 @@
       const disposers = [];
 
       async function load() {
-        try { const config = await store.config(); if (disposed) return; render(config); }
+        try { const config = await api.get('/api/v1/config'); if (disposed) return; render(config); }
         catch (e) { if (!disposed) replace(host, errorCard(e.detail || e.message, load)); }
       }
 

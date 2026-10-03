@@ -62,11 +62,11 @@ func TestRetainedConfigRoundTripAndActivePathInputs(t *testing.T) {
 	}
 	next := cfg.Clone()
 	next.Harnesses.ClaudeCode.SettingsPath = filepath.Join(t.TempDir(), "other.json")
-	if !cfg.ActiveProfileInputsEqual(next) {
+	if cfg.ActiveProfileChange(next) != ActiveInputsUnchanged {
 		t.Fatal("dormant path invalidated active profile")
 	}
 	next.Harnesses.ClaudeCode.PathMode = PathModeCustom
-	if cfg.ActiveProfileInputsEqual(next) {
+	if cfg.ActiveProfileChange(next) == ActiveInputsUnchanged {
 		t.Fatal("effective path change kept active")
 	}
 	cfg.AutoMode.FixedProvider.APIKey = ""

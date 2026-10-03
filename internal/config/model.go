@@ -515,13 +515,6 @@ func (current Config) ApplyServerUpdate(next Config) (Config, error) {
 	return next, nil
 }
 
-// ActiveProfileInputsEqual reports whether the inputs that can make a
-// previously verified active profile stale are unchanged. Unrelated Provider
-// and non-active Profile changes do not invalidate the active record.
-func (current Config) ActiveProfileInputsEqual(next Config) bool {
-	return current.ActiveProfileChange(next) == ActiveInputsUnchanged
-}
-
 type ActiveInputChange uint8
 
 const (
