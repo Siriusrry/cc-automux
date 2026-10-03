@@ -501,6 +501,8 @@ func (s *Scheduler) Reconcile(snapshot Snapshot) {
 
 	s.health.Reconcile(providers)
 	next := make(map[string]providerState, len(providers))
+	// Epoch transitions also invalidate sticky state when endpoint generation
+	// is unchanged, including off/on updates that skip an intermediate reconcile.
 	reset := make(map[string]bool)
 	for _, item := range providers {
 		if item == nil {

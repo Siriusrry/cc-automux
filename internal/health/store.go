@@ -231,13 +231,15 @@ func inheritScopeState(target, source *providerScope) {
 }
 
 func inheritState(target, source *stateEntry, preserveBreaker bool) {
+	// Only durable health observations cross generations. New entries keep
+	// their own observation IDs, probe ownership and active lease counts.
+	copyDiagnostics(target, source)
 	if preserveBreaker {
-		*target = *source
-		target.observation = 0
-		target.probeToken = 0
-		target.activeLeases = 0
-	} else {
-		copyDiagnostics(target, source)
+		target.state = source.state
+		target.backoffLevel = source.backoffLevel
+		target.consecutiveFailures = source.consecutiveFailures
+		target.lastHealthFailure = source.lastHealthFailure
+		target.cooldownUntil = source.cooldownUntil
 	}
 	if target.lastErrorPending {
 		target.lastErrorPending = false
