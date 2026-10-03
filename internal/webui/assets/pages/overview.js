@@ -121,7 +121,7 @@
     }
     function draw() {
       if (!wrap.isConnected || window.innerWidth <= 900) return;
-      while (lines.firstChild) lines.removeChild(lines.firstChild);
+      CCAM.ui.clear(lines);
       const r = wrap.getBoundingClientRect(); lines.setAttribute('viewBox', '0 0 ' + r.width + ' ' + r.height);
       const C = rel(client), K = rel(core), T = rel(tap);
       seg('M' + C.cx + ' ' + C.bottom + ' L' + K.cx + ' ' + K.top, 'flow', 'var(--emerald)');

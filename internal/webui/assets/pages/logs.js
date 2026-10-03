@@ -194,7 +194,7 @@
         const toggle = () => {
           const open = el.classList.toggle('open'); el.setAttribute('aria-expanded', String(open));
           const existing = el.querySelector('.lg-detail');
-          if (!open) { if (existing) existing.remove(); return; }
+          if (!open) { if (existing) CCAM.ui.remove(existing); return; }
           el.appendChild(detail(r));
         };
         el.addEventListener('click', (e) => { if (e.target.closest('.lg-detail')) return; toggle(); });

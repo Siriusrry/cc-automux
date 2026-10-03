@@ -37,7 +37,15 @@
     if (cleanup) { cleanups.delete(el); cleanup(); }
     Array.from(el.children || []).forEach(disposeTree);
   }
-  function clear(el) { while (el.firstChild) { disposeTree(el.firstChild); el.removeChild(el.firstChild); } return el; }
+  function remove(el) { disposeTree(el); el.remove(); }
+  function clear(el) { while (el.firstChild) remove(el.firstChild); return el; }
+  // Native removals and subtree replacement share the same disposal contract.
+  // Moving a node within the document is not an unmount.
+  new MutationObserver(records => {
+    records.forEach(record => record.removedNodes.forEach(node => {
+      if (!node.isConnected) disposeTree(node);
+    }));
+  }).observe(document.documentElement, { childList: true, subtree: true });
   function replace(el) { clear(el); for (let i = 1; i < arguments.length; i++) append(el, arguments[i]); return el; }
   function frag() { const f = document.createDocumentFragment(); for (let i = 0; i < arguments.length; i++) append(f, arguments[i]); return f; }
 
@@ -65,9 +73,19 @@
   // ---- pills / tags ----
   const HEALTH_KIND = { healthy: 'ok', degraded: 'warn', cooldown: 'bad', half_open: 'iris', unknown: 'mist', disabled: 'ghost' };
   const HEALTH_TEXT = { healthy: 'Healthy', degraded: 'Degraded', cooldown: 'Cooldown', half_open: 'Half-open', unknown: 'Unknown', disabled: 'Health off' };
-  function pill(text, kind, extra) { return h('span', { class: 'pill ' + (kind || 'mist') + (extra ? ' ' + extra : '') }, text); }
+  function pill(text, kind, extra) {
+    const el = h('span');
+    el.update = (text, kind, extra) => { el.className = 'pill ' + (kind || 'mist') + (extra ? ' ' + extra : ''); el.textContent = text; };
+    el.update(text, kind, extra);
+    return el;
+  }
   function healthPill(state, suffix) { return pill((HEALTH_TEXT[state] || CCAM.fmt.cap(CCAM.fmt.words(state))) + (suffix ? ' · ' + suffix : ''), HEALTH_KIND[state] || 'mist'); }
-  function healthDot(state) { const k = HEALTH_KIND[state] || 'mist'; return h('span', { class: 'dot ' + (k === 'ghost' ? 'mist' : k), 'data-tip': HEALTH_TEXT[state] || state }); }
+  function healthDot(state) {
+    const el = h('span');
+    el.setState = state => { const k = HEALTH_KIND[state] || 'mist'; el.className = 'dot ' + (k === 'ghost' ? 'mist' : k); el.setAttribute('data-tip', HEALTH_TEXT[state] || state); };
+    el.setState(state);
+    return el;
+  }
   function tag(text, kind) { return h('span', { class: 'tag' + (kind ? ' ' + kind : '') }, text); }
 
   // ---- toast ----
@@ -77,7 +95,7 @@
     const iconName = kind === 'bad' ? 'alert' : kind === 'warn' ? 'alert' : 'check';
     const el = h('div', { class: 'toast ' + (kind || 'ok') }, icon(iconName), h('span', null, message));
     toastHost.appendChild(el);
-    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 180ms'; setTimeout(() => el.remove(), 200); }, kind === 'bad' ? 6500 : 4000);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 180ms'; setTimeout(() => remove(el), 200); }, kind === 'bad' ? 6500 : 4000);
     return el;
   }
 
@@ -91,7 +109,7 @@
       if (opts.body) append(inner, opts.body);
       const acts = h('div', { class: 'dlg-acts' });
       let settled = false;
-      const finish = (value) => { if (settled) return; settled = true; dlg.close(); dlg.remove(); resolve(value); };
+      const finish = (value) => { if (settled) return; settled = true; dlg.close(); remove(dlg); resolve(value); };
       (opts.actions || [{ label: 'Cancel', value: false }, { label: 'OK', value: true, primary: true }]).forEach(a => {
         const b = h('button', { class: 'btn' + (a.primary ? ' primary' : '') + (a.danger ? ' danger' : ''), type: 'button', onclick: async () => {
           if (a.onClick) { const r = await a.onClick(); if (r === false) return; finish(r === undefined ? a.value : r); return; }
@@ -232,7 +250,7 @@
     if (!popEl) return;
     const el = popEl, done = popOnClose;
     popEl = null; popOwner = null; popOnClose = null;
-    el.remove();
+    remove(el);
     if (done) done();
   }
   document.addEventListener('pointerdown', (e) => { if (popEl && !popEl.contains(e.target) && !(popOwner && popOwner.contains(e.target))) popHide(); }, true);
@@ -328,10 +346,12 @@
     const wrap = h('div', { class: 'seg' + (opts.class ? ' ' + opts.class : ''), role: 'radiogroup', 'aria-label': opts.ariaLabel || '' });
     const indicator = h('span', { class: 'seg-indicator', 'aria-hidden': 'true' });
     wrap.appendChild(indicator);
-    let value = opts.value, ready = false;
+    let value = opts.value, ready = false, disposed = false;
+    const detach = [];
     const buttons = opts.options.map(o => h('button', { type: 'button', role: 'radio', 'aria-checked': String(o.value === value), dataset: { value: o.value }, disabled: !!o.disabled, 'data-tip': o.title || undefined, 'aria-label': o.label ? undefined : (o.title || o.aria || String(o.value)) },
       o.icon ? icon(o.icon) : null, o.label, o.count !== undefined ? h('span', { class: 'seg-c' }, String(o.count)) : null));
     function position(animate) {
+      if (disposed) return;
       const button = buttons.find(b => b.dataset.value === String(value));
       if (!button || !button.offsetWidth) { ready = false; return; }
       indicator.classList.toggle('moving', !!animate && ready);
@@ -340,6 +360,7 @@
       indicator.hidden = false; ready = true;
     }
     function setValue(v, emit) {
+      if (disposed) return;
       const changed = value !== v;
       value = v;
       buttons.forEach(b => { b.setAttribute('aria-checked', String(b.dataset.value === String(v))); b.tabIndex = b.dataset.value === String(v) ? 0 : -1; });
@@ -347,21 +368,23 @@
       if (changed && emit && opts.onchange) opts.onchange(v);
     }
     buttons.forEach((b, i) => {
-      b.addEventListener('click', () => { if (!b.disabled) setValue(b.dataset.value, true); });
-      b.addEventListener('keydown', (e) => {
+      const click = () => { if (!b.disabled) setValue(b.dataset.value, true); };
+      const keydown = (e) => {
         if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
         e.preventDefault();
         const dir = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1 : -1;
         let j = i; do { j = (j + dir + buttons.length) % buttons.length; } while (buttons[j].disabled && j !== i);
         buttons[j].focus(); setValue(buttons[j].dataset.value, true);
-      });
+      };
+      b.addEventListener('click', click); b.addEventListener('keydown', keydown);
+      detach.push(() => { b.removeEventListener('click', click); b.removeEventListener('keydown', keydown); });
       wrap.appendChild(b);
     });
     indicator.hidden = true;
     setValue(value, false);
     const observer = new ResizeObserver(() => position(false));
     observer.observe(wrap); buttons.forEach(b => observer.observe(b));
-    cleanups.set(wrap, () => observer.disconnect());
+    cleanups.set(wrap, () => { disposed = true; observer.disconnect(); detach.forEach(fn => fn()); });
     wrap.setValue = (v) => setValue(v, false);
     wrap.getValue = () => value;
     return wrap;
@@ -456,7 +479,7 @@
       setError(text) { msg.classList.toggle('error', !!text); msg.querySelector('.msg-text').textContent = text || 'Unsaved changes'; },
       busy(on) { verify = null; save.disabled = on; revert.disabled = on; replace(save, on ? [h('span', { class: 'spin' }), 'Saving…'] : 'Save changes'); },
       pending(check) { verify = () => { save.disabled = true; return check(); }; save.disabled = false; revert.disabled = true; replace(save, 'Check saved state'); },
-      destroy() { bar.remove(); }
+      destroy() { remove(bar); }
     };
     return ctl;
   }
@@ -464,7 +487,7 @@
   function overlay(title, text) {
     const el = h('div', { class: 'overlay', role: 'alert' }, h('div', { class: 'box' }, h('span', { class: 'spin' }), h('div', null, h('h3', null, title), h('p', null, text))));
     document.body.appendChild(el);
-    return { update(t, x) { el.querySelector('h3').textContent = t; if (x !== undefined) el.querySelector('p').textContent = x; }, close() { el.remove(); } };
+    return { update(t, x) { el.querySelector('h3').textContent = t; if (x !== undefined) el.querySelector('p').textContent = x; }, close() { remove(el); } };
   }
 
   // ---- tooltip ----
@@ -604,5 +627,5 @@
     return { field: m[1].replace(/^providers\[\d+\]\./, '').replace(/^auto_mode\./, '').replace(/^harnesses\.claude_code\./, '').replace(/^fixed_provider\./, 'fixed.'), message: m[2] };
   }
 
-  CCAM.ui = { closeOverlays() { popHide(); tipHide(); }, h, append, clear, replace, frag, icon, mascot, pill, healthPill, healthDot, tag, toast, dialog, confirm, field, input, secretInput, copyButton, select, seg, switchCtl, chipEditor, kv, banner, empty, skeleton, errorCard, savebar, overlay, splitFieldError, tip, tipBlock, tipRefresh, wrapTip, HEALTH_KIND, HEALTH_TEXT, NOAUTO };
+  CCAM.ui = { closeOverlays() { popHide(); tipHide(); }, h, append, remove, clear, replace, frag, icon, mascot, pill, healthPill, healthDot, tag, toast, dialog, confirm, field, input, secretInput, copyButton, select, seg, switchCtl, chipEditor, kv, banner, empty, skeleton, errorCard, savebar, overlay, splitFieldError, tip, tipBlock, tipRefresh, wrapTip, HEALTH_KIND, HEALTH_TEXT, NOAUTO };
 })();

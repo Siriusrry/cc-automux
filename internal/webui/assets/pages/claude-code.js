@@ -109,7 +109,7 @@
             const next = document.getElementById(focus.id);
             if (next) { next.focus(); if (focus.start !== null && next.setSelectionRange) next.setSelectionRange(focus.start, focus.end); }
           }
-        } catch (e) { if (!disposed && gen === generation && !quiet) replace(host, errorCard(e.detail || e.message, load)); }
+        } catch (e) { if (!disposed && gen === generation && !quiet) { settingsView = null; replace(host, errorCard(e.detail || e.message, load)); } }
       }
 
       function render(harness, profiles, providers) {
@@ -119,8 +119,8 @@
         const st = STATE[harness.state] || { text: harness.state, kind: 'mist', desc: '' };
         ctx.actions([h('button', { class: 'btn primary', type: 'button', onclick: async () => { const r = await profileDialog(null, models); if (r) { toast('Profile ' + r.name + ' created'); store.invalidate(); } } }, icon('plus'), 'New profile')]);
 
-        if (!settingsView) settingsView = createSettings(harness, profiles);
-        else settingsView.update(harness, profiles);
+        if (!settingsView) settingsView = createSettings();
+        settingsView.update(harness, profiles);
         const settingsCard = settingsView.card;
 
         // ---- profiles ----
@@ -162,8 +162,8 @@
         replace(host.querySelector('.cc-profiles'), profilesCard);
       }
 
-      function createSettings(harness, profiles) {
-        let st = STATE[harness.state] || { text: harness.state, kind: 'mist', desc: '' };
+      function createSettings() {
+        let harness, profiles, st = { text: '', kind: 'mist', desc: '' };
         // ---- settings file card ----
         let pathMode = pathDraft.mode, pathValue = pathDraft.value;
         const pathIn = input({ id: 'cc-path', value: pathValue, placeholder: '/absolute/path/to/settings.json', oninput: (e) => { pathValue = pathDraft.value = e.target.value; applyBtn.hidden = !pathDirty(); } });
@@ -174,8 +174,9 @@
           applyBtn.hidden = !pathDirty();
         } });
         pathIn.hidden = pathMode !== 'custom';
+        const resolvedPath = h('code');
         const pathField = field({ label: 'Settings file', control: [pathSeg, h('div', { style: { height: '10px' } }), pathRow],
-          help: h('div', { class: 'cc-path' }, 'Resolves to ', h('code', null, harness.resolved_settings_path)) });
+          help: h('div', { class: 'cc-path' }, 'Resolves to ', resolvedPath) });
         let verifyPath = null;
         async function savePath() {
           if (disposed || (pathSaving && !verifyPath)) return;
@@ -201,7 +202,7 @@
           h('p', { class: 'help' }, 'Only these fields are written. Everything else in the file is preserved byte-for-byte in meaning. Before the first write to an existing file a one-time copy is saved as ', h('code', null, '.cc-automux.bak'), ' next to it.')));
 
         const retryTelemetry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => finishTelemetry(() => store.harness(), false) }, 'Check telemetry state');
-        const teleSw = switchCtl({ checked: harness.disable_telemetry, label: 'Disable Claude Code telemetry', onchange: async (v) => {
+        const teleSw = switchCtl({ label: 'Disable Claude Code telemetry', onchange: async (v) => {
           if (telemetryBusy) return;
           telemetryBusy = true; generation++; teleSw.setBusy(true);
           await finishTelemetry(() => store.confirmedWrite(() => api.put('/api/v1/harnesses/claude-code', { disable_telemetry: v }), () => store.harness(), value => value.disable_telemetry === v), true);
@@ -230,7 +231,7 @@
             const active = profiles.find(x => x.active);
             return tipBlock({ title: st.text, rows: [['Settings file', harness.resolved_settings_path, 'mono'], ['Active profile', active ? active.name : 'none'], ['Telemetry', harness.disable_telemetry ? 'disabled' : 'allowed']], note: harness.last_invalidation_reason || st.desc });
           })),
-          h('div', { class: 'cc-state' }, h('span', { class: 'reason' }, harness.last_invalidation_reason ? harness.last_invalidation_reason : st.desc)),
+          h('div', { class: 'cc-state' }, h('span', { class: 'reason' })),
           pathField, h('div', { style: { height: '14px' } }), managed,
           h('hr', { class: 'hr' }),
           h('p', { class: 'eyebrow' }, 'Telemetry'),
@@ -240,9 +241,9 @@
         return { card, update(nextHarness, nextProfiles) {
           harness = nextHarness; profiles = nextProfiles;
           st = STATE[harness.state] || { text: harness.state, kind: 'mist', desc: '' };
-          const nextPill = pill(st.text, st.kind); statePill.className = nextPill.className; statePill.textContent = st.text;
+          statePill.update(st.text, st.kind);
           card.querySelector('.reason').textContent = harness.last_invalidation_reason || st.desc;
-          pathField.querySelector('.cc-path').textContent = 'Resolves to ' + harness.resolved_settings_path;
+          resolvedPath.textContent = harness.resolved_settings_path;
           pathMode = pathDraft.mode; pathValue = pathDraft.value;
           if (pathIn.value !== pathValue) pathIn.value = pathValue;
           pathIn.hidden = pathMode !== 'custom'; pathSeg.setValue(pathMode); applyBtn.hidden = !pathDirty();

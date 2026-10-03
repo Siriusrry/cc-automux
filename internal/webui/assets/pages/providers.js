@@ -83,7 +83,7 @@
       }
       function place(parent, nodes) {
         nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] || null); });
-        while (parent.children.length > nodes.length) parent.lastElementChild.remove();
+        while (parent.children.length > nodes.length) CCAM.ui.remove(parent.lastElementChild);
       }
       async function load() {
         const epoch = ++loadEpoch;
@@ -104,7 +104,7 @@
           return;
         }
         const ids = new Set(list.map(p => p.id));
-        for (const [id, view] of views) if (!ids.has(id)) { view.el.remove(); views.delete(id); }
+        for (const [id, view] of views) if (!ids.has(id)) { CCAM.ui.remove(view.el); views.delete(id); }
         const tiers = tiersOf(data);
         const sections = tiers.map((t, i) => {
           let group = groups.get(t.priority);
@@ -116,7 +116,7 @@
           group.caption = tiers.length === 1 ? 'new sessions round-robin across this tier' : i === 0 ? 'tried first · round-robin within the tier' : 'used only while every higher tier is unavailable';
           const nodes = t.items.map(p => {
             let view = views.get(p.id);
-            if (!view) { view = row(p); views.set(p.id, view); }
+            if (!view) { view = row(p.id); views.set(p.id, view); }
             view.update(p, t.priority); view.handle.disabled = t.items.length < 2; return view.el;
           });
           order.reconcile(nodes, () => place(group.rows, nodes));
@@ -125,23 +125,23 @@
         for (const [priority] of groups) if (!tiers.some(t => t.priority === priority)) groups.delete(priority);
         place(listHost, sections); syncActions();
       }
-      function row(initial) {
-        let p = initial, verify = null;
+      function row(id) {
+        let p, verify = null;
         const dot = healthDot('unknown');
-        const link = h('a', { class: 'rc-link', href: '#/providers/' + p.id });
+        const link = h('a', { class: 'rc-link', href: '#/providers/' + id });
         const sub = h('div', { class: 'rc-sub' });
         const tags = h('div', { class: 'rc-tags' }), meta = h('div', { class: 'rc-meta' });
         const retry = h('button', { class: 'btn sm', type: 'button', hidden: true, onclick: () => complete(verify) }, 'Check saved state');
-        const sw = switchCtl({ checked: p.enabled, onchange: async on => {
+        const sw = switchCtl({ onchange: async on => {
           if (busy.has(p.id) || phase !== 'idle') return;
           busy.add(p.id); loadEpoch++; sw.setBusy(true); syncActions();
           const id = p.id;
           await complete(() => store.confirmedWrite(() => api.put('/api/v1/providers/' + id, Object.assign(stripHealth(p), { enabled: on })), async () => (await api.get('/api/v1/providers')).find(value => value.id === id), value => value && value.enabled === on));
         } });
         sw.input.setAttribute('aria-label', 'Enabled');
-        const handle = h('button', { class: 'ib pr-drag', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Reorder ' + p.name }, icon('grip'));
-        order.bind(p.id, handle);
-        const el = h('div', { class: 'row-card pr-row', dataset: { providerId: p.id }, onclick: e => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
+        const handle = h('button', { class: 'ib pr-drag', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Reorder provider' }, icon('grip'));
+        order.bind(id, handle);
+        const el = h('div', { class: 'row-card pr-row', dataset: { providerId: id }, onclick: e => { if (e.target.closest('a, button, label, input')) return; location.hash = '#/providers/' + p.id; } },
           handle, dot, h('div', { class: 'rc-main' }, h('div', { class: 'rc-title' }, link), sub), tags, meta, retry, sw, icon('chevron-right', 'chev'));
         async function complete(run) {
           if (disposed || !run) return;
@@ -163,8 +163,7 @@
           p = value; handle.setAttribute('aria-label', 'Reorder ' + p.name);
           const stat = p.static_availability, state = p.global_health ? p.global_health.state : 'unknown', n = p.models.length;
           el.classList.toggle('dim', stat !== 'active');
-          const nextDot = healthDot(stat === 'active' ? state : 'unknown'); dot.className = nextDot.className;
-          dot.setAttribute('data-tip', nextDot.getAttribute('data-tip'));
+          dot.setState(stat === 'active' ? state : 'unknown');
           link.textContent = p.name; sub.textContent = fmt.host(p.base_url);
           replace(tags, n ? tip(tag(fmt.plural(n, 'model')), () => tipBlock({ title: 'Declared models', list: p.models.slice(), note: 'Requests naming one of these models can be routed here.' }))
             : tip(h('span', { class: 'faint', style: { fontSize: '12px' } }, 'no models declared'), 'Declare at least one model — a provider without models is never routed to.'));
