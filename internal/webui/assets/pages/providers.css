@@ -70,8 +70,8 @@
 }
 
 /* Sorting keeps rows in flow; transforms reserve the insertion slot. */
-.pr-row .pr-drag { width: 28px; height: 32px; flex: none; color: var(--mist-2); cursor: grab; touch-action: none; }
-.pr-row .pr-drag:hover, .pr-row .pr-drag:focus-visible { color: var(--iris); background: var(--iris-soft); }
+.pr-row .pr-drag { width: 28px; height: 32px; flex: none; color: var(--mist-2); border-color: transparent; background: transparent; box-shadow: none; cursor: grab; touch-action: none; }
+.pr-row .pr-drag:hover, .pr-row .pr-drag:focus-visible { color: var(--iris); }
 .pr-row .pr-drag:disabled { opacity: 0.25; cursor: default; }
 .pr-row .pr-drag[aria-disabled="true"] { cursor: default; }
 .sorting .pr-row { transition: transform var(--motion-position) var(--motion-ease); }
