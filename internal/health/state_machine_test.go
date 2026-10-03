@@ -624,8 +624,8 @@ func TestReconcileGenerationModeAndModels(t *testing.T) {
 	p2 := testProvider("provider", "generation-2", false, "model-a")
 	store.Reconcile([]*provider.CompiledProvider{p2})
 	got = mustProviderSnapshot(t, store, p2)
-	if got.Global.State != scheduler.GlobalUnknown || got.Global.ObservedFailures != 0 || got.Channels[0].State != scheduler.ChannelUnknown || got.Channels[0].ObservedFailures != 0 {
-		t.Fatalf("new generation did not reset = %#v", got)
+	if got.Global.State != scheduler.GlobalUnknown || got.Global.ObservedFailures != 0 || got.Channels[0].State != scheduler.ChannelUnknown || got.Channels[0].ObservedFailures != 1 || got.Channels[0].LastError != "first" {
+		t.Fatalf("mode change did not preserve diagnostics across generation = %#v", got)
 	}
 	oldDecision := mustAcquire(t, store, keyA, false)
 	oldUpdate, _ := store.Report(oldDecision.Lease, scheduler.Outcome{Class: scheduler.FailureGlobalImmediate, RawError: "old generation"})

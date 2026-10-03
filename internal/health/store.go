@@ -187,8 +187,8 @@ func (s *Store) Reconcile(providers []*provider.CompiledProvider) {
 		}
 		seen[item.ID] = struct{}{}
 		current := s.active[item.ID]
-		sameLifetime := current != nil && current.key.generation == item.Generation && current.key.epoch == item.HealthEpoch
-		if sameLifetime && current.disableHealth == item.DisableHealth {
+		sameEpoch := current != nil && current.key.epoch == item.HealthEpoch
+		if sameEpoch && current.key.generation == item.Generation && current.disableHealth == item.DisableHealth {
 			s.reconcileModelsLocked(current, item.Models)
 			continue
 		}
@@ -196,8 +196,8 @@ func (s *Store) Reconcile(providers []*provider.CompiledProvider) {
 			s.retireLocked(current)
 		}
 		fresh := newScope(item)
-		if sameLifetime {
-			copyScopeDiagnostics(fresh, current)
+		if sameEpoch {
+			inheritScopeState(fresh, current)
 		}
 		s.active[item.ID] = fresh
 	}
@@ -210,21 +210,38 @@ func (s *Store) Reconcile(providers []*provider.CompiledProvider) {
 	}
 }
 
-func copyScopeDiagnostics(target, source *providerScope) {
-	copyDiagnostics(&target.global, &source.global)
+// Configuration edits preserve observations and breaker state within an
+// enabled-state epoch. New scopes own their leases; a retired probe or pending
+// response body cannot remain attached to the current generation.
+func inheritScopeState(target, source *providerScope) {
+	preserveBreaker := target.disableHealth == source.disableHealth
+	inheritState(&target.global, &source.global, preserveBreaker)
 	for key, sourceEntry := range source.channels {
 		if _, configured := target.modelSet[key.model]; !configured {
 			continue
 		}
 		targetEntry := target.channels[key]
 		if targetEntry == nil {
-			// Classifier and future request-type channels are created lazily. Preserve
-			// them across a disable_health toggle just like pre-created normal
-			// channels, while resetting all breaker state to the target mode.
+			// Classifier and future request-type channels are created lazily.
 			targetEntry = &stateEntry{state: initialState(target.disableHealth)}
 			target.channels[key] = targetEntry
 		}
-		copyDiagnostics(targetEntry, sourceEntry)
+		inheritState(targetEntry, sourceEntry, preserveBreaker)
+	}
+}
+
+func inheritState(target, source *stateEntry, preserveBreaker bool) {
+	if preserveBreaker {
+		*target = *source
+		target.observation = 0
+		target.probeToken = 0
+		target.activeLeases = 0
+	} else {
+		copyDiagnostics(target, source)
+	}
+	if target.lastErrorPending {
+		target.lastErrorPending = false
+		target.lastErrorIncomplete = true
 	}
 }
 
