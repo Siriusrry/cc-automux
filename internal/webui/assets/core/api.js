@@ -17,11 +17,20 @@
   }
 
   let keyProvider = () => null;
+  let authRecovery = null;
   let quietUnauthorized = 0;
   const unauthorizedListeners = [];
   function authHeaders() {
     const key = keyProvider();
     return key ? { Authorization: 'Bearer ' + key } : {};
+  }
+  async function recoverUnauthorized(requestKey, opts) {
+    if (opts?.silentUnauthorized || opts?.headers?.Authorization) return false;
+    if (requestKey !== keyProvider()) return !!keyProvider();
+    return authRecovery ? authRecovery(requestKey, opts) : false;
+  }
+  function notifyUnauthorized(requestKey, opts) {
+    if (!quietUnauthorized && !opts?.silentUnauthorized && !opts?.headers?.Authorization && requestKey === keyProvider()) unauthorizedListeners.forEach(fn => fn());
   }
 
   async function transport(method, path, body, opts) {
@@ -48,10 +57,16 @@
   }
 
   async function request(method, path, body, opts) {
-    const requestKey = keyProvider();
-    const res = await transport(method, path, body, opts);
+    let requestKey = keyProvider();
+    let res = await transport(method, path, body, opts);
+    // A 401 rejected the operation before execution. Retry it once only after
+    // authentication has resolved a credential transition owned by this tab.
+    if (res.status === 401 && await recoverUnauthorized(requestKey, opts)) {
+      requestKey = keyProvider();
+      res = await transport(method, path, body, opts);
+    }
     if (res.status === 401) {
-      if (!quietUnauthorized && !(opts && opts.silentUnauthorized) && requestKey === keyProvider()) unauthorizedListeners.forEach(fn => fn());
+      notifyUnauthorized(requestKey, opts);
       throw new ApiError(401, 'unauthorized', 'That key was not accepted');
     }
     if (res.status >= 400) {
@@ -67,7 +82,7 @@
   // Server-sent events over fetch so the Authorization header can be sent.
   function stream(path, handlers) {
     handlers = handlers || {};
-    const requestKey = keyProvider();
+    let requestKey = keyProvider();
     let resolveReady, rejectReady;
     const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
     ready.catch(() => {});
@@ -79,10 +94,15 @@
       let res;
       try {
         res = await fetch(path, { headers: Object.assign({ Accept: 'text/event-stream' }, authHeaders()), signal: controller.signal });
+        if (res.status === 401 && await recoverUnauthorized(requestKey, { signal: controller.signal })) {
+          if (closed) return;
+          requestKey = keyProvider();
+          res = await fetch(path, { headers: Object.assign({ Accept: 'text/event-stream' }, authHeaders()), signal: controller.signal });
+        }
       } catch (e) { clearTimeout(openTimer); fail(new ApiError(0, 'network', 'Stream connection failed')); return; }
       clearTimeout(openTimer);
       if (closed) return;
-      if (res.status === 401) { if (!quietUnauthorized && requestKey === keyProvider()) unauthorizedListeners.forEach(fn => fn()); fail(new ApiError(401, 'unauthorized', 'Unauthorized')); return; }
+      if (res.status === 401) { notifyUnauthorized(requestKey); fail(new ApiError(401, 'unauthorized', 'Unauthorized')); return; }
       if (res.status >= 400) {
         let json = null; try { json = await res.json(); } catch (e) { /* ignore */ }
         fail(new ApiError(res.status, json && json.error, json && json.message));
@@ -139,6 +159,7 @@
     ApiError,
     pauseUnauthorized() { quietUnauthorized++; let resumed = false; return () => { if (!resumed) { resumed = true; quietUnauthorized--; } }; },
     setKeyProvider(fn) { keyProvider = fn; },
+    setAuthRecovery(fn) { authRecovery = fn; },
     onUnauthorized(fn) { unauthorizedListeners.push(fn); },
     request, stream, enqueue,
     get: (path, opts) => request('GET', path, undefined, opts)

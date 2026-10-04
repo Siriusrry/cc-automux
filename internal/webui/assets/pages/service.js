@@ -134,7 +134,7 @@
           saving = true; listenerCard.inert = true; keysCard.inert = true; bar.busy(true);
           store.stopPolling();
           const resumeUnauthorized = api.pauseUnauthorized();
-          const oldKey = CCAM.auth.key();
+          let rejectRotation;
           try {
             let redirected = false;
             await store.saveConfig(config, body, async (result, applied, task) => {
@@ -145,14 +145,8 @@
                 CCAM.auth.adopt(applied.auth.management_key); toast('Service settings saved');
               }
             }, applied => ({
-              read: async options => {
-                let failure;
-                for (const key of new Set([applied.auth.management_key, oldKey])) {
-                  try { return await api.get('/api/v1/config', { ...options, response: true, silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key } }); }
-                  catch (error) { failure = error; }
-                }
-                throw failure;
-              },
+              onSubmit: () => { rejectRotation = CCAM.auth.retain(applied.auth.management_key); },
+              onRejected: () => rejectRotation?.(),
               onDisconnect: async options => {
                 const target = new URL('http://' + applied.service.listen_addr);
                 if (target.origin !== location.origin && await probeConsole(target.origin, options)) return { restart_required: true, restarting: true };

@@ -142,7 +142,7 @@
               toast(r.idempotent ? p.name + ' was already active' : 'Activated ' + p.name + ' · settings.json updated'); store.invalidate();
             } catch (e) {
               const msg = e.code === 'gateway_not_configured' ? 'Set a gateway key before activating a profile.' : e.code === 'harness_config_io_failed' ? 'settings.json could not be written: ' + (e.detail || '') : e.code === 'restart_in_progress' ? 'CC AutoMux is restarting — try again shortly.' : (e.detail || e.message);
-              toast('Activation failed: ' + msg, 'bad'); load(true);
+              toast(e.code === 'save_unconfirmed' ? msg : 'Activation failed: ' + msg, 'bad'); load(true);
             } finally { if (!disposed) { activate.disabled = false; replace(activate, icon('play'), 'Activate'); } }
           } }, isActive ? [icon('check'), 'Active'] : [icon('play'), 'Activate']);
           return h('div', { class: 'profile' + (isActive ? ' active' : '') },
@@ -154,7 +154,7 @@
               wrapTip(h('button', { class: 'ib bordered danger', type: 'button', 'aria-label': 'Delete ' + p.name, disabled: isActive, onclick: async () => {
                 const ok = await confirm({ title: 'Delete ' + p.name + '?', text: 'The mapping is removed from CC AutoMux. settings.json is not touched.', confirmLabel: 'Delete', danger: true });
                 if (!ok) return;
-                try { await store.write('DELETE', '/api/v1/harnesses/claude-code/profiles/' + p.id); toast(p.name + ' deleted'); store.invalidate(); } catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
+                try { await store.write('DELETE', '/api/v1/harnesses/claude-code/profiles/' + p.id); toast(p.name + ' deleted'); store.invalidate(); } catch (e) { toast(e.code === 'save_unconfirmed' ? e.detail : 'Delete failed: ' + (e.detail || e.message), 'bad'); }
               } }, icon('trash')), isActive ? 'Switch profiles before deleting the active one.' : 'Delete profile')));
         }
         const profilesCard = h('div', { class: 'card' },
@@ -210,7 +210,7 @@
             harness = saved;
             toast(harness.active_profile_id ? 'Telemetry settings applied' : 'Telemetry preference saved');
           } catch (e) {
-            if (!disposed) toast('Could not update telemetry: ' + (e.detail || e.message), 'bad');
+            if (!disposed) toast(e.code === 'save_unconfirmed' ? e.detail : 'Could not update telemetry: ' + (e.detail || e.message), 'bad');
           } finally {
             telemetryBusy = false;
             if (!disposed) { teleSw.setChecked(harness.disable_telemetry); teleSw.setBusy(false); load(true); }

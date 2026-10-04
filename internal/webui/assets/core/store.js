@@ -83,24 +83,29 @@
   }
   const uncertain = error => error.isNetwork || error.code === 'invalid_response';
   const SAVE_TIMEOUT_MS = 2000, REQUEST_TIMEOUT_MS = 500, MAX_ATTEMPTS = 3;
-  function saveFailure() {
-    return new api.ApiError(503, 'save_unavailable', 'Save failed. CC AutoMux did not respond successfully. Your changes are kept; try saving again.');
+  function saveFailure(submitted) {
+    return submitted
+      ? new api.ApiError(503, 'save_unconfirmed', 'Save not confirmed. The changes may already be applied. Your input is kept; saving again will reconcile the previous submission.')
+      : new api.ApiError(503, 'save_unavailable', 'Save failed before submission. Your input is kept; try saving again.');
   }
   // The deadline starts at submission, including time waiting in the queue.
   // Aborted queued work never starts; expired active work releases the queue.
   function saveTask(run) {
     const controller = new AbortController(), deadline = Date.now() + SAVE_TIMEOUT_MS;
+    let submitted = false;
+    const failure = () => saveFailure(submitted);
     let expire;
-    const expired = new Promise((_, reject) => { expire = () => { controller.abort(); reject(saveFailure()); }; });
+    const expired = new Promise((_, reject) => { expire = () => { controller.abort(); reject(failure()); }; });
     const timer = setTimeout(expire, SAVE_TIMEOUT_MS);
     const task = {
-      failure: saveFailure,
-      check() { if (controller.signal.aborted || Date.now() >= deadline) { expire(); throw saveFailure(); } },
+      failure,
+      submitted() { submitted = true; },
+      check() { if (controller.signal.aborted || Date.now() >= deadline) { expire(); throw failure(); } },
       options() { task.check(); return { signal: controller.signal, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, deadline - Date.now()) }; },
       wait(ms) {
         task.check();
         return new Promise((resolve, reject) => {
-          const aborted = () => { clearTimeout(waitTimer); reject(saveFailure()); };
+          const aborted = () => { clearTimeout(waitTimer); reject(failure()); };
           const waitTimer = setTimeout(() => { controller.signal.removeEventListener('abort', aborted); resolve(); }, ms);
           controller.signal.addEventListener('abort', aborted, { once: true });
         });
@@ -118,7 +123,7 @@
       try { const value = await read(task.options()); task.check(); return value; }
       catch (error) { task.check(); if (!uncertain(error)) throw error; }
     }
-    throw saveFailure();
+    throw task.failure();
   }
   const configResponse = options => api.get('/api/v1/config', { ...options, response: true });
   function configTag(response) {
@@ -129,17 +134,20 @@
   // Each retry carries the original strong precondition and immutable intent.
   // A read may race an in-flight write; the mutation lock still allows only one
   // state change. A different version is never used to replay an old intent.
-  async function commit({ method, path, body, tag, matches, recovered, read = configResponse, onDisconnect }, task) {
+  async function commit({ method, path, body, tag, matches, recovered, read = configResponse, onDisconnect, onSubmit, onRejected }, task) {
     let recovering = false;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       if (attempt) await task.wait(attempt * 100);
+      const options = task.options();
+      if (!attempt && onSubmit) onSubmit();
+      task.submitted();
       try {
-        const value = await api.request(method, path, body, { ...task.options(), headers: { 'If-Match': tag } });
+        const value = await api.request(method, path, body, { ...options, headers: { 'If-Match': tag } });
         task.check(); return value;
       }
       catch (error) {
         task.check();
-        if (!uncertain(error) && !(recovering && (error.status === 412 || error.status === 404 || error.code === 'restart_in_progress'))) throw error;
+        if (!uncertain(error) && !recovering) { if (onRejected) onRejected(); throw error; }
         recovering = true;
       }
       for (let check = 0; check < MAX_ATTEMPTS; check++) {
@@ -149,7 +157,7 @@
         catch (error) {
           task.check();
           if (onDisconnect) { const result = await onDisconnect(task.options()); task.check(); if (result) return result; }
-          if (uncertain(error)) { if (check + 1 === MAX_ATTEMPTS) throw saveFailure(); continue; }
+          if (uncertain(error)) { if (check + 1 === MAX_ATTEMPTS) throw task.failure(); continue; }
           throw error;
         }
         if (matches(response.json)) { const value = await recovered(response.json, task); task.check(); return value; }
@@ -157,7 +165,7 @@
         break;
       }
     }
-    throw saveFailure();
+    throw task.failure();
   }
   function saveConfig(baseline, draft, onApplied, recovery) {
     const before = store.clientUpdate(baseline), wanted = copy(draft);

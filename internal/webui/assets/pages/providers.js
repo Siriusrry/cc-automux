@@ -52,7 +52,7 @@
           live.textContent = 'Provider order saved.'; toast(live.textContent);
         } catch (e) {
           if (disposed) return;
-          toast(e.code === 'configuration_changed' ? 'Configuration changed. Loading the latest order.' : 'Could not save order: ' + (e.detail || e.message), 'bad');
+          toast(e.code === 'save_unconfirmed' ? e.detail : e.code === 'configuration_changed' ? 'Configuration changed. Loading the latest order.' : 'Could not save order: ' + (e.detail || e.message), 'bad');
         } finally {
           if (!disposed) {
             phase = 'idle'; deferredData = null; loadEpoch++; render(snapshot);
@@ -132,7 +132,7 @@
             toast(p.name + (p.enabled ? ' enabled' : ' disabled'));
           } catch (e) {
             if (disposed) return;
-            toast('Could not update ' + p.name + ': ' + (e.detail || e.message), 'bad');
+            toast(e.code === 'save_unconfirmed' ? e.detail : 'Could not update ' + p.name + ': ' + (e.detail || e.message), 'bad');
             sw.setChecked(p.enabled);
           }
           busy.delete(p.id); sw.setBusy(false); syncActions(); store.invalidate();
@@ -237,9 +237,9 @@
             }
           }
         } catch (e) {
-          if (e.code !== 'save_unavailable') duplicateDraft = null;
+          if (!['save_unavailable', 'save_unconfirmed'].includes(e.code)) duplicateDraft = null;
           if (!disposed) {
-            toast('Could not duplicate provider: ' + (e.detail || e.message), 'bad');
+            toast(e.code === 'save_unconfirmed' ? e.detail : 'Could not duplicate provider: ' + (e.detail || e.message), 'bad');
           }
         } finally {
           duplicating = false;
@@ -341,7 +341,7 @@
                 await store.write('DELETE', '/api/v1/providers/' + id); toast(provider.name + ' deleted');
                 if (!disposed) { CCAM.router.clearGuard(); CCAM.router.go('/providers'); }
               }
-              catch (e) { toast('Delete failed: ' + (e.detail || e.message), 'bad'); }
+              catch (e) { toast(e.code === 'save_unconfirmed' ? e.detail : 'Delete failed: ' + (e.detail || e.message), 'bad'); }
             } }, icon('trash'), 'Delete provider');
           const actionsCard = h('div', { class: 'card' },
             h('p', { class: 'eyebrow' }, 'Provider actions'),
