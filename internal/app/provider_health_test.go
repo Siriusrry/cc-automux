@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Siriusrry/cc-automux/internal/config"
 	"github.com/Siriusrry/cc-automux/internal/health"
@@ -122,6 +123,19 @@ func TestProviderEnabledAPIsResetHealth(t *testing.T) {
 			upstreamStatus.Store(http.StatusUnauthorized)
 			gatewayCall(http.StatusBadGateway)
 			before, _ := readHealth()
+			// Error bodies are finalized asynchronously after the gateway responds.
+			// Compare the settled diagnostics, not two different observation phases.
+			deadline := time.Now().Add(2 * time.Second)
+			for before.Global.LastErrorPending {
+				if time.Now().After(deadline) {
+					t.Fatalf("error diagnostics did not settle: %#v", before)
+				}
+				time.Sleep(time.Millisecond)
+				before, _ = readHealth()
+			}
+			if before.Global.LastError != `{"result":"upstream"}` || before.Global.LastErrorIncomplete {
+				t.Fatalf("expected completed upstream diagnostics: %#v", before)
+			}
 			if before.Global.State != scheduler.GlobalCooldown || before.Global.ObservedFailures != 1 {
 				t.Fatalf("expected old failure: %#v", before)
 			}
