@@ -143,12 +143,12 @@
   }
   function write(method, path, input, options) {
     const body = copy(input);
-    const provider = path.match(/^\/api\/v1\/providers(?:\/([^/]+))?$/);
+    const provider = path.match(/^\/api\/v1\/providers(?:\/((?!order$)[^/]+))?$/);
     const profile = path.match(/^\/api\/v1\/harnesses\/claude-code\/profiles(?:\/([^/]+))?(\/activate)?$/);
     const harness = path === '/api/v1/harnesses/claude-code';
     const order = path === '/api/v1/providers/order';
-    if (method === 'POST' && ((provider && !provider[1]) || (profile && !profile[1]))) body.id ||= crypto.randomUUID();
-    if (!provider && !profile && !harness) throw new Error('Unsupported configuration resource');
+    if (method === 'POST' && ((provider && !provider[1]) || (profile && !profile[1]))) body.id ||= CCAM.fmt.uuid();
+    if (!provider && !profile && !harness && !order) throw new Error('Unsupported configuration resource');
     const id = provider?.[1] || profile?.[1] || body?.id;
     const select = cfg => order ? (cfg.providers || []).filter(p => body.provider_ids.includes(p.id)).map(p => p.id)
       : harness || profile?.[2] ? cfg.harnesses.claude_code
