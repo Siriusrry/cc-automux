@@ -82,14 +82,45 @@
     throw new api.ApiError(412, 'configuration_changed', 'Another window changed ' + (path || 'this configuration') + '. Your draft is kept; use Revert to load the latest values.');
   }
   const uncertain = error => error.isNetwork || error.code === 'invalid_response';
-  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-  async function reconnect(read) {
-    for (let delay = 250;; delay = Math.min(delay * 2, 3000)) {
-      try { return await read(); }
-      catch (error) { if (!uncertain(error)) throw error; await pause(delay); }
-    }
+  const SAVE_TIMEOUT_MS = 2000, REQUEST_TIMEOUT_MS = 500, MAX_ATTEMPTS = 3;
+  function saveFailure() {
+    return new api.ApiError(503, 'save_unavailable', 'Save failed. CC AutoMux did not respond successfully. Your changes are kept; try saving again.');
   }
-  const configResponse = () => api.get('/api/v1/config', { response: true });
+  // The deadline starts at submission, including time waiting in the queue.
+  // Aborted queued work never starts; expired active work releases the queue.
+  function saveTask(run) {
+    const controller = new AbortController(), deadline = Date.now() + SAVE_TIMEOUT_MS;
+    let expire;
+    const expired = new Promise((_, reject) => { expire = () => { controller.abort(); reject(saveFailure()); }; });
+    const timer = setTimeout(expire, SAVE_TIMEOUT_MS);
+    const task = {
+      failure: saveFailure,
+      check() { if (controller.signal.aborted || Date.now() >= deadline) { expire(); throw saveFailure(); } },
+      options() { task.check(); return { signal: controller.signal, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, deadline - Date.now()) }; },
+      wait(ms) {
+        task.check();
+        return new Promise((resolve, reject) => {
+          const aborted = () => { clearTimeout(waitTimer); reject(saveFailure()); };
+          const waitTimer = setTimeout(() => { controller.signal.removeEventListener('abort', aborted); resolve(); }, ms);
+          controller.signal.addEventListener('abort', aborted, { once: true });
+        });
+      }
+    };
+    const queued = api.enqueue(() => {
+      task.check();
+      return Promise.race([run(task), expired]);
+    });
+    return Promise.race([queued, expired]).finally(() => clearTimeout(timer));
+  }
+  async function retryRead(read, task) {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      if (attempt) await task.wait(attempt * 250);
+      try { const value = await read(task.options()); task.check(); return value; }
+      catch (error) { task.check(); if (!uncertain(error)) throw error; }
+    }
+    throw saveFailure();
+  }
+  const configResponse = options => api.get('/api/v1/config', { ...options, response: true });
   function configTag(response) {
     const tag = response.headers.get('ETag');
     if (!tag || !/^"[^"\s]+"$/.test(tag)) throw new api.ApiError(502, 'invalid_response', 'The service did not provide a configuration validator.');
@@ -98,40 +129,47 @@
   // Each retry carries the original strong precondition and immutable intent.
   // A read may race an in-flight write; the mutation lock still allows only one
   // state change. A different version is never used to replay an old intent.
-  async function commit({ method, path, body, tag, matches, recovered, read = configResponse, onDisconnect }) {
-    let recovering = false, delay = 250;
-    for (;;) {
-      try { return await api.request(method, path, body, { headers: { 'If-Match': tag } }); }
+  async function commit({ method, path, body, tag, matches, recovered, read = configResponse, onDisconnect }, task) {
+    let recovering = false;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      if (attempt) await task.wait(attempt * 100);
+      try {
+        const value = await api.request(method, path, body, { ...task.options(), headers: { 'If-Match': tag } });
+        task.check(); return value;
+      }
       catch (error) {
+        task.check();
         if (!uncertain(error) && !(recovering && (error.status === 412 || error.status === 404 || error.code === 'restart_in_progress'))) throw error;
-        if (!recovering) CCAM.ui?.toast('Reconnecting to finish saving…', 'warn');
         recovering = true;
       }
-      for (;;) {
-        await pause(delay); delay = Math.min(delay * 2, 3000);
+      for (let check = 0; check < MAX_ATTEMPTS; check++) {
+        if (check) await task.wait(check * 250);
         let response;
-        try { response = await read(); }
+        try { response = await read(task.options()); task.check(); }
         catch (error) {
-          if (onDisconnect) { const result = await onDisconnect(); if (result) return result; }
-          if (uncertain(error)) continue;
+          task.check();
+          if (onDisconnect) { const result = await onDisconnect(task.options()); task.check(); if (result) return result; }
+          if (uncertain(error)) { if (check + 1 === MAX_ATTEMPTS) throw saveFailure(); continue; }
           throw error;
         }
-        if (matches(response.json)) return recovered(response.json);
+        if (matches(response.json)) { const value = await recovered(response.json, task); task.check(); return value; }
         if (configTag(response) !== tag) throw new api.ApiError(412, 'configuration_changed', 'Another window changed these settings. Your draft is kept; review or revert before saving again.');
         break;
       }
     }
+    throw saveFailure();
   }
   function saveConfig(baseline, draft, onApplied, recovery) {
     const before = store.clientUpdate(baseline), wanted = copy(draft);
-    return api.enqueue(async () => {
-      const response = await reconnect(configResponse);
+    return saveTask(async task => {
+      const response = await retryRead(configResponse, task);
       const tag = configTag(response);
       const body = mergeDraft(before, wanted, store.clientUpdate(response.json), '');
       const result = await commit({ method: 'PUT', path: '/api/v1/config', body, tag,
         matches: value => same(store.clientUpdate(value), body), recovered: () => ({ applied: true }),
-        ...(recovery ? recovery(body) : {}) });
-      if (onApplied) await onApplied(result, body);
+        ...(recovery ? recovery(body) : {}) }, task);
+      if (onApplied) await onApplied(result, body, task);
+      task.check();
       invalidate();
       return result;
     });
@@ -147,7 +185,8 @@
     const profile = path.match(/^\/api\/v1\/harnesses\/claude-code\/profiles(?:\/([^/]+))?(\/activate)?$/);
     const harness = path === '/api/v1/harnesses/claude-code';
     const order = path === '/api/v1/providers/order';
-    if (method === 'POST' && ((provider && !provider[1]) || (profile && !profile[1]))) body.id ||= CCAM.fmt.uuid();
+    const creating = method === 'POST' && ((provider && !provider[1]) || (profile && !profile[1]));
+    if (creating) body.id ||= CCAM.fmt.uuid();
     if (!provider && !profile && !harness && !order) throw new Error('Unsupported configuration resource');
     const id = provider?.[1] || profile?.[1] || body?.id;
     const select = cfg => order ? (cfg.providers || []).filter(p => body.provider_ids.includes(p.id)).map(p => p.id)
@@ -155,11 +194,11 @@
       : (provider ? cfg.providers || [] : cfg.harnesses.claude_code.profiles || []).find(value => value.id === id);
     const matches = cfg => method === 'DELETE' ? !select(cfg) : order ? same(select(cfg), body.provider_ids)
       : profile?.[2] ? select(cfg).active_profile_id === id : contains(select(cfg), body);
-    const recovered = async cfg => {
+    const recovered = async (cfg, task) => {
       if (method === 'DELETE') return null;
-      if (harness) return reconnect(() => store.harness());
+      if (harness) return retryRead(options => store.harness(options), task);
       if (profile) {
-        const status = await reconnect(() => store.harness());
+        const status = await retryRead(options => store.harness(options), task);
         const active = status.state === 'in_sync' && status.active_profile_id === id;
         if (profile[2] && !active) throw new api.ApiError(409, 'activation_changed', 'The settings file no longer matches this profile. Review its current state before activating again.');
         const value = Object.assign({}, cfg.harnesses.claude_code.profiles.find(p => p.id === id), { active });
@@ -167,10 +206,13 @@
       }
       return order ? { applied: true } : select(cfg);
     };
-    return api.enqueue(async () => {
-      const response = await reconnect(configResponse);
+    return saveTask(async task => {
+      const response = await retryRead(configResponse, task);
       const tag = options?.headers?.['If-Match'] || configTag(response);
-      const result = await commit({ method, path, body, tag, matches, recovered });
+      // A user may retry a timed-out creation with the same form identity.
+      const result = creating && matches(response.json) ? await recovered(response.json, task)
+        : await commit({ method, path, body, tag, matches, recovered }, task);
+      task.check();
       invalidate();
       return result;
     });
@@ -179,7 +221,7 @@
   const store = {
     on, off, emit, state,
     startPolling, stopPolling, refreshStatus,
-    invalidate, same, mergeDraft, saveConfig, write, reconnect,
+    invalidate, same, mergeDraft, saveConfig, write,
     config: () => cached('config', () => api.get('/api/v1/config')),
     providers: () => cached('providers', async () => (await api.get('/api/v1/providers')) || []),
     providerHealth: async () => {
@@ -190,7 +232,7 @@
       return data;
     },
     patches: () => cached('patches', () => api.get('/api/v1/provider-patches')),
-    harness: () => api.get('/api/v1/harnesses/claude-code'),
+    harness: options => api.get('/api/v1/harnesses/claude-code', options),
     profiles: () => api.get('/api/v1/harnesses/claude-code/profiles'),
     // Build the client update object from a complete config resource.
     clientUpdate(config) {

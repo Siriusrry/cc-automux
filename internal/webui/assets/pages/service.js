@@ -16,12 +16,15 @@
     return c;
   }
 
-  function probeConsole(origin) {
+  function probeConsole(origin, options) {
     return new Promise(resolve => {
       const img = new Image();
       let finished = false;
-      const finish = ok => { if (finished) return; finished = true; clearTimeout(timer); img.onload = img.onerror = null; img.removeAttribute('src'); resolve(ok); };
-      const timer = setTimeout(() => finish(false), 1000);
+      const aborted = () => finish(false);
+      const finish = ok => { if (finished) return; finished = true; clearTimeout(timer); options.signal.removeEventListener('abort', aborted); img.onload = img.onerror = null; img.removeAttribute('src'); resolve(ok); };
+      const timer = setTimeout(() => finish(false), options.timeoutMs);
+      if (options.signal.aborted) { finish(false); return; }
+      options.signal.addEventListener('abort', aborted, { once: true });
       img.onload = () => finish(true); img.onerror = () => finish(false);
       img.src = origin + '/management/assets/favicon.svg?restart=' + Date.now();
     });
@@ -134,25 +137,25 @@
           const oldKey = CCAM.auth.key();
           try {
             let redirected = false;
-            await store.saveConfig(config, body, async (result, applied) => {
+            await store.saveConfig(config, body, async (result, applied, task) => {
               if (result.restart_required) {
                 // Keep subsequent saves queued until the replacement is ready.
-                redirected = await waitForRestart({ config: applied, oldKey: CCAM.auth.key() });
+                redirected = await waitForRestart({ config: applied, oldKey: CCAM.auth.key() }, task);
               } else {
                 CCAM.auth.adopt(applied.auth.management_key); toast('Service settings saved');
               }
             }, applied => ({
-              read: async () => {
+              read: async options => {
                 let failure;
                 for (const key of new Set([applied.auth.management_key, oldKey])) {
-                  try { return await api.get('/api/v1/config', { response: true, silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key } }); }
+                  try { return await api.get('/api/v1/config', { ...options, response: true, silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key } }); }
                   catch (error) { failure = error; }
                 }
                 throw failure;
               },
-              onDisconnect: async () => {
+              onDisconnect: async options => {
                 const target = new URL('http://' + applied.service.listen_addr);
-                if (target.origin !== location.origin && await probeConsole(target.origin)) return { restart_required: true, restarting: true };
+                if (target.origin !== location.origin && await probeConsole(target.origin, options)) return { restart_required: true, restarting: true };
                 return null;
               }
             }));
@@ -167,16 +170,16 @@
             bar.setError(e.code === 'restart_in_progress' ? 'CC AutoMux is already restarting — try again in a moment.' : (e.detail || e.message));
           } finally { saving = false; resumeUnauthorized(); if (!disposed) { listenerCard.inert = false; keysCard.inert = false; } }
         }
-        async function waitForRestart(plan) {
+        async function waitForRestart(plan, task) {
           const target = new URL(location.href);
           target.hostname = '127.0.0.1'; target.port = plan.config.service.listen_addr.split(':')[1];
           target.pathname = '/management'; target.search = ''; target.hash = '#/service';
           const changedOrigin = target.origin !== location.origin;
           toast(changedOrigin ? 'Restarting CC AutoMux at ' + target.origin + '. Sign in again at the new address.' : 'Restarting CC AutoMux…', 'warn');
-          const started = Date.now();
-          while (Date.now() - started < 20000) {
-            await new Promise(r => setTimeout(r, 500));
-            if (changedOrigin && await probeConsole(target.origin)) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            await task.wait((attempt + 1) * 100);
+            if (changedOrigin && await probeConsole(target.origin, task.options())) {
+              task.check();
               CCAM.auth.logout();
               location.replace(target.href);
               return true;
@@ -186,11 +189,9 @@
             for (const key of new Set([plan.config.auth.management_key, plan.oldKey])) {
               let st;
               try {
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), 1500);
-                try { st = await api.get('/api/v1/status', { silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key }, signal: controller.signal }); }
-                finally { clearTimeout(timer); }
-              } catch (e) { continue; }
+                st = await api.get('/api/v1/status', { ...task.options(), silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key } });
+                task.check();
+              } catch (e) { task.check(); continue; }
               if (st.restart && st.restart.last_error && !st.restart_in_progress) {
                 CCAM.auth.adopt(key);
                 throw new Error('Restart failed. The previous configuration is still active: ' + st.restart.last_error);
@@ -203,7 +204,7 @@
               }
             }
           }
-          throw new Error('The service did not restart within 20 seconds. ' + (changedOrigin ? 'Open ' + target.href + ' to reconnect.' : 'Retry after checking the service.'));
+          throw task.failure();
         }
 
       }

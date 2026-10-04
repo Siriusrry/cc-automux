@@ -47,21 +47,19 @@
         phase = 'saving'; draggingID = null; loadEpoch++; deferredData = null; syncActions();
         try {
           await store.write('PUT', '/api/v1/providers/order', { provider_ids: ids }, { headers: { 'If-Match': etag } });
-          const data = await store.reconnect(() => store.providerHealth());
           if (disposed) return;
-          phase = 'idle'; deferredData = null; loadEpoch++; render(data);
+          snapshot = { ...snapshot, tiers: snapshot.tiers.map(tier => tier.priority === sortingPriority ? { ...tier, provider_ids: ids.slice() } : tier) };
           live.textContent = 'Provider order saved.'; toast(live.textContent);
-          views.get(focused)?.handle.focus({ preventScroll: true });
         } catch (e) {
           if (disposed) return;
           toast(e.code === 'configuration_changed' ? 'Configuration changed. Loading the latest order.' : 'Could not save order: ' + (e.detail || e.message), 'bad');
-          try {
-            const data = await store.reconnect(() => store.providerHealth());
-            if (disposed) return;
-            phase = 'idle'; deferredData = null; loadEpoch++; render(data);
+        } finally {
+          if (!disposed) {
+            phase = 'idle'; deferredData = null; loadEpoch++; render(snapshot);
             views.get(focused)?.handle.focus({ preventScroll: true });
-          } catch (_) { if (!disposed) { phase = 'idle'; load(); } }
-        } finally { if (!disposed) syncActions(); }
+            load();
+          }
+        }
       }
 
       function place(parent, nodes) {
@@ -137,7 +135,7 @@
             toast('Could not update ' + p.name + ': ' + (e.detail || e.message), 'bad');
             sw.setChecked(p.enabled);
           }
-          busy.delete(p.id); sw.setBusy(false); store.invalidate();
+          busy.delete(p.id); sw.setBusy(false); syncActions(); store.invalidate();
         }
         function update(value, priority) {
           p = value; handle.setAttribute('aria-label', 'Reorder ' + p.name);
@@ -181,13 +179,14 @@
     render(ctx) {
       const isNew = ctx.route.name === 'provider-new';
       const id = ctx.params.id;
+      const creationID = isNew ? fmt.uuid() : null;
       ctx.title(isNew ? 'New provider' : 'Provider');
       const duplicateHelp = isNew ? null : h('span', { class: 'help', id: 'p-duplicate-help', role: 'status', hidden: true }, 'Save or revert changes before duplicating.');
       const duplicateButton = isNew ? null : h('button', { class: 'btn', type: 'button', 'aria-describedby': 'p-duplicate-help', onclick: duplicate }, icon('copy'), 'Duplicate');
       ctx.actions([h('a', { class: 'btn quiet', href: '#/providers' }, icon('arrow-left'), 'All providers')]);
       const host = h('div', null, skeleton(6, 44));
       ctx.root.appendChild(host);
-      let bar = null, disposed = false, duplicating = false, draftDirty = false, saving = false;
+      let bar = null, disposed = false, duplicating = false, draftDirty = false, saving = false, duplicateDraft = null;
 
       function syncDuplicate() {
         if (isNew || disposed) return;
@@ -201,24 +200,28 @@
         syncDuplicate();
         try {
           for (let attempt = 0; attempt < 2; attempt++) {
-            const list = await api.get('/api/v1/providers');
-            if (disposed || draftDirty) return;
-            const source = list.find(p => p.id === id);
-            if (!source) {
-              toast('Could not duplicate provider: it no longer exists.', 'bad');
-              store.invalidate();
-              load();
-              return;
+            if (!duplicateDraft) {
+              const list = await api.get('/api/v1/providers', { timeoutMs: 500 });
+              if (disposed || draftDirty) return;
+              const source = list.find(p => p.id === id);
+              if (!source) {
+                toast('Could not duplicate provider: it no longer exists.', 'bad');
+                store.invalidate();
+                load();
+                return;
+              }
+              const names = new Set(list.map(p => p.name));
+              const base = source.name + ' copy';
+              let name = base;
+              for (let suffix = 2; names.has(name); suffix++) name = base + ' ' + suffix;
+              const copy = JSON.parse(JSON.stringify(source));
+              copy.id = fmt.uuid();
+              copy.name = name;
+              duplicateDraft = copy;
             }
-            const names = new Set(list.map(p => p.name));
-            const base = source.name + ' copy';
-            let name = base;
-            for (let suffix = 2; names.has(name); suffix++) name = base + ' ' + suffix;
-            const copy = JSON.parse(JSON.stringify(source));
-            delete copy.id;
-            copy.name = name;
             try {
-              const created = await store.write('POST', '/api/v1/providers', copy);
+              const created = await store.write('POST', '/api/v1/providers', duplicateDraft);
+              duplicateDraft = null;
               store.invalidate();
               if (!disposed) {
                 toast('Created ' + created.name);
@@ -227,12 +230,14 @@
               return;
             } catch (e) {
               if (attempt === 0 && e.status === 409 && e.code === 'conflict' && e.field === 'name') {
+                duplicateDraft = null;
                 continue;
               }
               throw e;
             }
           }
         } catch (e) {
+          if (e.code !== 'save_unavailable') duplicateDraft = null;
           if (!disposed) {
             toast('Could not duplicate provider: ' + (e.detail || e.message), 'bad');
           }
@@ -257,6 +262,7 @@
       }
 
       function render(provider, patches, diag) {
+        duplicateDraft = null;
         const draft = JSON.parse(JSON.stringify(provider));
         const baseline = JSON.stringify(draft);
         const fields = {};
@@ -351,7 +357,7 @@
           if (saving || disposed) return;
           const body = JSON.parse(JSON.stringify(draft));
           body.tls = tls.getSubmission();
-          if (!isNew) body.id = id; else delete body.id;
+          body.id = isNew ? creationID : id;
           saving = true; formCard.inert = true; bar.busy(true); syncDuplicate();
           await complete(() => store.write(isNew ? 'POST' : 'PUT', isNew ? '/api/v1/providers' : '/api/v1/providers/' + id, body));
         }

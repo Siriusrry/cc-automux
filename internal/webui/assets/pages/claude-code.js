@@ -5,7 +5,6 @@
   const { h, icon, replace, pill, tag, field, input, seg, switchCtl, dialog, confirm, skeleton, errorCard, toast, empty, banner, tip, tipBlock, wrapTip } = CCAM.ui;
   const fmt = CCAM.fmt;
   const store = CCAM.store;
-  const api = CCAM.api;
   CCAM.pages = CCAM.pages || {};
 
   const STATE = {
@@ -36,6 +35,7 @@
   function profileDialog(profile, models) {
     const draft = Object.assign({ name: '', haiku_model: '', sonnet_model: '', opus_model: '', fable_model: '', subagent_model: '', teammate_default_model: '', max_attempts: 3, sticky_no_cooldown_attempts: 1 }, profile || {});
     const isNew = !profile;
+    const id = profile ? profile.id : fmt.uuid();
     let saving = false;
     const fields = {};
     const list = h('datalist', { id: 'cc-models' }, models.map(m => h('option', { value: m })));
@@ -72,9 +72,9 @@
         if (bad || attempts === null || stickyAttempts === null) return false;
         saving = true; form.inert = true;
         try {
-          const body = { name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts, sticky_no_cooldown_attempts: stickyAttempts };
+          const body = { id, name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts, sticky_no_cooldown_attempts: stickyAttempts };
           if (isNew) return await store.write('POST', '/api/v1/harnesses/claude-code/profiles', body);
-          return await store.write('PUT', '/api/v1/harnesses/claude-code/profiles/' + profile.id, Object.assign({ id: profile.id }, body));
+          return await store.write('PUT', '/api/v1/harnesses/claude-code/profiles/' + id, body);
         } catch (e) {
           if (e.status === 409 && /name/.test(e.message)) fields.name.setError('Another profile already uses this name.');
           else if (e.field && fields[e.field.replace(/^(?:profile\.|harnesses\.claude_code\.profiles\[\d+\]\.)/, '')]) fields[e.field.replace(/^(?:profile\.|harnesses\.claude_code\.profiles\[\d+\]\.)/, '')].setError(e.detail);
@@ -142,8 +142,8 @@
               toast(r.idempotent ? p.name + ' was already active' : 'Activated ' + p.name + ' · settings.json updated'); store.invalidate();
             } catch (e) {
               const msg = e.code === 'gateway_not_configured' ? 'Set a gateway key before activating a profile.' : e.code === 'harness_config_io_failed' ? 'settings.json could not be written: ' + (e.detail || '') : e.code === 'restart_in_progress' ? 'CC AutoMux is restarting — try again shortly.' : (e.detail || e.message);
-              toast('Activation failed: ' + msg, 'bad'); load();
-            }
+              toast('Activation failed: ' + msg, 'bad'); load(true);
+            } finally { if (!disposed) { activate.disabled = false; replace(activate, icon('play'), 'Activate'); } }
           } }, isActive ? [icon('check'), 'Active'] : [icon('play'), 'Activate']);
           return h('div', { class: 'profile' + (isActive ? ' active' : '') },
             h('div', null, h('div', { class: 'p-name' }, p.name, isActive ? tip(pill('Active · verified', 'ok'), 'settings.json currently contains exactly this mapping; it is re-checked on load and when the window regains focus.') : null), h('div', { class: 'p-sub' }, 'Max attempts per request: ' + p.max_attempts), h('div', { class: 'p-sub' }, 'Sticky attempts before failover: ' + p.sticky_no_cooldown_attempts)),

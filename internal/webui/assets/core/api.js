@@ -32,9 +32,13 @@
     if (opts?.signal?.aborted) controller.abort();
     opts?.signal?.addEventListener('abort', abort, { once: true });
     init.signal = controller.signal;
-    const timer = setTimeout(abort, 10000);
+    const timer = setTimeout(abort, opts?.timeoutMs ?? 10000);
     let res, text;
-    try { res = await fetch(path, init); text = await res.text(); }
+    try {
+      if (controller.signal.aborted) throw new Error('Request aborted');
+      res = await fetch(path, init); text = await res.text();
+      if (controller.signal.aborted) throw new Error('Request aborted');
+    }
     catch (e) { throw new ApiError(0, 'network', 'Could not reach CC AutoMux'); }
     finally { clearTimeout(timer); opts?.signal?.removeEventListener('abort', abort); }
     let json = null;
