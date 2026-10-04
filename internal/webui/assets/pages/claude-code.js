@@ -36,6 +36,7 @@
     const draft = Object.assign({ name: '', haiku_model: '', sonnet_model: '', opus_model: '', fable_model: '', subagent_model: '', teammate_default_model: '', max_attempts: 3, sticky_no_cooldown_attempts: 1 }, profile || {});
     const isNew = !profile;
     const id = profile ? profile.id : fmt.uuid();
+    const createProfile = isNew ? store.createResource('/api/v1/harnesses/claude-code/profiles', id) : null;
     let saving = false;
     const fields = {};
     const list = h('datalist', { id: 'cc-models' }, models.map(m => h('option', { value: m })));
@@ -73,7 +74,7 @@
         saving = true; form.inert = true;
         try {
           const body = { id, name: draft.name, haiku_model: draft.haiku_model, sonnet_model: draft.sonnet_model, opus_model: draft.opus_model, fable_model: draft.fable_model, subagent_model: draft.subagent_model, teammate_default_model: draft.teammate_default_model, max_attempts: attempts, sticky_no_cooldown_attempts: stickyAttempts };
-          if (isNew) return await store.write('POST', '/api/v1/harnesses/claude-code/profiles', body);
+          if (isNew) return await createProfile(body);
           return await store.write('PUT', '/api/v1/harnesses/claude-code/profiles/' + id, body);
         } catch (e) {
           if (e.status === 409 && /name/.test(e.message)) fields.name.setError('Another profile already uses this name.');

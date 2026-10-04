@@ -179,7 +179,7 @@
     render(ctx) {
       const isNew = ctx.route.name === 'provider-new';
       const id = ctx.params.id;
-      const creationID = isNew ? fmt.uuid() : null;
+      const createProvider = isNew ? store.createResource('/api/v1/providers') : null;
       ctx.title(isNew ? 'New provider' : 'Provider');
       const duplicateHelp = isNew ? null : h('span', { class: 'help', id: 'p-duplicate-help', role: 'status', hidden: true }, 'Save or revert changes before duplicating.');
       const duplicateButton = isNew ? null : h('button', { class: 'btn', type: 'button', 'aria-describedby': 'p-duplicate-help', onclick: duplicate }, icon('copy'), 'Duplicate');
@@ -217,10 +217,10 @@
               const copy = JSON.parse(JSON.stringify(source));
               copy.id = fmt.uuid();
               copy.name = name;
-              duplicateDraft = copy;
+              duplicateDraft = { body: copy, save: store.createResource('/api/v1/providers', copy.id) };
             }
             try {
-              const created = await store.write('POST', '/api/v1/providers', duplicateDraft);
+              const created = await duplicateDraft.save(duplicateDraft.body);
               duplicateDraft = null;
               store.invalidate();
               if (!disposed) {
@@ -357,9 +357,9 @@
           if (saving || disposed) return;
           const body = JSON.parse(JSON.stringify(draft));
           body.tls = tls.getSubmission();
-          body.id = isNew ? creationID : id;
+          if (!isNew) body.id = id;
           saving = true; formCard.inert = true; bar.busy(true); syncDuplicate();
-          await complete(() => store.write(isNew ? 'POST' : 'PUT', isNew ? '/api/v1/providers' : '/api/v1/providers/' + id, body));
+          await complete(() => isNew ? createProvider(body) : store.write('PUT', '/api/v1/providers/' + id, body));
         }
         async function complete(run) {
           try {

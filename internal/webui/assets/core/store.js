@@ -92,7 +92,7 @@
   // Aborted queued work never starts; expired active work releases the queue.
   function saveTask(run) {
     const controller = new AbortController(), deadline = Date.now() + SAVE_TIMEOUT_MS;
-    let submitted = false;
+    let submitted = false, writes = 0;
     const failure = () => saveFailure(submitted);
     let expire;
     const expired = new Promise((_, reject) => { expire = () => { controller.abort(); reject(failure()); }; });
@@ -100,6 +100,7 @@
     const task = {
       failure,
       submitted() { submitted = true; },
+      beforeWrite() { task.check(); if (writes >= MAX_ATTEMPTS) throw failure(); writes++; submitted = true; },
       check() { if (controller.signal.aborted || Date.now() >= deadline) { expire(); throw failure(); } },
       options() { task.check(); return { signal: controller.signal, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, deadline - Date.now()) }; },
       wait(ms) {
@@ -134,13 +135,13 @@
   // Each retry carries the original strong precondition and immutable intent.
   // A read may race an in-flight write; the mutation lock still allows only one
   // state change. A different version is never used to replay an old intent.
-  async function commit({ method, path, body, tag, matches, recovered, read = configResponse, onDisconnect, onSubmit, onRejected }, task) {
-    let recovering = false;
+  async function commit({ method, path, body, tag, matches, recovered, read = configResponse, onDisconnect, onSubmit, onRejected, unconfirmed = false }, task) {
+    let recovering = unconfirmed;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       if (attempt) await task.wait(attempt * 100);
       const options = task.options();
+      task.beforeWrite();
       if (!attempt && onSubmit) onSubmit();
-      task.submitted();
       try {
         const value = await api.request(method, path, body, { ...options, headers: { 'If-Match': tag } });
         task.check(); return value;
@@ -187,8 +188,14 @@
     return value && wanted && !Array.isArray(wanted) && typeof wanted === 'object' &&
       Object.keys(wanted).every(key => contains(value[key], wanted[key]));
   }
-  function write(method, path, input, options) {
-    const body = copy(input);
+  // The form owns this identity and its submitted intent. No editable drafts
+  // or resource credentials are retained globally or in browser storage.
+  function createResource(path, id = CCAM.fmt.uuid()) {
+    const creation = { previous: null };
+    return input => write('POST', path, { ...input, id }, undefined, creation);
+  }
+  function write(method, path, input, options, creation) {
+    let body = copy(input);
     const provider = path.match(/^\/api\/v1\/providers(?:\/((?!order$)[^/]+))?$/);
     const profile = path.match(/^\/api\/v1\/harnesses\/claude-code\/profiles(?:\/([^/]+))?(\/activate)?$/);
     const harness = path === '/api/v1/harnesses/claude-code';
@@ -215,12 +222,33 @@
       return order ? { applied: true } : select(cfg);
     };
     return saveTask(async task => {
-      const response = await retryRead(configResponse, task);
+      const wanted = copy(body), previous = creation?.previous;
+      if (previous && !previous.confirmed) task.submitted();
+      let response = await retryRead(configResponse, task);
+      if (previous) {
+        let current = select(response.json);
+        // A submitted creation's unique ID identifies the resource even if
+        // another editor changed it. Later updates also need their outcome
+        // reconciled before using the submitted draft as the next baseline.
+        if (!previous.confirmed && !(previous.method === 'POST' && current) && !contains(current, previous.body)) {
+          if (configTag(response) !== previous.tag) throw new api.ApiError(412, 'configuration_changed', 'The configuration changed before the previous save could be confirmed. Your input is kept; review the saved resource before retrying.');
+          await commit({ ...previous, unconfirmed: true, matches: cfg => contains(select(cfg), previous.body), recovered }, task);
+          response = await retryRead(configResponse, task);
+          current = select(response.json);
+        }
+        if (!current) throw new api.ApiError(412, 'configuration_changed', 'This resource was removed. Your input is kept; it will not be recreated automatically.');
+        previous.confirmed = true;
+        body = mergeDraft(previous.draft, wanted, current, '');
+        method = 'PUT'; path += '/' + encodeURIComponent(id);
+      }
       const tag = options?.headers?.['If-Match'] || configTag(response);
-      // A user may retry a timed-out creation with the same form identity.
+      const submitted = { method, path, body: copy(body), tag, draft: wanted, confirmed: false };
       const result = creating && matches(response.json) ? await recovered(response.json, task)
-        : await commit({ method, path, body, tag, matches, recovered }, task);
+        : await commit({ method, path, body, tag, matches, recovered,
+          onSubmit: () => { if (creation) creation.previous = submitted; },
+          onRejected: () => { if (creation) creation.previous = previous; } }, task);
       task.check();
+      if (creation) { submitted.confirmed = true; creation.previous = submitted; }
       invalidate();
       return result;
     });
@@ -229,7 +257,7 @@
   const store = {
     on, off, emit, state,
     startPolling, stopPolling, refreshStatus,
-    invalidate, same, mergeDraft, saveConfig, write,
+    invalidate, same, mergeDraft, saveConfig, write, createResource,
     config: () => cached('config', () => api.get('/api/v1/config')),
     providers: () => cached('providers', async () => (await api.get('/api/v1/providers')) || []),
     providerHealth: async () => {
