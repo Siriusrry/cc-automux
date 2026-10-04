@@ -91,6 +91,7 @@
   // The deadline starts at submission, including time waiting in the queue.
   // Aborted queued work never starts; expired active work releases the queue.
   function saveTask(run) {
+    const checkSession = api.captureSession();
     const controller = new AbortController(), deadline = Date.now() + SAVE_TIMEOUT_MS;
     let submitted = false, writes = 0;
     const failure = () => saveFailure(submitted);
@@ -101,7 +102,7 @@
       failure,
       submitted() { submitted = true; },
       beforeWrite() { task.check(); if (writes >= MAX_ATTEMPTS) throw failure(); writes++; submitted = true; },
-      check() { if (controller.signal.aborted || Date.now() >= deadline) { expire(); throw failure(); } },
+      check() { checkSession(); if (controller.signal.aborted || Date.now() >= deadline) { expire(); throw failure(); } },
       options() { task.check(); return { signal: controller.signal, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, deadline - Date.now()) }; },
       wait(ms) {
         task.check();
@@ -177,6 +178,7 @@
       const result = await commit({ method: 'PUT', path: '/api/v1/config', body, tag,
         matches: value => same(store.clientUpdate(value), body), recovered: () => ({ applied: true }),
         ...(recovery ? recovery(body) : {}) }, task);
+      task.check();
       if (onApplied) await onApplied(result, body, task);
       task.check();
       invalidate();

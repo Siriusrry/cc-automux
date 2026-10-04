@@ -17,12 +17,19 @@
   }
 
   let keyProvider = () => null;
+  let sessionGuardProvider = () => () => true;
   let authRecovery = null;
   let quietUnauthorized = 0;
   const unauthorizedListeners = [];
   function authHeaders() {
     const key = keyProvider();
     return key ? { Authorization: 'Bearer ' + key } : {};
+  }
+  function captureSession() {
+    const sameSession = sessionGuardProvider();
+    return () => {
+      if (!sameSession()) throw new ApiError(401, 'session_changed', 'The sign-in session changed. This operation was stopped.');
+    };
   }
   async function recoverUnauthorized(requestKey, opts) {
     if (opts?.silentUnauthorized || opts?.headers?.Authorization) return false;
@@ -57,13 +64,22 @@
   }
 
   async function request(method, path, body, opts) {
+    const checkSession = captureSession();
     let requestKey = keyProvider();
-    let res = await transport(method, path, body, opts);
+    let res;
+    try { res = await transport(method, path, body, opts); }
+    finally { checkSession(); }
     // A 401 rejected the operation before execution. Retry it once only after
     // authentication has resolved a credential transition owned by this tab.
-    if (res.status === 401 && await recoverUnauthorized(requestKey, opts)) {
-      requestKey = keyProvider();
-      res = await transport(method, path, body, opts);
+    if (res.status === 401) {
+      let recovered;
+      try { recovered = await recoverUnauthorized(requestKey, opts); }
+      finally { checkSession(); }
+      if (recovered) {
+        requestKey = keyProvider();
+        try { res = await transport(method, path, body, opts); }
+        finally { checkSession(); }
+      }
     }
     if (res.status === 401) {
       notifyUnauthorized(requestKey, opts);
@@ -82,6 +98,7 @@
   // Server-sent events over fetch so the Authorization header can be sent.
   function stream(path, handlers) {
     handlers = handlers || {};
+    const checkSession = captureSession();
     let requestKey = keyProvider();
     let resolveReady, rejectReady;
     const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
@@ -93,13 +110,21 @@
     (async () => {
       let res;
       try {
+        checkSession();
         res = await fetch(path, { headers: Object.assign({ Accept: 'text/event-stream' }, authHeaders()), signal: controller.signal });
-        if (res.status === 401 && await recoverUnauthorized(requestKey, { signal: controller.signal })) {
+        checkSession();
+        if (res.status === 401) {
+          let recovered;
+          try { recovered = await recoverUnauthorized(requestKey, { signal: controller.signal }); }
+          finally { checkSession(); }
           if (closed) return;
-          requestKey = keyProvider();
-          res = await fetch(path, { headers: Object.assign({ Accept: 'text/event-stream' }, authHeaders()), signal: controller.signal });
+          if (recovered) {
+            requestKey = keyProvider();
+            res = await fetch(path, { headers: Object.assign({ Accept: 'text/event-stream' }, authHeaders()), signal: controller.signal });
+            checkSession();
+          }
         }
-      } catch (e) { clearTimeout(openTimer); fail(new ApiError(0, 'network', 'Stream connection failed')); return; }
+      } catch (e) { clearTimeout(openTimer); controller.abort(); fail(e.code === 'session_changed' ? e : new ApiError(0, 'network', 'Stream connection failed')); return; }
       clearTimeout(openTimer);
       if (closed) return;
       if (res.status === 401) { notifyUnauthorized(requestKey); fail(new ApiError(401, 'unauthorized', 'Unauthorized')); return; }
@@ -116,6 +141,7 @@
       let buffer = '';
       let event = 'message', id = null, data = [];
       const dispatch = () => {
+        checkSession();
         if (data.length) {
           const payload = data.join('\n');
           if (event === 'record') { try { handlers.onRecord && handlers.onRecord(JSON.parse(payload), id); } catch (e) { /* malformed line: ignore */ } }
@@ -126,6 +152,7 @@
       try {
         for (;;) {
           const { value, done } = await reader.read();
+          checkSession();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
           let idx;
@@ -142,6 +169,7 @@
           }
         }
       } catch (e) { /* aborted or network drop */ }
+      finally { controller.abort(); reader.releaseLock(); }
       if (!closed) handlers.onClose && handlers.onClose(null);
     })();
     return { ready, close() { closed = true; clearTimeout(openTimer); rejectReady(new ApiError(0, 'aborted', 'Stream closed')); controller.abort(); } };
@@ -159,9 +187,10 @@
     ApiError,
     pauseUnauthorized() { quietUnauthorized++; let resumed = false; return () => { if (!resumed) { resumed = true; quietUnauthorized--; } }; },
     setKeyProvider(fn) { keyProvider = fn; },
+    setSessionGuardProvider(fn) { sessionGuardProvider = fn; },
     setAuthRecovery(fn) { authRecovery = fn; },
     onUnauthorized(fn) { unauthorizedListeners.push(fn); },
-    request, stream, enqueue,
+    captureSession, request, stream, enqueue,
     get: (path, opts) => request('GET', path, undefined, opts)
   };
 })();

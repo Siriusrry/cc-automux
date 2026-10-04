@@ -33,18 +33,13 @@
   function emit() { listeners.forEach(fn => fn(!!key())); }
 
   async function login(candidate, remember) {
-    const previous = memoryKey;
-    memoryKey = candidate;
-    try {
-      const status = await CCAM.api.get('/api/v1/status', { silentUnauthorized: true });
-      persist(candidate, remember);
-      epoch++; candidates = []; saveCandidates();
-      emit();
-      return status;
-    } catch (e) {
-      memoryKey = previous;
-      throw e;
-    }
+    const checkSession = CCAM.api.captureSession();
+    const status = await CCAM.api.get('/api/v1/status', { silentUnauthorized: true, headers: { Authorization: 'Bearer ' + candidate } });
+    checkSession();
+    persist(candidate, remember);
+    epoch++; candidates = []; recovering = null; saveCandidates();
+    emit();
+    return status;
   }
   function logout() { forget(); emit(); }
   function sessionGuard() { const current = epoch; return () => epoch === current; }
@@ -74,16 +69,19 @@
   }
   async function recover(rejectedKey, options) {
     if (recovering) return recovering;
-    const startedEpoch = epoch;
+    const checkSession = CCAM.api.captureSession();
     const pending = (async () => {
       let unavailable;
       for (const candidate of candidates.slice().reverse()) {
         if (candidate === rejectedKey) continue;
+        checkSession();
         try {
           await CCAM.api.get('/api/v1/status', { ...options, timeoutMs: options?.timeoutMs ?? 500, silentUnauthorized: true, headers: { Authorization: 'Bearer ' + candidate } });
-          if (startedEpoch !== epoch || options?.signal?.aborted) return false;
+          checkSession();
+          if (options?.signal?.aborted) return false;
           adopt(candidate); return true;
         } catch (error) {
+          checkSession();
           if (error.status !== 401) unavailable = error;
         }
       }
@@ -97,5 +95,6 @@
 
   CCAM.auth = { key, isRemembered, login, logout, adopt, retain, sessionGuard, onChange(fn) { listeners.push(fn); } };
   CCAM.api.setKeyProvider(key);
+  CCAM.api.setSessionGuardProvider(sessionGuard);
   CCAM.api.setAuthRecovery(recover);
 })();
