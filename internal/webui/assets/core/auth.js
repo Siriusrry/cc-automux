@@ -47,6 +47,7 @@
     }
   }
   function logout() { forget(); emit(); }
+  function sessionGuard() { const current = epoch; return () => epoch === current; }
 
   function saveCandidates() {
     try {
@@ -94,7 +95,7 @@
     try { return await pending; } finally { if (recovering === pending) recovering = null; }
   }
 
-  CCAM.auth = { key, isRemembered, login, logout, adopt, retain, onChange(fn) { listeners.push(fn); } };
+  CCAM.auth = { key, isRemembered, login, logout, adopt, retain, sessionGuard, onChange(fn) { listeners.push(fn); } };
   CCAM.api.setKeyProvider(key);
   CCAM.api.setAuthRecovery(recover);
 })();

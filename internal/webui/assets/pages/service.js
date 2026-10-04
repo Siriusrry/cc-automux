@@ -132,20 +132,25 @@
             if (!ok || disposed || saving) return;
           }
           saving = true; listenerCard.inert = true; keysCard.inert = true; bar.busy(true);
+          const sameSession = CCAM.auth.sessionGuard();
           store.stopPolling();
           const resumeUnauthorized = api.pauseUnauthorized();
           let rejectRotation;
           try {
             let redirected = false;
             await store.saveConfig(config, body, async (result, applied, task) => {
+              if (!sameSession()) return;
               if (result.restart_required) {
                 // Keep subsequent saves queued until the replacement is ready.
-                redirected = await waitForRestart({ config: applied, oldKey: CCAM.auth.key() }, task);
+                redirected = await waitForRestart({ config: applied, oldKey: CCAM.auth.key(), sameSession }, task);
               } else {
                 CCAM.auth.adopt(applied.auth.management_key); toast('Service settings saved');
               }
             }, applied => ({
-              onSubmit: () => { rejectRotation = CCAM.auth.retain(applied.auth.management_key); },
+              onSubmit: () => {
+                if (!sameSession()) throw new api.ApiError(401, 'session_changed', 'The sign-in session changed before submission.');
+                rejectRotation = CCAM.auth.retain(applied.auth.management_key);
+              },
               onRejected: () => rejectRotation?.(),
               onDisconnect: async options => {
                 const target = new URL('http://' + applied.service.listen_addr);
@@ -153,10 +158,11 @@
                 return null;
               }
             }));
-            if (redirected) return;
+            if (redirected || !sameSession()) return;
             if (!disposed) bar.busy(false);
             store.invalidate(); store.startPolling(); if (!disposed) { CCAM.router.clearGuard(); load(); }
           } catch (e) {
+            if (!sameSession()) return;
             store.startPolling();
             if (disposed) { toast(e.detail || e.message, 'bad'); return; }
             bar.busy(false);
@@ -172,8 +178,10 @@
           toast(changedOrigin ? 'Restarting CC AutoMux at ' + target.origin + '. Sign in again at the new address.' : 'Restarting CC AutoMux…', 'warn');
           for (let attempt = 0; attempt < 3; attempt++) {
             await task.wait((attempt + 1) * 100);
+            if (!plan.sameSession()) return false;
             if (changedOrigin && await probeConsole(target.origin, task.options())) {
               task.check();
+              if (!plan.sameSession()) return false;
               CCAM.auth.logout();
               location.replace(target.href);
               return true;
@@ -186,6 +194,7 @@
                 st = await api.get('/api/v1/status', { ...task.options(), silentUnauthorized: true, headers: { Authorization: 'Bearer ' + key } });
                 task.check();
               } catch (e) { task.check(); continue; }
+              if (!plan.sameSession()) return false;
               if (st.restart && st.restart.last_error && !st.restart_in_progress) {
                 CCAM.auth.adopt(key);
                 throw new Error('Restart failed. The previous configuration is still active: ' + st.restart.last_error);
